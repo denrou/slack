@@ -26,8 +26,7 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
 
   Do not route around the denial by pushing a branch and opening a pull request.
 
-- **Offer a release after every landed change** once the release workflow exists (PLAN.md, step 8): bump `version` in `Cargo.toml`, `cargo build` to refresh `Cargo.lock`, commit `chore: release X.Y.Z`, have the user push, then `gh release create vX.Y.Z --target main`.
-- **PLAN.md is the agreed plan.** Keep its step list in step with reality; delete the file once the steps are done and this file plus the README carry everything.
+- **Offer a release after every landed change.** A release is: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
 - **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. **Never run `send` or `read` from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
 ## Architecture
@@ -62,6 +61,23 @@ An error must never look like "nothing to do", above all for `--count` in a stat
 - Never print, log or serialise a token (`xoxc`, `xoxd`, the Cookie header), in output, errors or `--json`.
 - Only `https://*.slack.com` origins, never `app.slack.com`, may be paired with the session cookie: `capture::is_slack_workspace_url` is the gate, and it is load-bearing.
 - A profile path from the environment is user input: a directory without our sentinel is never reused and never deleted.
+
+## Decisions (2026-10-19)
+
+Written down because none of them can be read from the code.
+
+- **Blocking I/O, no async runtime.** A handful of sequential HTTP calls, one WebSocket for the capture, a `std::thread::scope` for the lookups. Switching later would cost `api.rs` and `auth/cdp.rs`, not the pure modules.
+- **Credentials in `workspaces.json` (mode 0600), not the Keychain.** The footer polls `slack --count` from a launchd job, and the Keychain prompts whenever the binary changes, which is every rebuild. The browser profile next to it is a plaintext credential store anyway. A keychain backend can come later as an opt-in.
+- **Mark-as-read is explicit** (`slack read`), never a side effect of the view, so the footer count keeps agreeing with the Slack app.
+- **Slack's own mute list is honoured; there is no local one.**
+- **Binary name `slack`**, kept because it is fast to type. Slack's platform CLI (`brew install slack-cli`) also installs a `slack` binary; it is not on this machine.
+- **Public repo, MIT**, like gh-prs.
+
+Kept from slackcli: the browser-session credentials and their capture (`auth/`). Deliberately not ported: app tokens, `parse-curl`, drafts, scheduling, canvases, emoji, files, saved items, search, user groups, the update checker, log files, Windows. If one becomes needed, it is a feature, not a port.
+
+## Not planned yet
+
+A TUI to move through and answer the messages (`ratatui` on top of the same view model, which is why `view.rs` keeps the model apart from the rendering), numbered replies (`slack send 3 "ok"` answering item 3 of the last view), `--workspace`, Linux browser paths, a `watch` mode, a Homebrew tap once the tool has settled.
 
 ## Reference implementation
 

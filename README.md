@@ -2,15 +2,21 @@
 
 Slack from the terminal, in the spirit of [gh-prs](https://github.com/denrou/gh-prs): `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
-Early days: every command below works, a release workflow is the next step ([PLAN.md](PLAN.md) has the plan).
+Early days, but every command below works.
 
 ## Install
 
+Apple Silicon or Linux x86_64: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`.
+
+From source, with Rust 1.85+:
+
 ```bash
-cargo install --git https://github.com/denrou/slack
+cargo install --git https://github.com/denrou/slack --tag v0.1.0
 ```
 
-Needs Rust 1.85+ and Google Chrome (Chromium, Edge or Brave also work; `$SLACK_BROWSER` points at an executable the lookup does not know).
+`--tag` pins a release; without it you get the tip of `main`.
+
+Login needs Google Chrome (Chromium, Edge or Brave also work; `$SLACK_BROWSER` points at an executable the lookup does not know).
 
 ## Quickstart
 
@@ -61,6 +67,16 @@ Security notes, the short version:
 ## Files
 
 `$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
+
+## Releasing
+
+Bump `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, commit, then push a matching annotated tag:
+
+```bash
+git tag -a v0.2.0 -m "v0.2.0" && git push origin main v0.2.0
+```
+
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes them as a GitHub Release with generated notes and a `checksums.txt`.
 
 ## License
 
