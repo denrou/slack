@@ -70,14 +70,25 @@ impl ThreadsView {
 
 impl View {
     /// The conversations whose messages were shown, with the newest
-    /// message each had: what `slack read` may mark as read.
-    pub fn shown(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.direct_messages
+    /// message each had and whether it was a DM or a mention: what
+    /// `slack read` may mark as read.
+    pub fn shown(&self) -> impl Iterator<Item = (&str, &str, bool)> {
+        let attention = self
+            .direct_messages
             .iter()
             .chain(&self.mentions)
-            .chain(self.channels.iter().filter(|_| self.all))
-            .filter(|entry| entry.messages.is_some())
-            .filter_map(|entry| Some((entry.id.as_str(), entry.latest.as_deref()?)))
+            .map(|entry| (entry, true));
+        let channels = self
+            .channels
+            .iter()
+            .filter(|_| self.all)
+            .map(|entry| (entry, false));
+        attention
+            .chain(channels)
+            .filter(|(entry, _)| entry.messages.is_some())
+            .filter_map(|(entry, attention)| {
+                Some((entry.id.as_str(), entry.latest.as_deref()?, attention))
+            })
     }
 }
 
@@ -640,10 +651,13 @@ mod tests {
         assert!(lines[7].ends_with("  U2: @U7 late again"), "{}", lines[7]);
         assert!(lines[8].ends_with("earlier unread messages not shown"));
         assert_eq!(lines.len(), 9);
-        let shown: Vec<(&str, &str)> = view.shown().collect();
+        let shown: Vec<(&str, &str, bool)> = view.shown().collect();
         assert_eq!(
             shown,
-            [("D1", "1760899000.000200"), ("C1", "1760899500.000300")]
+            [
+                ("D1", "1760899000.000200", true),
+                ("C1", "1760899500.000300", true)
+            ]
         );
     }
 

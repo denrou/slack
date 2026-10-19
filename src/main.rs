@@ -11,8 +11,11 @@ mod mrkdwn;
 mod names;
 mod par;
 mod paths;
+mod read;
+mod send;
 mod store;
 mod style;
+mod target;
 mod threads;
 mod view;
 
@@ -53,10 +56,13 @@ enum Command {
         #[arg(long)]
         thread: Option<String>,
     },
-    /// Move the read cursor past what the last view showed
+    /// Mark as read what the last view showed (DMs and mentions)
     Read {
-        /// Only these conversations; every shown one when omitted
+        /// Only these conversations
         targets: Vec<String>,
+        /// Also the channels the last `slack -a` listed
+        #[arg(short, long)]
+        all: bool,
     },
     /// Sign in through a browser window and save the session
     Login {
@@ -90,7 +96,7 @@ fn main() -> ExitCode {
             text,
             thread,
         }) => commands::send(&target, text.as_deref(), thread.as_deref()),
-        Some(Command::Read { targets }) => commands::read(&targets),
+        Some(Command::Read { targets, all }) => commands::read(&targets, all),
         Some(Command::Login { headless, timeout }) => commands::login(headless, timeout),
         Some(Command::Logout {
             keep_browser_session,

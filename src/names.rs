@@ -168,6 +168,120 @@ impl Names {
         Ok(())
     }
 
+    /// The id of channel `name` (no sigil): from the cache, else after a
+    /// walk of `conversations.list`, which fills the cache for next time.
+    pub fn channel_id_by_name(
+        &mut self,
+        client: &Client,
+        name: &str,
+    ) -> Result<Option<String>, api::Error> {
+        if let Some(id) = self.find_channel(name) {
+            return Ok(Some(id));
+        }
+        self.walk(
+            client,
+            "conversations.list",
+            &[
+                ("types", "public_channel,private_channel"),
+                ("exclude_archived", "true"),
+            ],
+            Names::add_channels_page,
+        )?;
+        Ok(self.find_channel(name))
+    }
+
+    /// The id of the person called `name` (handle or display name, no
+    /// sigil): from the cache, else after a walk of `users.list`.
+    pub fn user_id_by_name(
+        &mut self,
+        client: &Client,
+        name: &str,
+    ) -> Result<Option<String>, api::Error> {
+        if let Some(id) = self.find_user(name) {
+            return Ok(Some(id));
+        }
+        self.walk(client, "users.list", &[], Names::add_users_page)?;
+        Ok(self.find_user(name))
+    }
+
+    fn find_channel(&self, name: &str) -> Option<String> {
+        self.channels
+            .iter()
+            .find(|(_, c)| !c.is_im && !c.is_mpim && c.name.eq_ignore_ascii_case(name))
+            .map(|(id, _)| id.clone())
+    }
+
+    fn find_user(&self, name: &str) -> Option<String> {
+        let exact = |field: &str| field.eq_ignore_ascii_case(name);
+        self.users
+            .iter()
+            .find(|(_, u)| exact(&u.name) || exact(&u.display))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Page through a directory method, a thousand entries at a time.
+    fn walk(
+        &mut self,
+        client: &Client,
+        method: &str,
+        params: &[(&str, &str)],
+        add_page: fn(&mut Names, &Value) -> Option<String>,
+    ) -> Result<(), api::Error> {
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut page_params = params.to_vec();
+            page_params.push(("limit", "1000"));
+            if let Some(cursor) = &cursor {
+                page_params.push(("cursor", cursor));
+            }
+            let body = client.call(method, &page_params)?;
+            cursor = add_page(self, &body);
+            if cursor.is_none() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Add one `conversations.list` page; the next cursor, if any.
+    fn add_channels_page(&mut self, body: &Value) -> Option<String> {
+        for raw in body
+            .get("channels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(id), Some(channel)) =
+                (raw.get("id").and_then(Value::as_str), channel_from_raw(raw))
+            {
+                self.channels.insert(id.to_string(), channel);
+                self.dirty = true;
+            }
+        }
+        next_cursor(body)
+    }
+
+    /// Add one `users.list` page, deactivated accounts left out; the next
+    /// cursor, if any.
+    fn add_users_page(&mut self, body: &Value) -> Option<String> {
+        for raw in body
+            .get("members")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if raw.get("deleted").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            if let (Some(id), Some(user)) =
+                (raw.get("id").and_then(Value::as_str), user_from_raw(raw))
+            {
+                self.users.insert(id.to_string(), user);
+                self.dirty = true;
+            }
+        }
+        next_cursor(body)
+    }
+
     fn missing<I>(&self, ids: I, known: impl Fn(&Names, &str) -> bool) -> Vec<String>
     where
         I: IntoIterator<Item = String>,
@@ -181,7 +295,10 @@ impl Names {
 }
 
 fn user_from(body: &Value) -> Option<User> {
-    let user = body.get("user")?;
+    user_from_raw(body.get("user")?)
+}
+
+fn user_from_raw(user: &Value) -> Option<User> {
     let name = non_empty(user.get("name"))?.to_string();
     let display = non_empty(user.pointer("/profile/display_name"))
         .or_else(|| non_empty(user.get("real_name")))
@@ -194,12 +311,19 @@ fn user_from(body: &Value) -> Option<User> {
     })
 }
 
+fn next_cursor(body: &Value) -> Option<String> {
+    non_empty(body.pointer("/response_metadata/next_cursor")).map(str::to_string)
+}
+
 fn non_empty(value: Option<&Value>) -> Option<&str> {
     value.and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 fn channel_from(body: &Value) -> Option<Channel> {
-    let channel = body.get("channel")?;
+    channel_from_raw(body.get("channel")?)
+}
+
+fn channel_from_raw(channel: &Value) -> Option<Channel> {
     let flag = |name: &str| channel.get(name).and_then(Value::as_bool).unwrap_or(false);
     Some(Channel {
         name: channel
@@ -290,6 +414,31 @@ mod tests {
         assert_eq!(names.user_label("U9"), "U9");
         assert_eq!(names.channel_name("D1"), None);
         assert_eq!(names.channel_name("C1").as_deref(), Some("general"));
+    }
+
+    #[test]
+    fn directory_pages_fill_the_cache_and_hand_back_the_cursor() {
+        let mut names = Names::default();
+        let page = json!({"channels": [
+            {"id": "C1", "name": "general", "is_channel": true},
+            {"id": "C2", "name": "SRE-Alerts", "is_private": true},
+            {"no_id": true}
+        ], "response_metadata": {"next_cursor": "abc"}});
+        assert_eq!(names.add_channels_page(&page).as_deref(), Some("abc"));
+        let page = json!({"channels": [], "response_metadata": {"next_cursor": ""}});
+        assert_eq!(names.add_channels_page(&page), None);
+        assert_eq!(names.find_channel("sre-alerts").as_deref(), Some("C2"));
+        assert_eq!(names.find_channel("nope"), None);
+
+        let page = json!({"members": [
+            {"id": "U1", "name": "jdoe", "profile": {"display_name": "Jane"}},
+            {"id": "U2", "name": "gone", "deleted": true}
+        ]});
+        assert_eq!(names.add_users_page(&page), None);
+        assert_eq!(names.find_user("jane").as_deref(), Some("U1"));
+        assert_eq!(names.find_user("JDOE").as_deref(), Some("U1"));
+        assert_eq!(names.find_user("gone"), None);
+        assert!(names.dirty);
     }
 
     #[test]

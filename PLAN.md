@@ -274,7 +274,7 @@ Each step is a commit on `main` that leaves the tool usable, as in gh-prs.
 5. **View** (done 2026-10-19) — `names.rs`, `history.rs`, `mrkdwn.rs`, `view.rs`, the
    default view and `-a`, `--json`, `--no-color`, `last-view.json`.
 6. **Threads** (done 2026-10-19) — `threads.rs`, section 3.
-7. **Send and read** — `send.rs`, `read.rs`.
+7. **Send and read** (done 2026-10-19) — `send.rs`, `read.rs`.
 8. **Release** — tag-driven GitHub Release with a macOS arm64 binary
    (`cargo build --release`, strip), `cargo install --git` documented;
    a Homebrew tap (`denrou/homebrew-slack`) only once the tool has settled.

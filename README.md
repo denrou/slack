@@ -2,7 +2,7 @@
 
 Slack from the terminal, in the spirit of [gh-prs](https://github.com/denrou/gh-prs): `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
-Early days. The view, `--count`, `login`, `logout` and `whoami` work; `send` and `read` come next ([PLAN.md](PLAN.md) has the plan and the steps).
+Early days: every command below works, a release workflow is the next step ([PLAN.md](PLAN.md) has the plan).
 
 ## Install
 
@@ -21,13 +21,25 @@ slack           # what needs you: DMs, mentions, unread threads
 slack -a        # ...plus every other channel with unreads
 slack --count   # the same, as one number for a status bar
 slack --json    # the same data, for scripts
+
+slack send '#sre-alerts' "on it"                    # post to a channel
+slack send @jane "merci !"                          # ...or a DM
+slack send <permalink> "answering here"             # ...or a thread
+slack send @jane < note.md                          # text from stdin
+slack read                                          # mark as read the DMs and mentions the last view showed
+slack read '#sre-alerts' @jane                      # ...only these
+slack read --all                                    # ...also the channels the last `slack -a` listed
 ```
 
 ## The view
 
 `slack` shows what needs you, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Channel chatter without a mention is counted but hidden; a line on stderr says how many channels were held back, and `slack -a` lists them with their messages.
 
-Reading in the terminal never moves Slack's read cursor: the view is read-only, `slack read` (coming) marks as read what the last view showed. Names are cached in `~/.cache/slack/names.json`, safe to delete.
+Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read the DMs and mentions the last view showed (no more: a message that arrived since stays unread). The channels a `slack -a` listed are a wider net, so they take `slack read --all` or their name. Names are cached in `~/.cache/slack/names.json`, safe to delete.
+
+## Sending
+
+A target is `#channel`, `@person` (handle or display name), a conversation id, or a Slack permalink; a permalink means "answer in that message's thread", and `--thread <ts|permalink>` does the same for a channel target. The text is the argument, or stdin when there is none, and is sent as Slack markup (`*bold*`, `<@U123>`). The command prints where the message landed and its permalink. Quote `#channel` in zsh, or the shell reads it as a comment.
 
 ## How login works
 

@@ -28,7 +28,7 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
 
 - **Offer a release after every landed change** once the release workflow exists (PLAN.md, step 8): bump `version` in `Cargo.toml`, `cargo build` to refresh `Cargo.lock`, commit `chore: release X.Y.Z`, have the user push, then `gh release create vX.Y.Z --target main`.
 - **PLAN.md is the agreed plan.** Keep its step list in step with reality; delete the file once the steps are done and this file plus the README carry everything.
-- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. Writes (`send`, `read`) are the user's to run.
+- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. **Never run `send` or `read` from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
 ## Architecture
 
@@ -49,6 +49,8 @@ One crate, binary `slack`, blocking I/O throughout (`ureq`, `tungstenite`); no a
 - `names.rs`: the id-to-name cache (`~/.cache/slack/names.json`), filled per id on a miss through `users.info` and `conversations.info`, a few lookups at a time.
 - `mrkdwn.rs`: Slack markup to terminal text (mentions, channel links, URLs with a label that only repeats the URL dropped, entities, bold/italic/strike/code when colors are on). Pure, with the parsing rules pinned by tests.
 - `lastview.rs`: `~/.cache/slack/last-view.json`, the conversations the last view showed with the newest message each had.
+- `target.rs`: what a conversation argument means (`#channel`, `@person`, an id, a permalink); the name walks (`conversations.list`, `users.list`) live in `names.rs` and fill the cache.
+- `send.rs` and `read.rs`: the two commands that write to Slack (`chat.postMessage`, `conversations.mark`). `read` only ever marks what `lastview` recorded.
 - `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups.
 
 ### Error direction

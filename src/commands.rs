@@ -14,7 +14,7 @@ use crate::auth::{capture, cdp};
 use crate::names::Names;
 use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
-use crate::{counts, lastview, view};
+use crate::{counts, lastview, read, send, view};
 
 pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
@@ -61,12 +61,22 @@ pub fn count(all: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn send(_target: &str, _text: Option<&str>, _thread: Option<&str>) -> Result<()> {
-    bail!("`slack send` is not built yet (PLAN.md, step 7)")
+pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let mut names = Names::load();
+    let result = send::run(&workspace.client(), &mut names, target, text, thread);
+    names.save();
+    result
 }
 
-pub fn read(_targets: &[String]) -> Result<()> {
-    bail!("`slack read` is not built yet (PLAN.md, step 7)")
+pub fn read(targets: &[String], all: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (team_id, workspace) = store.default_workspace()?;
+    let mut names = Names::load();
+    let result = read::run(&workspace.client(), &mut names, team_id, targets, all);
+    names.save();
+    result
 }
 
 pub fn whoami(json: bool) -> Result<()> {
