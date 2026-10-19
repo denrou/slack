@@ -1,0 +1,53 @@
+{
+  "ok": true,
+  "channels": [
+    {
+      "id": "C01GENERAL",
+      "last_read": "1760880000.000100",
+      "latest": "1760880000.000100",
+      "has_unreads": false,
+      "mention_count": 0
+    },
+    {
+      "id": "C02ALERTS",
+      "last_read": "1760870000.000200",
+      "latest": "1760884000.000300",
+      "has_unreads": true,
+      "mention_count": 1
+    },
+    {
+      "id": "C03RANDOM",
+      "last_read": "1760860000.000400",
+      "latest": "1760883000.000500",
+      "has_unreads": true,
+      "mention_count": 0
+    },
+    { "id": "C04QUIET", "has_unreads": false, "mention_count": 0 }
+  ],
+  "mpims": [
+    {
+      "id": "G05GROUP",
+      "last_read": "1760850000.000600",
+      "latest": "1760850000.000600",
+      "has_unreads": false,
+      "mention_count": 0
+    }
+  ],
+  "ims": [
+    {
+      "id": "D06JANE",
+      "last_read": "1760840000.000700",
+      "latest": "1760885000.000800",
+      "has_unreads": true,
+      "mention_count": 2
+    },
+    {
+      "id": "D07BOB",
+      "last_read": "1760830000.000900",
+      "latest": "1760830000.000900",
+      "has_unreads": false,
+      "mention_count": 0
+    }
+  ],
+  "threads": { "has_unreads": true, "mention_count": 0 }
+}
