@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal, in the spirit of [gh-prs](https://github.com/denrou/gh-prs): `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack read` marks as read. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
