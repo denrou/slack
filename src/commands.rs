@@ -2,6 +2,7 @@
 //! command, each returning an error the main function prints.
 
 use std::collections::HashSet;
+use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -10,11 +11,39 @@ use serde_json::json;
 use crate::api::{self, Client, Credentials, Identity};
 use crate::auth::chrome::{self, ClearOutcome};
 use crate::auth::{capture, cdp};
-use crate::counts;
+use crate::names::Names;
 use crate::store::{Workspace, Workspaces};
+use crate::style::Style;
+use crate::{counts, lastview, view};
 
-pub fn view(_all: bool, _json: bool, _no_color: bool) -> Result<()> {
-    bail!("the unread view is not built yet (PLAN.md, step 5); `slack --count` works")
+pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (team_id, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let counts = counts::fetch(&client)?;
+    let mut names = Names::load();
+    let view = view::build(&client, &counts, &mut names, all)?;
+    names.save();
+    if let Err(err) = lastview::remember(team_id, &view) {
+        eprintln!("warning: could not record the view for `slack read`: {err:#}");
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+        return Ok(());
+    }
+    let style = Style::detect(no_color);
+    let stdout = io::stdout();
+    match view::render(
+        &view,
+        &names,
+        &style,
+        workspace.user_id.as_deref(),
+        &mut stdout.lock(),
+    ) {
+        // `slack | head` closes the pipe early; that is not an error.
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => Ok(other?),
+    }
 }
 
 pub fn count(all: bool) -> Result<()> {

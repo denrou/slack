@@ -15,6 +15,11 @@ pub fn config_dir() -> Result<PathBuf> {
     base_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// Caches, safe to delete: names and the last view.
+pub fn cache_dir() -> Result<PathBuf> {
+    base_dir("XDG_CACHE_HOME", ".cache")
+}
+
 fn base_dir(var: &str, fallback: &str) -> Result<PathBuf> {
     let base = match env::var_os(var).filter(|value| !value.is_empty()) {
         Some(value) => PathBuf::from(value),

@@ -2,7 +2,7 @@
 
 Slack from the terminal, in the spirit of [gh-prs](https://github.com/denrou/gh-prs): `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
-Early days. Today `login`, `logout`, `whoami` and `--count` work; the unread view, `send` and `read` come next ([PLAN.md](PLAN.md) has the plan and the steps).
+Early days. The view, `--count`, `login`, `logout` and `whoami` work; `send` and `read` come next ([PLAN.md](PLAN.md) has the plan and the steps).
 
 ## Install
 
@@ -17,9 +17,17 @@ Needs Rust 1.85+ and Google Chrome (Chromium, Edge or Brave also work; `$SLACK_B
 ```bash
 slack login     # a Chrome window opens; sign in to Slack once
 slack whoami    # which workspace and user the CLI acts as, verified
-slack --count   # conversations that need you, as one number
-slack           # soon: the unread DMs, mentions and threads
+slack           # what needs you: DMs, mentions, unread threads
+slack -a        # ...plus every other channel with unreads
+slack --count   # the same, as one number for a status bar
+slack --json    # the same data, for scripts
 ```
+
+## The view
+
+`slack` shows what needs you, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Channel chatter without a mention is counted but hidden; a line on stderr says how many channels were held back, and `slack -a` lists them with their messages.
+
+Reading in the terminal never moves Slack's read cursor: the view is read-only, `slack read` (coming) marks as read what the last view showed. Names are cached in `~/.cache/slack/names.json`, safe to delete.
 
 ## How login works
 

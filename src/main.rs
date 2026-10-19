@@ -5,8 +5,16 @@ mod api;
 mod auth;
 mod commands;
 mod counts;
+mod history;
+mod lastview;
+mod mrkdwn;
+mod names;
+mod par;
 mod paths;
 mod store;
+mod style;
+mod threads;
+mod view;
 
 use std::process::ExitCode;
 

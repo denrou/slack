@@ -257,23 +257,23 @@ binary small, the build fast, and the code readable in one pass.
 
 Each step is a commit on `main` that leaves the tool usable, as in gh-prs.
 
-1. **Skeleton** — `cargo init`, clap with the commands above as stubs,
+1. **Skeleton** (done 2026-10-19) — `cargo init`, clap with the commands above as stubs,
    `--version`, MIT licence, `.gitignore`, `README.md` with the four-line
    quickstart, `CLAUDE.md` with the personal-project workflow (commit on
    main, push is the user's move, offer a release). Repo `denrou/slack`,
    public, created with `gh repo create`; the first push is yours.
-2. **Transport + store + whoami** — `api.rs`, `auth/store.rs`,
+2. **Transport + store + whoami** (done 2026-10-19) — `api.rs`, `auth/store.rs`,
    `slack whoami` against credentials pasted by hand into the store (so the
    transport is proven before the browser work starts). `auth.test` is the
    check.
-3. **Login** — `chrome.rs`, `cdp.rs`, `capture.rs`, `slack login`,
+3. **Login** (done 2026-10-19) — `chrome.rs`, `cdp.rs`, `capture.rs`, `slack login`,
    `slack logout`. Extractors fixture-tested first. Compared against
    slackcli's capture on the same profile semantics (separate profile dir).
-4. **Count** — `counts.rs` and `slack --count`. Fixture from a real
+4. **Count** (done 2026-10-19) — `counts.rs` and `slack --count`. Fixture from a real
    `client.counts`. This is the first thing wired into the status line.
-5. **View** — `names.rs`, `history.rs`, `mrkdwn.rs`, `view.rs`, the
+5. **View** (done 2026-10-19) — `names.rs`, `history.rs`, `mrkdwn.rs`, `view.rs`, the
    default view and `-a`, `--json`, `--no-color`, `last-view.json`.
-6. **Threads** — `threads.rs`, section 3.
+6. **Threads** (done 2026-10-19) — `threads.rs`, section 3.
 7. **Send and read** — `send.rs`, `read.rs`.
 8. **Release** — tag-driven GitHub Release with a macOS arm64 binary
    (`cargo build --release`, strip), `cargo install --git` documented;

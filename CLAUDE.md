@@ -28,7 +28,7 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
 
 - **Offer a release after every landed change** once the release workflow exists (PLAN.md, step 8): bump `version` in `Cargo.toml`, `cargo build` to refresh `Cargo.lock`, commit `chore: release X.Y.Z`, have the user push, then `gh release create vX.Y.Z --target main`.
 - **PLAN.md is the agreed plan.** Keep its step list in step with reality; delete the file once the steps are done and this file plus the README carry everything.
-- **Live checks are the user's.** `slack login` needs a human in the Chrome window, and every other command needs the saved session, so the loop is: build, unit-test, hand over the command to run, read the result.
+- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. Writes (`send`, `read`) are the user's to run.
 
 ## Architecture
 
@@ -43,6 +43,13 @@ One crate, binary `slack`, blocking I/O throughout (`ureq`, `tungstenite`); no a
 - `auth/cdp.rs`: a hand-rolled CDP session over one WebSocket: numbered commands, buffered events, read timeouts on the socket so a poll never blocks.
 - `auth/capture.rs`: the capture policy and its pure extractors (`xoxc` from a request body in the three encodings Slack uses, the `d` cookie, the workspace list in `localConfig_v2`, the origin gate). Ported from slackcli's `browser-auth.ts`; the tests pin the parsing rules.
 - `counts.rs`: `client.counts` into `Conversation`s and the `Threads` block, with the attention rule (DMs with unreads, channels with a mention, plus one for threads).
+- `view.rs`: the model (`View`: direct messages, mentions, channels, threads) built from the counts, then rendered as text or `--json`. The model is kept apart from the rendering so a TUI can sit on the same data. `shown()` is what `slack read` may mark.
+- `history.rs`: the unread part of a conversation (`conversations.history` from `last_read`, newest page, oldest first in the output, joins and leaves dropped).
+- `threads.rs`: `subscriptions.thread.getView`, paginated on `current_ts`, unread threads first; a read thread ends the walk, a shape change degrades to the summary line with a warning.
+- `names.rs`: the id-to-name cache (`~/.cache/slack/names.json`), filled per id on a miss through `users.info` and `conversations.info`, a few lookups at a time.
+- `mrkdwn.rs`: Slack markup to terminal text (mentions, channel links, URLs with a label that only repeats the URL dropped, entities, bold/italic/strike/code when colors are on). Pure, with the parsing rules pinned by tests.
+- `lastview.rs`: `~/.cache/slack/last-view.json`, the conversations the last view showed with the newest message each had.
+- `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups.
 
 ### Error direction
 
@@ -60,4 +67,4 @@ An error must never look like "nothing to do", above all for `--count` in a stat
 
 ## Testing
 
-Pure modules are unit-tested in-module. `tests/fixtures/` holds response shapes with ids and names made up: `client_counts.json` was written from slackcli's field list and should be replaced by a real response (redact ids and names, there are no tokens in it) after the first live run.
+Pure modules are unit-tested in-module. `tests/fixtures/` holds response shapes with ids and names made up: `client_counts.json` was written from slackcli's field list and checked field for field against a live response on 2026-10-19 (the live one also carries `updated`, `history_invalid`, `channel_badges`, `activity_v2`, `alerts`, `saved`, none of which is read).
