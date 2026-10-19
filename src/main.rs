@@ -11,6 +11,7 @@ mod mrkdwn;
 mod names;
 mod par;
 mod paths;
+mod prefs;
 mod read;
 mod send;
 mod store;

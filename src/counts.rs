@@ -4,10 +4,13 @@
 //! shape is read defensively: a shape change must surface as an error,
 //! never as "all caught up".
 
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::api::{self, Client};
+use crate::prefs;
 
 const METHOD: &str = "client.counts";
 
@@ -31,6 +34,8 @@ pub struct Conversation {
     pub last_read: Option<String>,
     /// The newest message; `conversations.mark` here reads everything.
     pub latest: Option<String>,
+    /// Muted in Slack: the app badges it for mentions only.
+    pub muted: bool,
 }
 
 impl Conversation {
@@ -39,12 +44,20 @@ impl Conversation {
     }
 
     /// Someone wrote to you (a DM or group DM with unreads), or named you
-    /// in a channel. Channel chatter without a mention does not count.
+    /// in a channel. Channel chatter without a mention does not count, and
+    /// neither does a DM you muted; a mention in a muted channel does, as
+    /// in the app.
     pub fn needs_attention(&self) -> bool {
         match self.kind {
             Kind::Channel => self.mention_count > 0,
-            Kind::Im | Kind::Mpim => self.is_unread(),
+            Kind::Im | Kind::Mpim => self.is_unread() && !self.muted,
         }
+    }
+
+    /// Unread the way the app badges it: a muted conversation only counts
+    /// for its mentions.
+    pub fn counts_as_unread(&self) -> bool {
+        self.is_unread() && (!self.muted || self.needs_attention())
     }
 }
 
@@ -92,8 +105,23 @@ impl Counts {
         })
     }
 
+    /// Flag the conversations the user muted in Slack.
+    pub fn apply_mutes(&mut self, muted: &HashSet<String>) {
+        for conversation in &mut self.conversations {
+            conversation.muted = muted.contains(&conversation.id);
+        }
+    }
+
     pub fn unread(&self) -> impl Iterator<Item = &Conversation> {
-        self.conversations.iter().filter(|c| c.is_unread())
+        self.conversations.iter().filter(|c| c.counts_as_unread())
+    }
+
+    /// Unread conversations the mute list keeps out of the view.
+    pub fn muted_unread_count(&self) -> usize {
+        self.conversations
+            .iter()
+            .filter(|c| c.is_unread() && !c.counts_as_unread())
+            .count()
     }
 
     pub fn attention(&self) -> impl Iterator<Item = &Conversation> {
@@ -118,8 +146,18 @@ impl Counts {
     }
 }
 
+/// The counts with the mute list applied; the two calls run side by side
+/// so the status-bar path stays one round trip long.
 pub fn fetch(client: &Client) -> Result<Counts, api::Error> {
-    Counts::parse(&client.call(METHOD, &[])?)
+    let (body, muted) = std::thread::scope(|scope| {
+        let muted = scope.spawn(|| prefs::muted_channels(client));
+        let body = client.call(METHOD, &[]);
+        // A panic in the prefs thread is a bug, not a condition to handle.
+        (body, muted.join().expect("the prefs thread panicked"))
+    });
+    let mut counts = Counts::parse(&body?)?;
+    counts.apply_mutes(&muted?);
+    Ok(counts)
 }
 
 fn conversation(entry: &Value, kind: Kind) -> Option<Conversation> {
@@ -137,6 +175,7 @@ fn conversation(entry: &Value, kind: Kind) -> Option<Conversation> {
             .unwrap_or(0),
         last_read: string("last_read"),
         latest: string("latest"),
+        muted: false,
     })
 }
 
@@ -204,6 +243,30 @@ mod tests {
         let ids: Vec<&str> = counts.unread().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["C02ALERTS", "C03RANDOM", "D06JANE"]);
         assert_eq!(counts.unread_count(), 4);
+    }
+
+    #[test]
+    fn muted_conversations_count_for_their_mentions_only() {
+        let mut counts = fixture();
+        counts.apply_mutes(&HashSet::from([
+            "C03RANDOM".to_string(),
+            "D06JANE".to_string(),
+        ]));
+        let ids: Vec<&str> = counts.unread().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["C02ALERTS"],
+            "a muted channel without a mention and a muted DM drop out"
+        );
+        assert_eq!(counts.muted_unread_count(), 2);
+        assert_eq!(counts.attention_count(), 2);
+
+        counts.apply_mutes(&HashSet::from(["C02ALERTS".to_string()]));
+        assert!(
+            counts.attention().any(|c| c.id == "C02ALERTS"),
+            "a mention in a muted channel still counts"
+        );
+        assert_eq!(counts.muted_unread_count(), 0);
     }
 
     #[test]

@@ -304,5 +304,6 @@ failure, and never a prompt.
 Later, not planned: a TUI to move through and answer the messages
 (`ratatui` on top of the same view model, which is why `view.rs` keeps the
 model apart from the rendering), numbered replies (`slack send 3 "ok"`
-answering item 3 of the last view), a mute list in `config.json`,
-`--workspace`, Linux browser paths, a `watch` mode.
+answering item 3 of the last view), `--workspace`, Linux browser paths, a
+`watch` mode. A local mute list is not needed: the channels muted in Slack
+itself are honoured (added 2026-10-19).

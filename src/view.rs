@@ -29,6 +29,9 @@ pub struct View {
     pub threads: Option<ThreadsView>,
     #[serde(skip)]
     pub all: bool,
+    /// Unread conversations left out because they are muted in Slack.
+    #[serde(skip)]
+    pub muted: usize,
 }
 
 #[derive(Serialize)]
@@ -199,6 +202,7 @@ pub fn build(
         channels: entries(channels),
         threads,
         all,
+        muted: counts.muted_unread_count(),
     })
 }
 
@@ -325,6 +329,16 @@ fn render_at(
             "All caught up."
         };
         writeln!(out, "{line}")?;
+    }
+    if view.all && view.muted > 0 {
+        let plural = if view.muted == 1 { "" } else { "s" };
+        eprintln!(
+            "{}",
+            style.dim(&format!(
+                "{} muted channel{plural} left out, as in the app",
+                view.muted
+            ))
+        );
     }
     if hidden > 0 {
         let plural = if hidden == 1 { "" } else { "s" };
@@ -635,6 +649,7 @@ mod tests {
             }],
             threads: None,
             all: false,
+            muted: 0,
         };
         let text = rendered(&view);
         let lines: Vec<&str> = text.lines().collect();
@@ -689,6 +704,7 @@ mod tests {
                 has_more: true,
             }),
             all: false,
+            muted: 0,
         };
         let text = rendered(&view);
         let lines: Vec<&str> = text.lines().collect();
@@ -719,6 +735,7 @@ mod tests {
                 has_more: false,
             }),
             all: false,
+            muted: 0,
         };
         assert_eq!(rendered(&view), "All caught up.\n");
     }
