@@ -47,8 +47,7 @@ pub struct Item {
     pub has_more: bool,
     /// Where to move the read cursor.
     pub latest: Option<String>,
-    /// The read cursor of an opened conversation with unreads: the pane
-    /// marks where "new" starts.
+    /// The read cursor of a history: the pane marks where "new" starts.
     pub unread_from: Option<String>,
 }
 

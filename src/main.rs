@@ -54,7 +54,7 @@ enum Command {
     },
     /// Post a message to a channel, a person or a thread
     Send {
-        /// `#channel`, `@user`, a conversation id or a permalink
+        /// `#channel`, `@user`, a thread number from the last output, a conversation id or a permalink
         target: String,
         /// The message; read from stdin when omitted
         text: Option<String>,

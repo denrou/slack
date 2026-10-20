@@ -1,6 +1,7 @@
-//! The unread part of a conversation: `conversations.history` from its read
-//! cursor. Slack answers newest first, so with a limit the page holds the
-//! most recent unread messages; `has_more` says older ones exist.
+//! A conversation's messages from `conversations.history`: the unread
+//! part from its read cursor, or the recent history without one. Slack
+//! answers newest first, so with a limit the page holds the most recent
+//! messages; `has_more` says older ones exist.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -47,11 +48,12 @@ impl Message {
     }
 }
 
+/// A page of a conversation: its unread part, or its recent history.
 #[derive(Debug, Clone, Serialize)]
 pub struct Unread {
     /// Oldest first.
     pub messages: Vec<Message>,
-    /// Older unread messages exist beyond the page.
+    /// Older messages exist beyond the page.
     pub has_more: bool,
 }
 
@@ -83,7 +85,8 @@ pub fn is_ts(value: &str) -> bool {
         && fraction.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Order two timestamps as numbers; `1.000010` is older than `1.00001`.
+/// Order two timestamps as numbers: `999.5` is older than `1000.25`,
+/// which a comparison of the strings gets wrong.
 pub fn compare_ts(a: &str, b: &str) -> std::cmp::Ordering {
     let value = |ts: &str| ts.parse::<f64>().unwrap_or(0.0);
     value(a).total_cmp(&value(b))

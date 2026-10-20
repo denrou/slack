@@ -22,11 +22,11 @@ const THREAD_HINTS: &str =
 const HELP: &[&str] = &[
     "j, k, arrows   move through the list, or through the messages",
     "l, Right, Tab  deeper: the messages, then the highlighted message's thread",
-    "h, Left, Esc   back: close the thread, leave the messages, quit",
+    "h, Left, Esc   back: close the thread, leave the messages; Esc from the list quits",
     "Enter          reply: to the conversation, to the highlighted message, or in the open thread",
     "s              a message to the conversation, wherever you are in it",
     "n              new message: pick a channel or people (Space marks several), then write",
-    "c              open any channel, group or person: j/k move, / filters, Space marks people",
+    "c              open a channel or group you are in, or anyone: j/k move, / filters, Space marks",
     "x              close an opened conversation",
     "u, y           open, or copy, a link of the highlighted message",
     "J, K, PgDn/Up  scroll the messages, from the list",
@@ -262,7 +262,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
         let note = if in_thread {
             "more replies not shown"
         } else {
-            "earlier new replies not shown"
+            "newer replies not shown"
         };
         lines.push(Line::from(note).dim());
     }

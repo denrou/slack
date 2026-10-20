@@ -56,8 +56,7 @@ pub struct Entry {
     pub mention_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest: Option<String>,
-    /// None when the messages were not read: a hidden channel, or a read
-    /// that failed (reported on stderr).
+    /// None when the read failed (a warning says which).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<Message>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -528,7 +527,8 @@ pub(crate) enum Scope {
 pub(crate) struct MessageList<'a> {
     pub messages: &'a [Message],
     pub channel: &'a str,
-    /// Older messages exist beyond this page.
+    /// More messages exist beyond this page: older for a history, newer
+    /// for a thread.
     pub has_more: bool,
     pub show_author: bool,
     pub scope: Scope,

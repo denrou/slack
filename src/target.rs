@@ -1,5 +1,6 @@
 //! What a conversation argument refers to: `#channel`, `@person`, a bare
-//! conversation id, or a Slack permalink.
+//! conversation id, a Slack permalink, or a thread number from the last
+//! `slack unreads` or `slack show` output.
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
@@ -11,8 +12,8 @@ use crate::names::Names;
 
 pub struct Target {
     pub channel: String,
-    /// Set when the argument was a permalink to a message: the thread to
-    /// answer in.
+    /// Set when the argument was a permalink to a message or a thread
+    /// number: the thread to answer in.
     pub thread_ts: Option<String>,
 }
 
@@ -32,7 +33,7 @@ impl Permalink {
 
 pub fn resolve(client: &Client, names: &mut Names, team_id: &str, spec: &str) -> Result<Target> {
     if !spec.is_empty() && spec.chars().all(|c| c.is_ascii_digit()) {
-        // A thread number from the last `slack unreads` output.
+        // A thread number from the last `slack unreads` or `slack show` output.
         let number: usize = spec
             .parse()
             .map_err(|_| anyhow!("`{spec}` is not a thread number"))?;

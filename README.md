@@ -64,17 +64,17 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## The interactive view
 
-`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over every channel, group message and person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
+`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over the channels and group messages you are in and every person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
 
 | Key                | Action                                                                        |
 | ------------------ | ----------------------------------------------------------------------------- |
 | `j`/`k`, arrows    | Move through the list, or through the messages                                |
 | `l`, Right, Tab    | Deeper: the messages, then the highlighted message's thread                   |
-| `h`, Left, `Esc`   | Back: close the thread, leave the messages, quit                              |
+| `h`, Left, `Esc`   | Back: close the thread, leave the messages; `Esc` from the list quits         |
 | `Enter`            | Reply: to the conversation, to the highlighted message, or in the open thread |
 | `s`                | A message to the conversation, wherever you are in it                         |
 | `n`                | New message: pick a channel or people, then write                             |
-| `c`                | Open any channel, group or person (`/` filters, Space marks people)           |
+| `c`                | Open a channel or group you are in, or a person (`/` filters, Space marks)    |
 | `x`                | Close an opened conversation                                                  |
 | `u`, `y`           | Open a link of the highlighted message, or copy it                            |
 | `J`/`K`, PgDn/PgUp | Scroll the messages, from the list                                            |
@@ -85,7 +85,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `?`                | Keys                                                                          |
 | `q`                | Quit                                                                          |
 
-A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. A reply is typed on one line and Enter sends it; pasted text keeps its line breaks. `slack send` with stdin takes a long message.
+A reply to a conversation marks it as read up to your message, as in the app, and it leaves the list; a reply inside a thread shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. A reply is typed on one line and Enter sends it; pasted text keeps its line breaks. `slack send` with stdin takes a long message.
 
 Without a terminal on both ends, as in a pipe or a script, `slack` prints what `slack unreads` prints instead of drawing.
 
@@ -108,7 +108,7 @@ Security notes, the short version:
 
 ## Status bar
 
-`slack --count` makes one API call, prints one number and exits non-zero when the fetch fails, so a poller can tell "nothing" from "broken". The number is the unread conversations (DMs, group messages and channels with something new, muted ones excepted unless you were mentioned) plus one when followed threads have unread replies.
+`slack --count` makes two API calls side by side, prints one number and exits non-zero when the fetch fails, so a poller can tell "nothing" from "broken". The number is the unread conversations (DMs, group messages and channels with something new, muted ones excepted unless you were mentioned) plus one when followed threads have unread replies.
 
 ## Files
 
@@ -119,10 +119,10 @@ Security notes, the short version:
 Bump `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, commit, then push a matching annotated tag:
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0" && git push origin main v0.2.0
+git tag -a v0.8.0 -m "v0.8.0" && git push origin main v0.8.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes them as a GitHub Release with generated notes and a `checksums.txt`.
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them as a GitHub Release with generated notes and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-slack) to pick the release up.
 
 ## License
 
