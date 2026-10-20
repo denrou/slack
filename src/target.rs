@@ -32,12 +32,12 @@ impl Permalink {
 
 pub fn resolve(client: &Client, names: &mut Names, team_id: &str, spec: &str) -> Result<Target> {
     if !spec.is_empty() && spec.chars().all(|c| c.is_ascii_digit()) {
-        // A thread number from the last `slack` output.
+        // A thread number from the last `slack unreads` output.
         let number: usize = spec
             .parse()
             .map_err(|_| anyhow!("`{spec}` is not a thread number"))?;
         let thread = lastview::thread_ref(team_id, number)?.ok_or_else(|| {
-            anyhow!("the last view numbered no thread {number}; run `slack` first")
+            anyhow!("the last view numbered no thread {number}; run `slack unreads` first")
         })?;
         return Ok(Target {
             channel: thread.channel,

@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack read` marks as read, `slack show` reads any conversation. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` opens what needs you in an interactive view, `slack unreads` prints it, `slack --count` gives a status bar one number, `slack send` answers, `slack read` marks as read, `slack show` reads any conversation. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -21,13 +21,13 @@ Login needs Google Chrome (Chromium, Edge or Brave also work; `$SLACK_BROWSER` p
 ## Quickstart
 
 ```bash
-slack login     # a Chrome window opens; sign in to Slack once
-slack whoami    # which workspace and user the CLI acts as, verified
-slack           # what is unread: DMs, mentions, channels, threads
-slack --count   # the same, as one number for a status bar
-slack --json    # the same data, for scripts
-slack ui        # the same, interactive: move through it, reply, mark read
-slack thread 2  # the thread numbered 2 in the last output, or a permalink
+slack login           # a Chrome window opens; sign in to Slack once
+slack whoami          # which workspace and user the CLI acts as, verified
+slack                 # what is unread, interactive: move through it, reply, mark read
+slack unreads         # the same, printed: DMs, mentions, channels, threads
+slack unreads --json  # the same data, for scripts
+slack --count         # the same, as one number for a status bar
+slack thread 2        # the thread numbered 2 in the last output, or a permalink
 
 slack channels                  # the channels and group messages you are in
 slack channels dev              # ...whose name contains "dev"
@@ -44,9 +44,9 @@ slack read                                          # mark as read what the last
 slack read '#sre-alerts' @jane                      # ...only these, or a conversation `slack show` printed
 ```
 
-## The view
+## Unreads
 
-`slack` shows what is unread, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Channels** (every other channel with new messages), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Messages with replies are numbered, as in `[thread 2: 5 replies]`: `slack thread 2` prints the whole thread, and `slack send 2 "text"` answers in it (a permalink works in both places). Conversations you muted in Slack are left out, as the app does, and a line on stderr says how many; a mention in a muted channel still counts. There is no local list: muting a channel in Slack is how to keep it out of the view.
+`slack unreads` prints what is unread, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Channels** (every other channel with new messages), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Messages with replies are numbered, as in `[thread 2: 5 replies]`: `slack thread 2` prints the whole thread, and `slack send 2 "text"` answers in it (a permalink works in both places). Conversations you muted in Slack are left out, as the app does, and a line on stderr says how many; a mention in a muted channel still counts. There is no local list: muting a channel in Slack is how to keep it out of the view.
 
 Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read what the last view showed (no more: a message that arrived since stays unread). A conversation `slack show` printed is marked by its name only. Names are cached in `~/.cache/slack/names.json`, safe to delete.
 
@@ -58,7 +58,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## The interactive view
 
-`slack ui` puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `c` opens a picker over every channel, group message and person in the workspace: type to narrow it, Enter loads the last 50 messages of the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies.
+`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `c` opens a picker over every channel, group message and person in the workspace: type to narrow it, Enter loads the last 50 messages of the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies.
 
 | Key                | Action                                             |
 | ------------------ | -------------------------------------------------- |
@@ -76,6 +76,8 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `q`                | Quit                                               |
 
 A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message. Replies are one line; use `slack send` with stdin for a longer message.
+
+Without a terminal on both ends, as in a pipe or a script, `slack` prints what `slack unreads` prints instead of drawing.
 
 ## Sending
 

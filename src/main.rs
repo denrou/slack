@@ -23,30 +23,34 @@ mod threads;
 mod tui;
 mod view;
 
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-/// Read and answer Slack from the terminal: what needs you, a count for the
-/// status bar, send, mark read.
+/// Read and answer Slack from the terminal. With no command, what is unread
+/// as an interactive view; `slack unreads` prints it instead.
 #[derive(Parser)]
 #[command(name = "slack", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Print only the number of conversations, for a status bar
     #[arg(long)]
     count: bool,
-    /// Print the data as JSON
-    #[arg(long)]
-    json: bool,
-    /// Disable colors
-    #[arg(long)]
-    no_color: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print what is unread: DMs, mentions, channels, threads
+    Unreads {
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+        /// Disable colors
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Post a message to a channel, a person or a thread
     Send {
         /// `#channel`, `@user`, a conversation id or a permalink
@@ -82,9 +86,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a thread: its number in the last `slack` output, or a permalink
+    /// Show a thread: its number in the last `slack unreads` output, or a permalink
     Thread {
-        /// `2` as numbered by `slack`, or a Slack permalink
+        /// `2` as numbered by `slack unreads` or `slack show`, or a Slack permalink
         thread: String,
         /// Print the data as JSON
         #[arg(long)]
@@ -93,8 +97,6 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
-    /// Move through what is unread and answer it, interactively
-    Ui,
     /// List the channels and group messages you are in
     Channels {
         /// Only those whose name contains these words
@@ -131,7 +133,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         None if cli.count => commands::count(),
-        None => commands::view(cli.json, cli.no_color),
+        // A pipe or a script cannot drive a screen; it gets the text.
+        None if io::stdin().is_terminal() && io::stdout().is_terminal() => commands::ui(),
+        None => commands::unreads(false, false),
+        Some(Command::Unreads { json, no_color }) => commands::unreads(json, no_color),
         Some(Command::Send {
             target,
             text,
@@ -143,7 +148,6 @@ fn main() -> ExitCode {
             keep_browser_session,
         }) => commands::logout(keep_browser_session),
         Some(Command::Whoami { json }) => commands::whoami(json),
-        Some(Command::Ui) => commands::ui(),
         Some(Command::Thread {
             thread,
             json,
@@ -164,5 +168,30 @@ fn main() -> ExitCode {
             eprintln!("slack: {err:#}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn the_command_line_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn no_command_is_the_view_and_unreads_prints_it() {
+        let cli = Cli::parse_from(["slack"]);
+        assert!(cli.command.is_none() && !cli.count);
+        let cli = Cli::parse_from(["slack", "unreads", "--json"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Unreads { json: true, .. })
+        ));
+        assert!(Cli::try_parse_from(["slack", "ui"]).is_err());
+        assert!(Cli::try_parse_from(["slack", "--json"]).is_err());
     }
 }

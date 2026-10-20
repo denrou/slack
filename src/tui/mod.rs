@@ -1,4 +1,5 @@
-//! `slack ui`: the view as something to move through and answer. One list
+//! `slack` with no command: the view as something to move through and
+//! answer. One list
 //! of what needs you on the left, the messages of the selected item on the
 //! right (or the thread opened from one of them), a reply box at the
 //! bottom. Same model as the text view; this module adds state and keys.

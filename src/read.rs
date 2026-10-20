@@ -12,7 +12,7 @@ use crate::{counts, lastview, target};
 pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]) -> Result<()> {
     let shown = lastview::recall(team_id)?;
     if shown.is_empty() {
-        bail!("nothing to mark: run `slack` first, then `slack read` marks what it showed");
+        bail!("nothing to mark: run `slack unreads` first, then `slack read` marks what it showed");
     }
     let selected: Vec<(String, String)> = if targets.is_empty() {
         // Without a name, what the view listed: a conversation `slack show`
@@ -37,7 +37,7 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]
                 let latest = shown.get(&channel).map(|shown| shown.latest.clone());
                 let latest = latest.ok_or_else(|| {
                     anyhow!(
-                        "{spec} was not in the last view; run `slack` or `slack show {spec}` first"
+                        "{spec} was not in the last view; run `slack unreads` or `slack show {spec}` first"
                     )
                 })?;
                 Ok((channel, latest))
@@ -47,7 +47,7 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]
 
     names.resolve_channels(client, selected.iter().map(|(channel, _)| channel.clone()))?;
     // A cursor only moves forward: when Slack already reads further (the
-    // app, or `slack ui`), marking at an older message would make the newer
+    // app, or the interactive view), marking at an older message would make the newer
     // ones unread again.
     let current = counts::fetch(client)?;
     let cursors: std::collections::BTreeMap<&str, &str> = current

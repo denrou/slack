@@ -20,7 +20,7 @@ use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{counts, directory, history, lastview, mrkdwn, read, replies, send, target, tui, view};
 
-pub fn view(json: bool, no_color: bool) -> Result<()> {
+pub fn unreads(json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let client = workspace.client();
@@ -168,7 +168,7 @@ fn thread_target(team_id: &str, spec: &str) -> Result<(String, String)> {
     if !spec.is_empty() && spec.chars().all(|c| c.is_ascii_digit()) {
         let number: usize = spec.parse().context("not a thread number")?;
         let thread = lastview::thread_ref(team_id, number)?.ok_or_else(|| {
-            anyhow::anyhow!("the last view numbered no thread {number}; run `slack` first")
+            anyhow::anyhow!("the last view numbered no thread {number}; run `slack unreads` first")
         })?;
         return Ok((thread.channel, thread.ts));
     }
@@ -176,7 +176,10 @@ fn thread_target(team_id: &str, spec: &str) -> Result<(String, String)> {
         let thread_ts = link.thread();
         return Ok((link.channel, thread_ts));
     }
-    bail!("`{spec}` is neither a thread number from the last `slack` output nor a Slack permalink")
+    bail!(
+        "`{spec}` is neither a thread number from the last `slack unreads` output nor a Slack \
+         permalink"
+    )
 }
 
 pub fn channels(filter: &str, json: bool) -> Result<()> {
