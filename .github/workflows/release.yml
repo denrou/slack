@@ -9,8 +9,9 @@ on:
     tags:
       - "v*"
 
+# Only the release job writes; the others run third-party actions.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check:
@@ -81,6 +82,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/download-artifact@v8
@@ -101,11 +104,18 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     # A personal token, as the workflow token cannot reach another repository.
-    # Without the secret the step is skipped: run the command by hand then.
+    # Without the secret the run says so and the command is run by hand. The
+    # version is passed rather than looked up: "latest" can lag a release
+    # created a moment ago.
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
     steps:
       - name: Ask the tap to rewrite its formula
         if: env.GH_TOKEN != ''
-        run: gh workflow run update-formula.yml --repo denrou/homebrew-slack
+        run: gh workflow run update-formula.yml --repo denrou/homebrew-slack -f "version=${GITHUB_REF_NAME#v}"
+
+      - name: Say that the tap was not told
+        if: env.GH_TOKEN == ''
+        run: |
+          echo "::warning::GH_TOKEN is not set; run by hand: gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=${GITHUB_REF_NAME#v}"
