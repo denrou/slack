@@ -81,21 +81,23 @@ pub fn fetch(client: &Client, limit: usize) -> Result<Option<ThreadList>, api::E
             Ok(body) => body,
             Err(err @ api::Error::Auth { .. }) => return Err(err),
             Err(err) => {
-                eprintln!("warning: could not read the thread view (page {page_number}): {err}");
+                crate::warn::warn(format!(
+                    "could not read the thread view (page {page_number}): {err}"
+                ));
                 return Ok(partial(page_number, items));
             }
         };
         let Some(page) = parse_page(&body, limit) else {
-            eprintln!(
-                "warning: the thread view answered in an unexpected shape (page {page_number})"
-            );
+            crate::warn::warn(format!(
+                "the thread view answered in an unexpected shape (page {page_number})"
+            ));
             return Ok(partial(page_number, items));
         };
         if page.malformed > 0 {
-            eprintln!(
-                "warning: {} entries of the thread view could not be read",
+            crate::warn::warn(format!(
+                "{} entries of the thread view could not be read",
                 page.malformed
-            );
+            ));
             incomplete = true;
             // Not one entry of the page is a thread: the shape has changed.
             if page.threads.is_empty() && page.read == 0 {

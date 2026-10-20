@@ -22,6 +22,7 @@ mod target;
 mod threads;
 mod tui;
 mod view;
+mod warn;
 
 use std::io::{self, IsTerminal};
 use std::process::ExitCode;

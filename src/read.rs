@@ -46,21 +46,10 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]
     };
 
     names.resolve_channels(client, selected.iter().map(|(channel, _)| channel.clone()))?;
-    // A cursor only moves forward: when Slack already reads further (the
-    // app, or the interactive view), marking at an older message would make the newer
-    // ones unread again.
-    let current = counts::fetch(client)?;
-    let cursors: std::collections::BTreeMap<&str, &str> = current
-        .conversations
-        .iter()
-        .filter_map(|c| Some((c.id.as_str(), c.last_read.as_deref()?)))
-        .collect();
+    let cursors = counts::cursors(client)?;
     let mut marked = Vec::new();
     for (channel, latest) in &selected {
-        let already_read = cursors
-            .get(channel.as_str())
-            .is_some_and(|cursor| compare_ts(cursor, latest).is_ge());
-        if already_read {
+        if already_read(cursors.get(channel.as_str()).map(String::as_str), latest) {
             println!("{} was already read", names.channel_label(channel));
         } else {
             client.call(
@@ -73,4 +62,31 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]
     }
     lastview::forget(team_id, &marked)?;
     Ok(())
+}
+
+/// A cursor only moves forward: when Slack already reads at or past
+/// `latest` (the app, or the screen), marking there would make the newer
+/// messages unread again.
+pub fn already_read(cursor: Option<&str>, latest: &str) -> bool {
+    cursor.is_some_and(|cursor| compare_ts(cursor, latest).is_ge())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::already_read;
+
+    #[test]
+    fn a_cursor_only_moves_forward() {
+        assert!(already_read(Some("1700000000.000200"), "1700000000.000100"));
+        assert!(already_read(Some("1700000000.000100"), "1700000000.000100"));
+        assert!(!already_read(
+            Some("1700000000.000100"),
+            "1700000000.000200"
+        ));
+        assert!(!already_read(None, "1700000000.000200"));
+        assert!(!already_read(
+            Some("0000000000.000000"),
+            "1700000000.000200"
+        ));
+    }
 }

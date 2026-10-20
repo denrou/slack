@@ -568,6 +568,30 @@ impl State {
         }
     }
 
+    /// Pasted text goes where typing would: the reply box, line breaks
+    /// included, or the picker's filter. Anywhere else it is dropped
+    /// rather than read as keys.
+    pub fn paste(&mut self, pasted: &str) -> Action {
+        match std::mem::replace(&mut self.mode, Mode::Browse) {
+            Mode::Compose {
+                mut text,
+                thread_ts,
+            } => {
+                text.push_str(&pasted.replace("\r\n", "\n").replace('\r', "\n"));
+                self.mode = Mode::Compose { text, thread_ts };
+            }
+            Mode::Pick(mut picker) if picker.filtering => {
+                picker
+                    .query
+                    .extend(pasted.chars().filter(|c| !c.is_control()));
+                picker.selected = 0;
+                self.mode = Mode::Pick(picker);
+            }
+            other => self.mode = other,
+        }
+        Action::None
+    }
+
     fn browse(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Char('q') => Action::Quit,
@@ -592,11 +616,12 @@ impl State {
                 self.step(-1);
                 Action::None
             }
-            KeyCode::Char('J') | KeyCode::PageDown => {
+            // Once the pane has the focus it follows the highlighted message.
+            KeyCode::Char('J') | KeyCode::PageDown if self.focus == Focus::List => {
                 self.scroll = self.scroll.saturating_add(SCROLL_STEP);
                 Action::None
             }
-            KeyCode::Char('K') | KeyCode::PageUp => {
+            KeyCode::Char('K') | KeyCode::PageUp if self.focus == Focus::List => {
                 // Up to the top of the pane, which sits `anchor` lines
                 // above where it started.
                 self.scroll = self
@@ -714,7 +739,7 @@ impl State {
                 self.mode = Mode::Compose { text, thread_ts };
                 Action::None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 text.push(c);
                 self.mode = Mode::Compose { text, thread_ts };
                 Action::None
@@ -1462,5 +1487,51 @@ mod tests {
         assert_eq!(state.selected, Some(1), "still on the opened one");
         state.items[1].caught_up();
         assert_eq!(state.items[1].unread_from, None);
+    }
+
+    #[test]
+    fn control_keys_do_not_type_into_the_reply_box() {
+        let mut state = state();
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('h')));
+        state.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        state.key(press(KeyCode::Char('i')));
+        assert!(matches!(&state.mode, Mode::Compose { text, .. } if text == "hi"));
+    }
+
+    #[test]
+    fn a_paste_lands_in_the_reply_box_with_its_line_breaks() {
+        let mut state = state();
+        assert_eq!(state.paste("stray"), Action::None);
+        assert!(matches!(state.mode, Mode::Browse));
+        state.key(press(KeyCode::Enter));
+        state.paste("Thanks!\r\nWill look tomorrow");
+        assert!(matches!(
+            &state.mode,
+            Mode::Compose { text, .. } if text == "Thanks!\nWill look tomorrow"
+        ));
+        let sent = state.key(press(KeyCode::Enter));
+        assert!(matches!(
+            &sent,
+            Action::Send { text, .. } if text == "Thanks!\nWill look tomorrow"
+        ));
+    }
+
+    #[test]
+    fn scrolling_with_j_and_k_is_for_the_list_focus_only() {
+        let mut state = state();
+        state.anchor = 30;
+        state.key(press(KeyCode::Char('J')));
+        assert_eq!(state.scroll, SCROLL_STEP);
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('J')));
+        state.key(press(KeyCode::Char('K')));
+        state.key(press(KeyCode::Char('K')));
+        assert_eq!(
+            state.scroll, SCROLL_STEP,
+            "the pane follows the highlighted message"
+        );
+        state.key(press(KeyCode::Char('h')));
+        assert_eq!(state.scroll, SCROLL_STEP);
     }
 }

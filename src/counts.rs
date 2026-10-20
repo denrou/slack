@@ -128,6 +128,17 @@ impl Counts {
     }
 }
 
+/// The read cursor of every conversation, from `client.counts` alone, for
+/// a mark that must only ever move forward.
+pub fn cursors(client: &Client) -> Result<std::collections::BTreeMap<String, String>, api::Error> {
+    let counts = Counts::parse(&client.call(METHOD, &[])?)?;
+    Ok(counts
+        .conversations
+        .into_iter()
+        .filter_map(|c| Some((c.id, c.last_read?)))
+        .collect())
+}
+
 /// The counts with the notification preferences applied; the two calls
 /// run side by side so the status-bar path stays one round trip long.
 pub fn fetch(client: &Client) -> Result<Counts, api::Error> {

@@ -209,10 +209,10 @@ pub fn build(
                 pages_by_id.insert(id, page);
             }
             Err(err @ api::Error::Auth { .. }) => return Err(err),
-            Err(err) => eprintln!(
-                "warning: could not read {}: {err}",
+            Err(err) => crate::warn::warn(format!(
+                "could not read {}: {err}",
                 names.channel_label(&id)
-            ),
+            )),
         }
     }
 

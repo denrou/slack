@@ -9,7 +9,7 @@
 mod model;
 mod ui;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -17,7 +17,10 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use jiff::Zoned;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
 use serde_json::Value;
 
 use self::model::{Action, Choice, ChoiceKind, Item, Mode, Picker, Section, State, ThreadPane};
@@ -26,9 +29,26 @@ use crate::counts::Kind;
 use crate::history::Message;
 use crate::names::Names;
 use crate::style::Style;
-use crate::{counts, directory, history, lastview, mrkdwn, replies, target, view};
+use crate::{counts, directory, history, lastview, mrkdwn, read, replies, target, view, warn};
 
 pub fn run(
+    client: &Client,
+    names: &mut Names,
+    team_id: &str,
+    me: Option<&str>,
+    workspace_url: &str,
+) -> Result<()> {
+    // Warnings would draw over the screen: they wait for the status line,
+    // and whatever is left goes to stderr once the screen is gone.
+    warn::hold();
+    let result = screen(client, names, team_id, me, workspace_url);
+    for message in warn::release() {
+        eprintln!("warning: {message}");
+    }
+    result
+}
+
+fn screen(
     client: &Client,
     names: &mut Names,
     team_id: &str,
@@ -45,9 +65,30 @@ pub fn run(
         directory_walked: false,
     };
     let mut terminal = ratatui::init();
+    // A paste then arrives as one event, line breaks included, instead of
+    // as keystrokes that would send the first line and act on the rest. A
+    // terminal without the feature ignores the sequence.
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     let result = app.run(&mut terminal);
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+fn is_dead_session(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<api::Error>(),
+        Some(api::Error::Auth { .. })
+    )
+}
+
+/// What became of a mark, with the item's title.
+enum Marked {
+    Done(String),
+    /// Slack already read past it: left alone.
+    Already(String),
+    /// Nothing to mark at: an opened conversation with no message yet.
+    Nothing(String),
 }
 
 fn load(client: &Client, names: &mut Names) -> Result<Vec<Item>> {
@@ -76,13 +117,11 @@ impl App<'_> {
             if !event::poll(Duration::from_millis(250))? {
                 continue;
             }
-            let Event::Key(key) = event::read()? else {
-                continue; // a resize redraws on the next pass
+            let action = match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.state.key(key),
+                Event::Paste(text) => self.state.paste(&text),
+                _ => continue, // a resize redraws on the next pass
             };
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            let action = self.state.key(key);
             if action == Action::Quit {
                 return Ok(());
             }
@@ -91,6 +130,10 @@ impl App<'_> {
     }
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let warnings = warn::drain();
+        if !warnings.is_empty() {
+            self.state.status = Some(format!("Warning: {}", warnings.join("; ")));
+        }
         let now = Zoned::now();
         let mut anchor = 0;
         terminal.draw(|frame| anchor = ui::draw(frame, &self.state, self.names, &now))?;
@@ -110,10 +153,22 @@ impl App<'_> {
             Action::Refresh => self.refresh(terminal),
             Action::MarkRead(index) => {
                 self.busy(terminal, "Marking as read…")?;
-                match self.mark_read(index) {
-                    Ok(title) => {
+                let marked = self
+                    .cursors()
+                    .and_then(|cursors| self.mark_read(index, &cursors));
+                match marked {
+                    Ok(Marked::Done(title)) => {
                         self.after_mark(index);
                         self.state.status = Some(format!("Marked {title} as read"));
+                        Ok(())
+                    }
+                    Ok(Marked::Already(title)) => {
+                        self.after_mark(index);
+                        self.state.status = Some(format!("{title} was already read"));
+                        Ok(())
+                    }
+                    Ok(Marked::Nothing(title)) => {
+                        self.state.status = Some(format!("{title} has nothing to mark"));
                         Ok(())
                     }
                     Err(err) => self.fail(err),
@@ -121,14 +176,20 @@ impl App<'_> {
             }
             Action::MarkAllRead => {
                 self.busy(terminal, "Marking everything as read…")?;
+                let cursors = match self.cursors() {
+                    Ok(cursors) => cursors,
+                    Err(err) => return self.fail(err),
+                };
                 let mut marked = 0;
                 // Last to first, so an index stays valid after a removal.
                 for index in (0..self.state.items.len()).rev() {
-                    match self.mark_read(index) {
-                        Ok(_) => {
+                    match self.mark_read(index, &cursors) {
+                        Ok(Marked::Done(_)) => {
                             self.after_mark(index);
                             marked += 1;
                         }
+                        Ok(Marked::Already(_)) => self.after_mark(index),
+                        Ok(Marked::Nothing(_)) => {}
                         Err(err) => return self.fail(err),
                     }
                 }
@@ -143,7 +204,11 @@ impl App<'_> {
                 self.busy(terminal, "Sending…")?;
                 match self.send(item, &text, thread_ts.as_deref()) {
                     Ok(title) => self.after_send(item, &title, thread_ts.as_deref()),
-                    Err(err) => self.fail(err),
+                    Err(err) => {
+                        // The text stays in the box: a timeout must not cost it.
+                        self.state.mode = Mode::Compose { text, thread_ts };
+                        self.fail(err)
+                    }
                 }
             }
             Action::Open(index) => match self.open(index) {
@@ -221,24 +286,31 @@ impl App<'_> {
     /// A dead session ends the program (main says to log in again); any
     /// other failure is a status line, and the list stays as it was.
     fn fail(&mut self, err: anyhow::Error) -> Result<()> {
-        if matches!(
-            err.downcast_ref::<api::Error>(),
-            Some(api::Error::Auth { .. })
-        ) {
+        if is_dead_session(&err) {
             return Err(err);
         }
         self.state.status = Some(format!("Error: {err:#}"));
         Ok(())
     }
 
-    fn mark_read(&mut self, index: usize) -> Result<String> {
+    /// The read cursors as Slack has them now, so a mark never moves one
+    /// back: what was read in the app since the load is left alone.
+    fn cursors(&self) -> Result<BTreeMap<String, String>> {
+        Ok(counts::cursors(self.client)?)
+    }
+
+    fn mark_read(&mut self, index: usize, cursors: &BTreeMap<String, String>) -> Result<Marked> {
         let item = &self.state.items[index];
-        let latest = item
-            .latest
-            .as_deref()
-            .ok_or_else(|| anyhow!("{} has no message to mark at", item.title))?;
+        let title = item.title.clone();
+        let Some(latest) = item.latest.as_deref() else {
+            return Ok(Marked::Nothing(title));
+        };
         match &item.thread_ts {
             None => {
+                let cursor = cursors.get(&item.channel).map(String::as_str);
+                if read::already_read(cursor, latest) {
+                    return Ok(Marked::Already(title));
+                }
                 self.client.call(
                     "conversations.mark",
                     &[("channel", &item.channel), ("ts", latest)],
@@ -246,6 +318,8 @@ impl App<'_> {
                 let _ = lastview::forget(self.team_id, std::slice::from_ref(&item.channel));
             }
             Some(thread_ts) => {
+                // Written from the web client's traffic and not yet seen
+                // working live (ARCHITECTURE.md).
                 self.client.call(
                     "subscriptions.thread.mark",
                     &[
@@ -257,7 +331,7 @@ impl App<'_> {
                 )?;
             }
         }
-        Ok(item.title.clone())
+        Ok(Marked::Done(title))
     }
 
     /// What needed you leaves the list once read; an opened conversation
@@ -270,8 +344,9 @@ impl App<'_> {
         }
     }
 
-    /// Post the reply. A conversation answered from the list is then read
-    /// up to the reply, as it is in the app when you answer.
+    /// Post the reply. A reply to the conversation itself, not to a thread,
+    /// then reads it up to the reply in Slack, as the app does when you
+    /// answer.
     fn send(&mut self, index: usize, text: &str, thread_ts: Option<&str>) -> Result<String> {
         let item = &self.state.items[index];
         let mut params = vec![("channel", item.channel.as_str()), ("text", text)];
@@ -292,38 +367,67 @@ impl App<'_> {
         Ok(item.title.clone())
     }
 
-    /// After a reply: inside an open thread the thread is reloaded to show
-    /// it; an opened conversation is reloaded the same way; a reply to a
-    /// message of an unread conversation leaves it listed, since it stays
-    /// unread in Slack; from the list the item is done with and leaves.
+    /// After a reply. To the conversation itself: Slack now reads it up to
+    /// the reply, so a listed one leaves, a thread open from one of its
+    /// messages with it, and an opened one is reloaded. In a thread: an
+    /// open thread is reloaded to show the reply; a reply to a message from
+    /// the pane leaves the conversation listed, since it stays unread in
+    /// Slack, and reloads an opened one.
     fn after_send(&mut self, item: usize, title: &str, thread_ts: Option<&str>) -> Result<()> {
+        let opened = self.state.items[item].section == Section::Opened;
+        if thread_ts.is_none() {
+            self.state.thread = None;
+            if !opened {
+                self.state.remove(item);
+                self.state.status = Some(format!("Sent to {title}"));
+                return Ok(());
+            }
+            return self.reload_opened(item);
+        }
         if let Some(pane) = self.state.thread.take() {
-            return match self.reload_thread(pane) {
-                Ok(pane) => {
-                    self.state.thread = Some(pane);
-                    self.state.status = Some("Sent".to_string());
-                    Ok(())
-                }
-                Err(err) => self.fail(err),
-            };
-        }
-        if self.state.items[item].section == Section::Opened {
-            let channel = self.state.items[item].channel.clone();
-            return match self.load_opened(channel, None) {
+            return match self.reload_thread(&pane) {
                 Ok(reloaded) => {
-                    self.state.open_item(reloaded);
+                    self.state.thread = Some(reloaded);
                     self.state.status = Some("Sent".to_string());
                     Ok(())
                 }
-                Err(err) => self.fail(err),
+                Err(err) => {
+                    self.state.thread = Some(pane);
+                    self.sent_but(err)
+                }
             };
         }
-        if thread_ts.is_some() && self.state.items[item].section != Section::Threads {
+        if opened {
+            return self.reload_opened(item);
+        }
+        if self.state.items[item].section != Section::Threads {
             self.state.status = Some("Sent in the thread".to_string());
             return Ok(());
         }
         self.state.remove(item);
         self.state.status = Some(format!("Sent to {title}"));
+        Ok(())
+    }
+
+    fn reload_opened(&mut self, item: usize) -> Result<()> {
+        let channel = self.state.items[item].channel.clone();
+        match self.load_opened(channel, None) {
+            Ok(reloaded) => {
+                self.state.open_item(reloaded);
+                self.state.status = Some("Sent".to_string());
+                Ok(())
+            }
+            Err(err) => self.sent_but(err),
+        }
+    }
+
+    /// The reply went through and the reload after it did not: say so,
+    /// since "Error" alone invites sending it again.
+    fn sent_but(&mut self, err: anyhow::Error) -> Result<()> {
+        if is_dead_session(&err) {
+            return Err(err);
+        }
+        self.state.status = Some(format!("Sent, but could not reload: {err:#}"));
         Ok(())
     }
 
@@ -357,15 +461,18 @@ impl App<'_> {
         })
     }
 
-    fn reload_thread(&mut self, pane: ThreadPane) -> Result<ThreadPane> {
+    fn reload_thread(&mut self, pane: &ThreadPane) -> Result<ThreadPane> {
         let fetched = replies::fetch(self.client, &pane.channel, &pane.thread_ts)?;
         self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         let mut messages = vec![fetched.root];
         messages.extend(fetched.replies);
         Ok(ThreadPane {
+            channel: pane.channel.clone(),
+            thread_ts: pane.thread_ts.clone(),
+            title: pane.title.clone(),
             messages,
             has_more: fetched.has_more,
-            ..pane
+            from_message: pane.from_message,
         })
     }
 

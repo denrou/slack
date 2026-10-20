@@ -29,7 +29,7 @@ const HELP: &[&str] = &[
     "c              open any channel, group or person: j/k move, / filters, Space marks people",
     "x              close an opened conversation",
     "u, y           open, or copy, a link of the highlighted message",
-    "J, K, PgDn/Up  scroll the messages",
+    "J, K, PgDn/Up  scroll the messages, from the list",
     "r              mark the selected one as read",
     "R              mark everything listed as read (asks first)",
     "o              open it in Slack",
@@ -41,7 +41,7 @@ const HELP: &[&str] = &[
 /// `State::anchor`.
 pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> u16 {
     let bottom_height = match &state.mode {
-        Mode::Compose { .. } => 3,
+        Mode::Compose { text, .. } => compose_rows(text, frame.area().width) + 2,
         Mode::Help => HELP.len() as u16 + 2,
         Mode::Links { links, .. } => links.len() as u16 + 2,
         Mode::Browse | Mode::ConfirmReadAll | Mode::Pick(_) => 1,
@@ -192,6 +192,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
         lines.push(Line::from("earlier messages not shown").dim());
     }
     let mut starts = Vec::with_capacity(messages.len());
+    let mut ends = Vec::with_capacity(messages.len());
     let mut separator = None;
     for (index, (message, time)) in messages.iter().zip(times).enumerate() {
         let new = !in_thread && view::is_new(message, unread_from);
@@ -255,10 +256,8 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
                     .style(style),
             );
         }
+        ends.push(lines.len());
     }
-    // Where the messages end, before the footnote: the last one is
-    // highlighted up to here.
-    let text_end = lines.len();
     if has_more && !history {
         let note = if in_thread {
             "more replies not shown"
@@ -303,12 +302,9 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
     };
     // The highlighted message as rows of the pane, every row it wraps to.
     let highlight = (state.focus == Focus::Messages)
-        .then(|| starts.get(state.cursor).copied())
+        .then(|| starts.get(state.cursor).zip(ends.get(state.cursor)))
         .flatten()
-        .map(|start| {
-            let end = starts.get(state.cursor + 1).copied().unwrap_or(text_end);
-            (row_of(start), row_of(end))
-        });
+        .map(|(&start, &end)| (row_of(start), row_of(end)));
     let paragraph = Paragraph::new(lines)
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false })
@@ -336,6 +332,23 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
     anchor
 }
 
+/// The reply box grows with its text, as wrapped at the width of the
+/// screen, up to this many rows; a paste can bring several lines.
+const COMPOSE_ROWS: u16 = 6;
+
+fn compose_rows(text: &str, width: u16) -> u16 {
+    let inner = width.saturating_sub(2);
+    if inner == 0 {
+        return 1;
+    }
+    let rows = Paragraph::new(format!("{text}▏"))
+        .wrap(Wrap { trim: false })
+        .line_count(inner);
+    u16::try_from(rows)
+        .unwrap_or(u16::MAX)
+        .clamp(1, COMPOSE_ROWS)
+}
+
 fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
     match &state.mode {
         Mode::Compose { text, thread_ts } => {
@@ -361,12 +374,25 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 None => format!(" Message to {to}"),
             };
             let title = format!("{title} · Enter sends, Esc cancels ");
-            let line = Line::from(vec![
-                Span::raw(text.as_str()),
-                Span::styled("▏", Style::new().dim()),
-            ]);
+            let mut lines: Vec<Line> = text.split('\n').map(Line::from).collect();
+            if let Some(last) = lines.last_mut() {
+                last.push_span(Span::styled("▏", Style::new().dim()));
+            }
+            // The last rows stay in view once the text outgrows the box.
+            let inner = area.inner(Margin::new(1, 1));
+            let rows = if inner.width == 0 {
+                0
+            } else {
+                Paragraph::new(lines.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(inner.width)
+            };
+            let scroll = rows.saturating_sub(usize::from(inner.height));
             frame.render_widget(
-                Paragraph::new(line).block(Block::bordered().title(title)),
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
+                    .block(Block::bordered().title(title)),
                 area,
             );
         }

@@ -80,7 +80,7 @@ impl Names {
             .and_then(|()| serde_json::to_vec(self).map_err(std::io::Error::other))
             .and_then(|json| paths::write_private(path, &json));
         if let Err(err) = written {
-            eprintln!("warning: could not save the name cache: {err}");
+            crate::warn::warn(format!("could not save the name cache: {err}"));
         }
     }
 

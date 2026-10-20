@@ -29,7 +29,9 @@ pub fn unreads(json: bool, no_color: bool) -> Result<()> {
     let view = view::build(&client, &counts, &mut names, view::Reach::Unread)?;
     names.save();
     if let Err(err) = lastview::remember(team_id, &view) {
-        eprintln!("warning: could not record the view for `slack read`: {err:#}");
+        crate::warn::warn(format!(
+            "could not record the view for `slack read`: {err:#}"
+        ));
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&view)?);
@@ -310,9 +312,9 @@ pub fn show(spec: &str, limit: usize, json: bool, no_color: bool) -> Result<()> 
     let latest = page.messages.last().map(|m| m.ts.as_str());
     let threads = Refs::of_messages(&channel, &page.messages).into_threads();
     if let Err(err) = lastview::remember_conversation(team_id, &channel, latest, threads) {
-        eprintln!(
-            "warning: could not record the conversation for `slack read` and `slack thread`: {err:#}"
-        );
+        crate::warn::warn(format!(
+            "could not record the conversation for `slack read` and `slack thread`: {err:#}"
+        ));
     }
     let style = Style::detect(no_color);
     let new = page

@@ -23,7 +23,9 @@ pub fn fetch(client: &Client) -> Result<Prefs, api::Error> {
         Ok(body) => Ok(parse(&body)),
         Err(err @ api::Error::Auth { .. }) => Err(err),
         Err(err) => {
-            eprintln!("warning: could not read the notification preferences: {err}");
+            crate::warn::warn(format!(
+                "could not read the notification preferences: {err}"
+            ));
             Ok(Prefs::default())
         }
     }

@@ -77,7 +77,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `c`                | Open any channel, group or person (`/` filters, Space marks people)           |
 | `x`                | Close an opened conversation                                                  |
 | `u`, `y`           | Open a link of the highlighted message, or copy it                            |
-| `J`/`K`, PgDn/PgUp | Scroll the messages                                                           |
+| `J`/`K`, PgDn/PgUp | Scroll the messages, from the list                                            |
 | `r`                | Mark it as read                                                               |
 | `R`                | Mark everything listed as read (asks first)                                   |
 | `o`                | Open it in Slack                                                              |
@@ -85,7 +85,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `?`                | Keys                                                                          |
 | `q`                | Quit                                                                          |
 
-A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. Replies are one line; use `slack send` with stdin for a longer message.
+A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. A reply is typed on one line and Enter sends it; pasted text keeps its line breaks. `slack send` with stdin takes a long message.
 
 Without a terminal on both ends, as in a pipe or a script, `slack` prints what `slack unreads` prints instead of drawing.
 
