@@ -2,7 +2,7 @@
 
 use jiff::Zoned;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
@@ -229,23 +229,22 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
                 Style::new().dim(),
             ));
         }
-        let rest_style = if read {
+        let style = if read {
             Style::new().dim()
         } else {
             Style::new()
         };
-        let mut first_style = rest_style;
-        if state.focus == Focus::Messages && index == state.cursor {
-            first_style = first_style.add_modifier(Modifier::REVERSED);
-        }
-        lines.push(Line::from(spans).style(first_style));
+        lines.push(Line::from(spans).style(style));
         for rest in text_lines {
             lines.push(
                 Line::from(vec![Span::raw(indent.clone()), Span::raw(rest.to_string())])
-                    .style(rest_style),
+                    .style(style),
             );
         }
     }
+    // Where the messages end, before the footnote: the last one is
+    // highlighted up to here.
+    let text_end = lines.len();
     if has_more && !history {
         let note = if in_thread {
             "more replies not shown"
@@ -288,11 +287,38 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
     } else {
         (i32::from(anchor) + state.scroll).max(0) as u16
     };
+    // The highlighted message as rows of the pane, every row it wraps to.
+    let highlight = (state.focus == Focus::Messages)
+        .then(|| starts.get(state.cursor).copied())
+        .flatten()
+        .map(|start| {
+            let end = starts.get(state.cursor + 1).copied().unwrap_or(text_end);
+            (row_of(start), row_of(end))
+        });
     let paragraph = Paragraph::new(lines)
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(paragraph, area);
+    // A full-width block over the highlighted message, painted after the
+    // text: a line's own style stops where its text does.
+    if let Some((from, to)) = highlight {
+        let inner = area.inner(Margin::new(1, 1));
+        let scroll = usize::from(scroll);
+        let top = from.max(scroll);
+        let bottom = to.min(scroll + usize::from(inner.height));
+        if top < bottom {
+            let block = Rect {
+                x: inner.x,
+                y: inner.y + (top - scroll) as u16,
+                width: inner.width,
+                height: (bottom - top) as u16,
+            };
+            frame
+                .buffer_mut()
+                .set_style(block, Style::new().add_modifier(Modifier::REVERSED));
+        }
+    }
     anchor
 }
 
