@@ -26,7 +26,7 @@ pub fn unreads(json: bool, no_color: bool) -> Result<()> {
     let client = workspace.client();
     let mut names = Names::load();
     let counts = counts::fetch(&client)?;
-    let view = view::build(&client, &counts, &mut names)?;
+    let view = view::build(&client, &counts, &mut names, view::Reach::Unread)?;
     names.save();
     if let Err(err) = lastview::remember(team_id, &view) {
         eprintln!("warning: could not record the view for `slack read`: {err:#}");

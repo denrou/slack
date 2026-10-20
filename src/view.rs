@@ -18,6 +18,20 @@ use crate::style::Style;
 use crate::threads::{self, Thread, ThreadList};
 use crate::{mrkdwn, par};
 
+/// How much of each unread conversation the view reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// The unread messages only: what the text view prints.
+    Unread,
+    /// The recent history, with the read cursor to tell the new part:
+    /// what the screen shows, so a message is read with what came before.
+    Recent,
+}
+
+/// Messages a history holds: enough to catch up, one line each on a
+/// screen.
+pub const RECENT_LIMIT: usize = 50;
+
 #[derive(Serialize)]
 pub struct View {
     /// DMs and group DMs with unreads: someone wrote to you.
@@ -48,6 +62,10 @@ pub struct Entry {
     pub messages: Option<Vec<Message>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more: bool,
+    /// The read cursor, when `messages` is a history rather than the
+    /// unread part alone: what follows it is new.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unread_from: Option<String>,
 }
 
 /// The Threads view: Slack's summary, and the list when it could be read.
@@ -156,7 +174,12 @@ impl Refs {
     }
 }
 
-pub fn build(client: &Client, counts: &Counts, names: &mut Names) -> Result<View, api::Error> {
+pub fn build(
+    client: &Client,
+    counts: &Counts,
+    names: &mut Names,
+    reach: Reach,
+) -> Result<View, api::Error> {
     let unread: Vec<&Conversation> = counts.unread().collect();
     names.resolve_channels(client, unread.iter().map(|c| c.id.clone()))?;
 
@@ -171,7 +194,12 @@ pub fn build(client: &Client, counts: &Counts, names: &mut Names) -> Result<View
         .map(|c| (c.id.clone(), c.last_read.clone()))
         .collect();
     let pages = par::map(cursors, |(id, last_read)| {
-        let page = history::fetch(client, &id, last_read.as_deref(), history::DEFAULT_LIMIT);
+        let page = match reach {
+            Reach::Unread => {
+                history::fetch(client, &id, last_read.as_deref(), history::DEFAULT_LIMIT)
+            }
+            Reach::Recent => history::fetch(client, &id, None, RECENT_LIMIT),
+        };
         (id, page)
     });
     let mut pages_by_id = BTreeMap::new();
@@ -246,6 +274,13 @@ pub fn build(client: &Client, counts: &Counts, names: &mut Names) -> Result<View
                     latest: c.latest.clone(),
                     has_more: page.as_ref().is_some_and(|page| page.has_more),
                     messages: page.map(|page| page.messages),
+                    unread_from: match reach {
+                        Reach::Recent => c
+                            .last_read
+                            .clone()
+                            .filter(|cursor| history::is_usable_cursor(cursor)),
+                        Reach::Unread => None,
+                    },
                 }
             })
             .collect()
@@ -703,6 +738,7 @@ mod tests {
             latest: Some(latest.into()),
             messages,
             has_more,
+            unread_from: None,
         }
     }
 

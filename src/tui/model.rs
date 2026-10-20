@@ -75,11 +75,20 @@ impl Item {
 
     fn conversation(section: Section, entry: Entry) -> Item {
         let messages = entry.messages.unwrap_or_default();
-        let mut detail = format!(
-            "{}{} unread",
-            messages.len(),
-            if entry.has_more { "+" } else { "" }
-        );
+        let unread_from = entry.unread_from;
+        // A history holds read messages too; without a cursor the page is
+        // the unread part itself, or a conversation never read at all.
+        let (unread, more) = match &unread_from {
+            Some(cursor) => {
+                let new = messages
+                    .iter()
+                    .filter(|message| view::is_new(message, Some(cursor)))
+                    .count();
+                (new, entry.has_more && new == messages.len())
+            }
+            None => (messages.len(), entry.has_more),
+        };
+        let mut detail = format!("{unread}{} unread", if more { "+" } else { "" });
         match entry.mention_count {
             0 => {}
             1 => detail.push_str(", 1 mention"),
@@ -94,7 +103,7 @@ impl Item {
             messages,
             has_more: entry.has_more,
             latest: entry.latest,
-            unread_from: None,
+            unread_from,
         }
     }
 
@@ -143,6 +152,22 @@ impl Item {
         };
         item.describe();
         item
+    }
+
+    /// Where reading starts in the pane: the first new message of a
+    /// history, else its newest one; the unread part alone is read from
+    /// its start.
+    pub fn landing(&self) -> usize {
+        let last = self.messages.len().saturating_sub(1);
+        match &self.unread_from {
+            Some(cursor) => self
+                .messages
+                .iter()
+                .position(|message| view::is_new(message, Some(cursor)))
+                .unwrap_or(last),
+            None if self.section == Section::Opened => last,
+            None => 0,
+        }
     }
 
     /// Nothing is new any more: after a mark or a reply.
@@ -245,6 +270,8 @@ pub struct Picker {
     pub query: String,
     /// Index into `matches()`.
     pub selected: usize,
+    /// The keys go to the filter (after `/`) rather than to the list.
+    pub filtering: bool,
 }
 
 impl Picker {
@@ -253,6 +280,7 @@ impl Picker {
             choices,
             query: String::new(),
             selected: 0,
+            filtering: false,
         }
     }
 
@@ -322,8 +350,13 @@ pub struct State {
     pub items: Vec<Item>,
     /// Index into `items`; headers are never selected.
     pub selected: Option<usize>,
-    /// Lines scrolled in the messages pane (list focus only).
-    pub scroll: u16,
+    /// Lines scrolled in the messages pane (list focus only), from
+    /// `anchor`: negative shows what is above it.
+    pub scroll: i32,
+    /// Where the pane starts on its own in list focus, in lines: the new
+    /// part of a history. Only the drawing knows the line count, so it
+    /// reports it here after each draw.
+    pub anchor: u16,
     pub mode: Mode,
     /// Shown in the bottom line until the next key.
     pub status: Option<String>,
@@ -334,7 +367,7 @@ pub struct State {
     pub thread: Option<ThreadPane>,
 }
 
-const SCROLL_STEP: u16 = 10;
+const SCROLL_STEP: i32 = 10;
 
 impl State {
     pub fn new(items: Vec<Item>, me: Option<String>) -> State {
@@ -349,6 +382,7 @@ impl State {
             focus: Focus::List,
             cursor: 0,
             thread: None,
+            anchor: 0,
         }
     }
 
@@ -394,18 +428,23 @@ impl State {
         self.selected = Some(index);
         self.thread = None;
         self.scroll = 0;
-        self.read_from_the_end();
+        self.read_from_landing();
     }
 
-    /// The pane focused on the newest message, where a history is read.
-    pub fn read_from_the_end(&mut self) {
-        let len = self.pane_messages().len();
-        self.focus = if len == 0 {
-            Focus::List
-        } else {
-            Focus::Messages
-        };
-        self.cursor = len.saturating_sub(1);
+    /// The pane focused where reading starts (`Item::landing`), or the
+    /// list when there is nothing to read.
+    pub fn read_from_landing(&mut self) {
+        match self
+            .selected_item()
+            .filter(|item| !item.messages.is_empty())
+            .map(Item::landing)
+        {
+            Some(landing) => {
+                self.focus = Focus::Messages;
+                self.cursor = landing;
+            }
+            None => self.focus = Focus::List,
+        }
     }
 
     /// New items after a refresh; the opened conversations stay, and the
@@ -487,7 +526,16 @@ impl State {
                 Action::None
             }
             KeyCode::Char('K') | KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(SCROLL_STEP);
+                // Up to the top of the pane, which sits `anchor` lines
+                // above where it started.
+                self.scroll = self
+                    .scroll
+                    .saturating_sub(SCROLL_STEP)
+                    .max(-i32::from(self.anchor));
+                Action::None
+            }
+            KeyCode::Char('x') => {
+                self.close_opened();
                 Action::None
             }
             KeyCode::Char('g') => Action::Refresh,
@@ -538,9 +586,7 @@ impl State {
     fn deeper(&mut self) -> Action {
         match (self.focus, &self.thread) {
             (Focus::List, _) => {
-                if !self.pane_messages().is_empty() {
-                    self.focus = Focus::Messages;
-                }
+                self.read_from_landing();
                 Action::None
             }
             (Focus::Messages, None) => {
@@ -589,33 +635,55 @@ impl State {
         }
     }
 
-    /// The picker: typing narrows, the arrows (or Tab, Ctrl-n/p) move,
-    /// Enter opens, Esc gives up.
+    /// The picker: `j`/`k` move through the choices, Enter or `l` opens,
+    /// Esc or `h` gives up. `/` takes the keys to the filter, where
+    /// typing narrows, until Enter brings them back to the narrowed list
+    /// (Esc drops the filter instead). The arrows, Tab and Ctrl-n/p move
+    /// in both.
     fn pick(&mut self, mut picker: Picker, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => return Action::None,
-            KeyCode::Enter => {
-                if let Some(choice) = picker.picked() {
-                    return Action::Show(choice);
-                }
-            }
             KeyCode::Down | KeyCode::Tab => picker.step(1),
             KeyCode::Up | KeyCode::BackTab => picker.step(-1),
             KeyCode::Char('n') if control => picker.step(1),
             KeyCode::Char('p') if control => picker.step(-1),
-            KeyCode::Backspace => {
+            KeyCode::Enter if picker.filtering => picker.filtering = false,
+            KeyCode::Esc if picker.filtering => {
+                picker.query.clear();
+                picker.selected = 0;
+                picker.filtering = false;
+            }
+            KeyCode::Backspace if picker.filtering => {
                 picker.query.pop();
                 picker.selected = 0;
             }
-            KeyCode::Char(c) if !control => {
+            KeyCode::Char(c) if picker.filtering && !control => {
                 picker.query.push(c);
                 picker.selected = 0;
             }
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                if let Some(choice) = picker.picked() {
+                    return Action::Show(choice);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'h') | KeyCode::Left => return Action::None,
+            KeyCode::Char('/') => picker.filtering = true,
+            KeyCode::Char('j') => picker.step(1),
+            KeyCode::Char('k') => picker.step(-1),
             _ => {}
         }
         self.mode = Mode::Pick(picker);
         Action::None
+    }
+
+    /// `x`: an opened conversation leaves the list. What needs you stays
+    /// until it is read.
+    fn close_opened(&mut self) {
+        if let Some(index) = self.selected
+            && self.items[index].section == Section::Opened
+        {
+            self.remove(index);
+        }
     }
 
     /// One level back: close the thread, else leave the messages pane.
@@ -668,6 +736,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counts::Kind;
 
     fn message(ts: &str) -> Message {
         Message {
@@ -925,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_narrows_on_what_is_typed_and_opens_on_enter() {
+    fn the_picker_moves_with_j_and_k_and_filters_after_a_slash() {
         let mut state = state();
         assert_eq!(state.key(press(KeyCode::Char('c'))), Action::OpenPicker);
         let choices = vec![
@@ -935,42 +1004,120 @@ mod tests {
             choice(ChoiceKind::Person, "U3", "@Bob", "bob Bob Devlin"),
         ];
         state.mode = Mode::Pick(Picker::new(choices.clone()));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('j')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.selected == 2 && p.query.is_empty()),
+            "j moves, it does not type"
+        );
+
+        state.key(press(KeyCode::Char('/')));
         for c in "dev".chars() {
             state.key(press(KeyCode::Char(c)));
         }
         let Mode::Pick(picker) = &state.mode else {
             panic!("still picking");
         };
+        assert!(picker.filtering);
         assert_eq!(picker.matches(), [0, 3], "label or search text");
-        state.key(press(KeyCode::Down));
-        state.key(press(KeyCode::Down));
+        assert_eq!(picker.selected, 0, "typing starts the list over");
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::None,
+            "Enter brings the keys back to the list"
+        );
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('j')));
         let Mode::Pick(picker) = &state.mode else {
             panic!("still picking");
         };
+        assert!(!picker.filtering);
+        assert_eq!(picker.query, "dev", "the filter stays");
         assert_eq!(picker.selected, 1, "stops at the last match");
         assert_eq!(
-            state.key(press(KeyCode::Enter)),
+            state.key(press(KeyCode::Char('l'))),
             Action::Show(choices[3].clone())
         );
         assert_eq!(state.mode, Mode::Browse);
 
         state.mode = Mode::Pick(Picker::new(choices));
+        state.key(press(KeyCode::Char('/')));
         for c in "zzz".chars() {
             state.key(press(KeyCode::Char(c)));
         }
+        state.key(press(KeyCode::Enter));
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::None,
             "nothing matches, nothing opens"
         );
+        state.key(press(KeyCode::Char('/')));
         state.key(press(KeyCode::Backspace));
         assert!(matches!(&state.mode, Mode::Pick(p) if p.query == "zz"));
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
-        assert_eq!(state.mode, Mode::Browse);
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.query.is_empty() && !p.filtering),
+            "Esc drops the filter first"
+        );
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
+        assert_eq!(state.mode, Mode::Browse, "then closes the picker");
     }
 
     #[test]
-    fn an_opened_conversation_is_read_from_its_end_and_survives_a_refresh() {
+    fn x_closes_an_opened_conversation_and_nothing_else() {
+        let mut state = state();
+        assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
+        assert_eq!(state.items.len(), 3, "what needs you is not closed");
+        let page = history::Unread {
+            messages: vec![message("3.000100")],
+            has_more: false,
+        };
+        state.open_item(Item::opened("C7".into(), "#ops".into(), page, None));
+        assert_eq!((state.selected, state.focus), (Some(3), Focus::Messages));
+        assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
+        assert_eq!(state.items.len(), 3);
+        assert_eq!((state.selected, state.focus), (Some(2), Focus::List));
+    }
+
+    #[test]
+    fn a_history_is_read_from_its_first_new_message() {
+        let entry = Entry {
+            id: "C1".into(),
+            kind: Kind::Channel,
+            name: "#dev".into(),
+            mention_count: 1,
+            latest: Some("1.000300".into()),
+            messages: Some(vec![
+                message("1.000100"),
+                message("1.000200"),
+                message("1.000300"),
+            ]),
+            has_more: true,
+            unread_from: Some("1.000150".into()),
+        };
+        let item = Item::conversation(Section::Mentions, entry);
+        assert_eq!(
+            item.detail, "2 unread, 1 mention",
+            "the read part is not counted, and the page reaches past the cursor"
+        );
+        assert_eq!(item.landing(), 1);
+
+        let mut state = State::new(vec![item], None);
+        state.key(press(KeyCode::Char('l')));
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+        state.key(press(KeyCode::Char('h')));
+        // From the list the pane starts at the new part; K shows what is
+        // above it, down to the top of the pane and no further.
+        state.anchor = 15;
+        state.key(press(KeyCode::Char('K')));
+        state.key(press(KeyCode::Char('K')));
+        assert_eq!(state.scroll, -15);
+        state.key(press(KeyCode::Char('J')));
+        assert_eq!(state.scroll, -5);
+    }
+
+    #[test]
+    fn an_opened_conversation_is_read_from_its_new_part_and_survives_a_refresh() {
         let mut state = state();
         let page = history::Unread {
             messages: vec![
@@ -984,7 +1131,11 @@ mod tests {
         assert_eq!(opened.detail, "last 3 messages, 2 new");
         state.open_item(opened);
         assert_eq!(state.selected, Some(3));
-        assert_eq!((state.focus, state.cursor), (Focus::Messages, 2));
+        assert_eq!(
+            (state.focus, state.cursor),
+            (Focus::Messages, 1),
+            "on the first new message"
+        );
 
         let again = Item::opened(
             "C7".into(),
@@ -998,6 +1149,7 @@ mod tests {
         state.open_item(again);
         assert_eq!(state.items.len(), 4, "the same conversation is replaced");
         assert_eq!(state.items[3].detail, "1 message");
+        assert_eq!(state.cursor, 0, "nothing new: on the newest message");
 
         state.replace_items(vec![item(Section::Mentions, "C1", None)]);
         assert_eq!(state.items.len(), 2);

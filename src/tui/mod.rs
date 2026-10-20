@@ -27,10 +27,6 @@ use crate::names::Names;
 use crate::style::Style;
 use crate::{counts, directory, history, lastview, mrkdwn, replies, target, view};
 
-/// Messages read when a conversation is opened from the picker: enough to
-/// catch up, one line each on the screen.
-const HISTORY_LIMIT: usize = 50;
-
 pub fn run(
     client: &Client,
     names: &mut Names,
@@ -55,7 +51,9 @@ pub fn run(
 
 fn load(client: &Client, names: &mut Names) -> Result<Vec<Item>> {
     let counts = counts::fetch(client)?;
-    let view = view::build(client, &counts, names)?;
+    // The screen reads with context: the recent history, the new part
+    // told apart. The text view reads the new part alone.
+    let view = view::build(client, &counts, names, view::Reach::Recent)?;
     Ok(Item::from_view(view, names))
 }
 
@@ -93,7 +91,9 @@ impl App<'_> {
 
     fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let now = Zoned::now();
-        terminal.draw(|frame| ui::draw(frame, &self.state, self.names, &now))?;
+        let mut anchor = 0;
+        terminal.draw(|frame| anchor = ui::draw(frame, &self.state, self.names, &now))?;
+        self.state.anchor = anchor;
         Ok(())
     }
 
@@ -412,7 +412,7 @@ impl App<'_> {
 
     /// The recent history of a conversation, as an item of the list.
     fn load_opened(&mut self, channel: String, unread_from: Option<String>) -> Result<Item> {
-        let page = history::fetch(self.client, &channel, None, HISTORY_LIMIT)?;
+        let page = history::fetch(self.client, &channel, None, view::RECENT_LIMIT)?;
         self.names
             .resolve_channels(self.client, [channel.clone()])?;
         self.resolve_people(page.messages.iter())?;
