@@ -255,16 +255,28 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
         lines.push(Line::from(note).dim());
     }
 
-    // With the focus in the pane, keep the highlighted message in view;
-    // wrapped lines make this approximate, which is good enough to follow.
-    // From the list, a history starts at its new part with a few lines of
-    // what came before above it; `K` shows the rest.
+    // Scrolling counts rows of the screen, and a long message wraps over
+    // several, so the row a line lands on is what the wrapper says, not
+    // the line's index.
     let inner_height = area.height.saturating_sub(2) as usize;
-    let anchor = separator.map_or(0, |at| at.saturating_sub(inner_height / 4)) as u16;
+    let inner_width = area.width.saturating_sub(2);
+    let row_of = |line: usize| -> usize {
+        if inner_width == 0 {
+            return line;
+        }
+        Paragraph::new(lines[..line].to_vec())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width)
+    };
+    // From the list, a history starts at its new part with a few rows of
+    // what came before above it; `K` shows the rest.
+    let anchor = separator.map_or(0, |at| row_of(at).saturating_sub(inner_height / 4)) as u16;
+    // With the focus in the pane, the highlighted message stays in view,
+    // around the middle once the pane has scrolled.
     let scroll = if state.focus == Focus::Messages {
-        let start = starts.get(state.cursor).copied().unwrap_or(0);
-        if start >= inner_height {
-            (start - inner_height / 2) as u16
+        let row = starts.get(state.cursor).map_or(0, |&start| row_of(start));
+        if row >= inner_height {
+            (row - inner_height / 2) as u16
         } else {
             0
         }
