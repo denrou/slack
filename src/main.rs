@@ -13,6 +13,7 @@ mod par;
 mod paths;
 mod prefs;
 mod read;
+mod replies;
 mod send;
 mod store;
 mod style;
@@ -86,6 +87,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show a thread: its number in the last `slack` output, or a permalink
+    Thread {
+        /// `2` as numbered by `slack`, or a Slack permalink
+        thread: String,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+        /// Disable colors
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Move through what needs you and answer it, interactively
     Ui {
         /// Also list the channels without a mention
@@ -111,6 +123,11 @@ fn main() -> ExitCode {
         }) => commands::logout(keep_browser_session),
         Some(Command::Whoami { json }) => commands::whoami(json),
         Some(Command::Ui { all }) => commands::ui(all),
+        Some(Command::Thread {
+            thread,
+            json,
+            no_color,
+        }) => commands::thread(&thread, json, no_color),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -39,7 +39,7 @@ pub fn run(
         targets
             .iter()
             .map(|spec| {
-                let channel = target::resolve(client, names, spec)?.channel;
+                let channel = target::resolve(client, names, team_id, spec)?.channel;
                 let latest = shown.get(&channel).map(|shown| shown.latest.clone());
                 let latest = latest.ok_or_else(|| {
                     anyhow!("{spec} was not in the last view; run `slack` (or `slack -a`) first")

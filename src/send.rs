@@ -14,11 +14,12 @@ use crate::target::{self, parse_permalink};
 pub fn run(
     client: &Client,
     names: &mut Names,
+    team_id: &str,
     target_spec: &str,
     text: Option<&str>,
     thread: Option<&str>,
 ) -> Result<()> {
-    let target = target::resolve(client, names, target_spec)?;
+    let target = target::resolve(client, names, team_id, target_spec)?;
     let thread_ts = match thread {
         Some(thread) => Some(thread_ts_from(thread)?),
         None => target.thread_ts,

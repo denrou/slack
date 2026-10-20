@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::Client;
 use crate::history::is_ts;
+use crate::lastview;
 use crate::names::Names;
 
 pub struct Target {
@@ -29,7 +30,20 @@ impl Permalink {
     }
 }
 
-pub fn resolve(client: &Client, names: &mut Names, spec: &str) -> Result<Target> {
+pub fn resolve(client: &Client, names: &mut Names, team_id: &str, spec: &str) -> Result<Target> {
+    if !spec.is_empty() && spec.chars().all(|c| c.is_ascii_digit()) {
+        // A thread number from the last `slack` output.
+        let number: usize = spec
+            .parse()
+            .map_err(|_| anyhow!("`{spec}` is not a thread number"))?;
+        let thread = lastview::thread_ref(team_id, number)?.ok_or_else(|| {
+            anyhow!("the last view numbered no thread {number}; run `slack` first")
+        })?;
+        return Ok(Target {
+            channel: thread.channel,
+            thread_ts: Some(thread.ts),
+        });
+    }
     if let Some(link) = parse_permalink(spec) {
         let thread_ts = link.thread();
         return Ok(Target {

@@ -1,6 +1,6 @@
 //! The TUI's state and its pure transitions: what the list holds, what is
-//! selected, which mode the keys go to. No I/O, so the keys are testable;
-//! `mod.rs` performs the actions.
+//! selected, which pane has the focus, which mode the keys go to. No I/O,
+//! so the keys are testable; `mod.rs` performs the actions.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -150,11 +150,32 @@ pub fn row_of(rows: &[Row], item: usize) -> Option<usize> {
         .position(|row| matches!(row, Row::Item(index) if *index == item))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    List,
+    Messages,
+}
+
+/// A thread opened from a message, shown in the messages pane in place of
+/// the item's messages: the root first, then every reply.
+pub struct ThreadPane {
+    pub channel: String,
+    pub thread_ts: String,
+    pub title: String,
+    pub messages: Vec<Message>,
+    pub has_more: bool,
+    /// The message it was opened from, to put the cursor back on it.
+    pub from_message: usize,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Browse,
-    /// Writing a reply to the selected item.
-    Compose(String),
+    /// Writing a reply: to the selected item, or in `thread_ts`.
+    Compose {
+        text: String,
+        thread_ts: Option<String>,
+    },
     ConfirmReadAll,
     Help,
 }
@@ -167,21 +188,34 @@ pub enum Action {
     ToggleAll,
     MarkRead(usize),
     MarkAllRead,
-    Send { item: usize, text: String },
+    Send {
+        item: usize,
+        text: String,
+        thread_ts: Option<String>,
+    },
     Open(usize),
+    /// Open the thread of a message of the selected item.
+    OpenThread {
+        item: usize,
+        message: usize,
+    },
 }
 
 pub struct State {
     pub items: Vec<Item>,
     /// Index into `items`; headers are never selected.
     pub selected: Option<usize>,
-    /// Lines scrolled in the messages pane.
+    /// Lines scrolled in the messages pane (list focus only).
     pub scroll: u16,
     pub mode: Mode,
     /// Shown in the bottom line until the next key.
     pub status: Option<String>,
     pub all: bool,
     pub me: Option<String>,
+    pub focus: Focus,
+    /// The highlighted message of the pane, when the pane has the focus.
+    pub cursor: usize,
+    pub thread: Option<ThreadPane>,
 }
 
 const SCROLL_STEP: u16 = 10;
@@ -197,11 +231,32 @@ impl State {
             status: None,
             all,
             me,
+            focus: Focus::List,
+            cursor: 0,
+            thread: None,
         }
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
         self.selected.and_then(|index| self.items.get(index))
+    }
+
+    /// What the messages pane shows: the open thread, else the selected
+    /// item's messages.
+    pub fn pane_messages(&self) -> &[Message] {
+        match &self.thread {
+            Some(thread) => &thread.messages,
+            None => self
+                .selected_item()
+                .map_or(&[], |item| item.messages.as_slice()),
+        }
+    }
+
+    pub fn open_thread(&mut self, pane: ThreadPane) {
+        self.thread = Some(pane);
+        self.focus = Focus::Messages;
+        self.cursor = 0;
+        self.scroll = 0;
     }
 
     /// New items after a refresh; the selection follows the same
@@ -218,7 +273,7 @@ impl State {
                     .position(|item| item.key() == (channel.as_str(), thread_ts.as_deref()))
             })
             .or_else(|| (!self.items.is_empty()).then_some(0));
-        self.scroll = 0;
+        self.back_to_list();
     }
 
     pub fn remove(&mut self, index: usize) {
@@ -230,7 +285,7 @@ impl State {
         } else {
             Some(index.min(self.items.len() - 1))
         };
-        self.scroll = 0;
+        self.back_to_list();
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Action {
@@ -240,7 +295,7 @@ impl State {
         }
         match std::mem::replace(&mut self.mode, Mode::Browse) {
             Mode::Browse => self.browse(key),
-            Mode::Compose(text) => self.compose(text, key),
+            Mode::Compose { text, thread_ts } => self.compose(text, thread_ts, key),
             Mode::ConfirmReadAll => match key.code {
                 KeyCode::Char('y' | 'Y') => Action::MarkAllRead,
                 _ => Action::None,
@@ -251,13 +306,31 @@ impl State {
 
     fn browse(&mut self, key: KeyEvent) -> Action {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
+            KeyCode::Char('q') => Action::Quit,
+            KeyCode::Esc => {
+                if self.thread.is_some() || self.focus == Focus::Messages {
+                    self.back();
+                    Action::None
+                } else {
+                    Action::Quit
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.back();
+                Action::None
+            }
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+                if !self.pane_messages().is_empty() {
+                    self.focus = Focus::Messages;
+                }
+                Action::None
+            }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.select(1);
+                self.step(1);
                 Action::None
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.select(-1);
+                self.step(-1);
                 Action::None
             }
             KeyCode::Char('J') | KeyCode::PageDown => {
@@ -280,15 +353,41 @@ impl State {
                 Action::None
             }
             KeyCode::Char('o') => self.selected.map_or(Action::None, Action::Open),
-            KeyCode::Enter | KeyCode::Char('s') if self.selected.is_some() => {
-                self.mode = Mode::Compose(String::new());
-                Action::None
-            }
+            KeyCode::Enter | KeyCode::Char('s') => self.enter(),
             _ => Action::None,
         }
     }
 
-    fn compose(&mut self, mut text: String, key: KeyEvent) -> Action {
+    /// Enter: reply to the selected item from the list; open the
+    /// highlighted message's thread from the pane; reply in the thread
+    /// once one is open.
+    fn enter(&mut self) -> Action {
+        let Some(item) = self.selected else {
+            return Action::None;
+        };
+        match (self.focus, &self.thread) {
+            (Focus::List, _) => {
+                self.mode = Mode::Compose {
+                    text: String::new(),
+                    thread_ts: self.items[item].thread_ts.clone(),
+                };
+                Action::None
+            }
+            (Focus::Messages, Some(thread)) => {
+                self.mode = Mode::Compose {
+                    text: String::new(),
+                    thread_ts: Some(thread.thread_ts.clone()),
+                };
+                Action::None
+            }
+            (Focus::Messages, None) => Action::OpenThread {
+                item,
+                message: self.cursor,
+            },
+        }
+    }
+
+    fn compose(&mut self, mut text: String, thread_ts: Option<String>, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => Action::None,
             KeyCode::Enter => {
@@ -297,9 +396,10 @@ impl State {
                     Some(item) if !trimmed.is_empty() => Action::Send {
                         item,
                         text: trimmed,
+                        thread_ts,
                     },
                     Some(_) => {
-                        self.mode = Mode::Compose(text);
+                        self.mode = Mode::Compose { text, thread_ts };
                         Action::None
                     }
                     None => Action::None,
@@ -307,17 +407,49 @@ impl State {
             }
             KeyCode::Backspace => {
                 text.pop();
-                self.mode = Mode::Compose(text);
+                self.mode = Mode::Compose { text, thread_ts };
                 Action::None
             }
             KeyCode::Char(c) => {
                 text.push(c);
-                self.mode = Mode::Compose(text);
+                self.mode = Mode::Compose { text, thread_ts };
                 Action::None
             }
             _ => {
-                self.mode = Mode::Compose(text);
+                self.mode = Mode::Compose { text, thread_ts };
                 Action::None
+            }
+        }
+    }
+
+    /// One level back: close the thread, else leave the messages pane.
+    fn back(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            self.cursor = thread.from_message;
+            self.scroll = 0;
+        } else if self.focus == Focus::Messages {
+            self.focus = Focus::List;
+            self.cursor = 0;
+        }
+    }
+
+    fn back_to_list(&mut self) {
+        self.thread = None;
+        self.focus = Focus::List;
+        self.cursor = 0;
+        self.scroll = 0;
+    }
+
+    fn step(&mut self, step: isize) {
+        match self.focus {
+            Focus::List => self.select(step),
+            Focus::Messages => {
+                let len = self.pane_messages().len();
+                if len == 0 {
+                    return;
+                }
+                let last = len as isize - 1;
+                self.cursor = (self.cursor as isize + step).clamp(0, last) as usize;
             }
         }
     }
@@ -330,6 +462,8 @@ impl State {
         let next = (current as isize + step).clamp(0, last);
         if next as usize != current {
             self.selected = Some(next as usize);
+            self.thread = None;
+            self.cursor = 0;
             self.scroll = 0;
         }
     }
@@ -339,6 +473,20 @@ impl State {
 mod tests {
     use super::*;
 
+    fn message(ts: &str) -> Message {
+        Message {
+            ts: ts.to_string(),
+            user: None,
+            bot: None,
+            text: String::new(),
+            subtype: None,
+            thread_ts: None,
+            reply_count: 0,
+            files: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
+
     fn item(section: Section, channel: &str, thread_ts: Option<&str>) -> Item {
         Item {
             section,
@@ -346,9 +494,9 @@ mod tests {
             thread_ts: thread_ts.map(str::to_string),
             title: channel.to_string(),
             detail: String::new(),
-            messages: Vec::new(),
+            messages: vec![message("1.000100"), message("1.000200")],
             has_more: false,
-            latest: Some("1.000100".to_string()),
+            latest: Some("1.000200".to_string()),
         }
     }
 
@@ -395,20 +543,26 @@ mod tests {
     }
 
     #[test]
-    fn replying_goes_through_the_compose_mode() {
+    fn replying_from_the_list_goes_through_the_compose_mode() {
         let mut state = state();
         assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
-        assert_eq!(state.mode, Mode::Compose(String::new()));
+        assert_eq!(
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: None
+            }
+        );
         for c in "ok!".chars() {
             state.key(press(KeyCode::Char(c)));
         }
         state.key(press(KeyCode::Backspace));
-        assert_eq!(state.mode, Mode::Compose("ok".to_string()));
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::Send {
                 item: 0,
-                text: "ok".to_string()
+                text: "ok".to_string(),
+                thread_ts: None
             }
         );
         assert_eq!(state.mode, Mode::Browse);
@@ -420,9 +574,73 @@ mod tests {
             Action::None,
             "blank text is not sent"
         );
-        assert!(matches!(state.mode, Mode::Compose(_)));
+        assert!(matches!(state.mode, Mode::Compose { .. }));
         state.key(press(KeyCode::Esc));
         assert_eq!(state.mode, Mode::Browse);
+
+        // A thread item from the list replies in its thread.
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Enter));
+        assert_eq!(
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: Some("2.000100".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn the_messages_pane_opens_threads_and_replies_in_them() {
+        let mut state = state();
+        assert_eq!(state.key(press(KeyCode::Char('l'))), Action::None);
+        assert_eq!(state.focus, Focus::Messages);
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(state.cursor, 1);
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(state.cursor, 1, "stays on the last message");
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::OpenThread {
+                item: 0,
+                message: 1
+            }
+        );
+
+        state.open_thread(ThreadPane {
+            channel: "D1".into(),
+            thread_ts: "1.000200".into(),
+            title: "@jane › no rush".into(),
+            messages: vec![message("1.000200"), message("1.000300")],
+            has_more: false,
+            from_message: 1,
+        });
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 0));
+        state.key(press(KeyCode::Enter));
+        assert_eq!(
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: Some("1.000200".to_string())
+            }
+        );
+        state.key(press(KeyCode::Esc));
+
+        assert_eq!(
+            state.key(press(KeyCode::Esc)),
+            Action::None,
+            "closes the thread"
+        );
+        assert!(state.thread.is_none());
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+        assert_eq!(
+            state.key(press(KeyCode::Esc)),
+            Action::None,
+            "leaves the pane"
+        );
+        assert_eq!(state.focus, Focus::List);
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::Quit);
     }
 
     #[test]
@@ -447,11 +665,13 @@ mod tests {
     fn the_selection_follows_the_item_across_a_refresh_and_a_removal() {
         let mut state = state();
         state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('l')));
         state.replace_items(vec![
             item(Section::Mentions, "C1", None),
             item(Section::Threads, "C2", Some("2.000100")),
         ]);
         assert_eq!(state.selected, Some(0), "C1 is now first");
+        assert_eq!(state.focus, Focus::List);
         state.remove(0);
         assert_eq!(state.selected, Some(0));
         assert_eq!(state.items[0].channel, "C2");
@@ -459,5 +679,7 @@ mod tests {
         assert_eq!(state.selected, None);
         assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
         assert_eq!(state.key(press(KeyCode::Char('r'))), Action::None);
+        assert_eq!(state.key(press(KeyCode::Char('l'))), Action::None);
+        assert_eq!(state.focus, Focus::List, "nothing to focus");
     }
 }

@@ -1,12 +1,13 @@
 //! What the last view showed, per workspace: each conversation with the
 //! newest message it had at the time, so `slack read` moves the cursors to
-//! what was actually seen, not to whatever arrived since.
+//! what was actually seen, and the threads it numbered, so `slack thread 2`
+//! and `slack send 2` know which one that is.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
@@ -16,20 +17,39 @@ use crate::view::View;
 pub struct Shown {
     /// The newest message the conversation had when it was shown.
     pub latest: String,
-    /// It was in the attention sections (a DM or a mention), not a channel
-    /// listed by `-a`. `slack read` without arguments stops at these.
+    /// It was in the attention sections (a DM, a mention, a followed
+    /// channel), not a channel listed by `-a`. `slack read` without
+    /// arguments stops at these.
     pub attention: bool,
 }
 
-type Store = BTreeMap<String, BTreeMap<String, Shown>>;
+/// A thread the view numbered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadRef {
+    pub channel: String,
+    pub ts: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Record {
+    #[serde(default)]
+    conversations: BTreeMap<String, Shown>,
+    /// Keyed by the number printed in the view, from 1.
+    #[serde(default)]
+    threads: BTreeMap<usize, ThreadRef>,
+}
+
+type Store = BTreeMap<String, Record>;
 
 fn path() -> Result<PathBuf> {
     Ok(paths::cache_dir()?.join("last-view.json"))
 }
 
+/// The store, or an empty one: it is a cache, and an unreadable or
+/// outdated file only means the next view rewrites it.
 fn load() -> Result<Store> {
     match fs::read(path()?) {
-        Ok(raw) => serde_json::from_slice(&raw).context("last-view.json is not valid"),
+        Ok(raw) => Ok(serde_json::from_slice(&raw).unwrap_or_default()),
         Err(err) if paths::is_not_found(&err) => Ok(Store::new()),
         Err(err) => Err(err.into()),
     }
@@ -46,15 +66,25 @@ fn save(store: &Store) -> Result<()> {
 
 /// What the last view showed for this workspace, by conversation id.
 pub fn recall(team_id: &str) -> Result<BTreeMap<String, Shown>> {
-    Ok(load()?.remove(team_id).unwrap_or_default())
+    Ok(load()?
+        .remove(team_id)
+        .map(|record| record.conversations)
+        .unwrap_or_default())
+}
+
+/// The thread the last view numbered `number`.
+pub fn thread_ref(team_id: &str, number: usize) -> Result<Option<ThreadRef>> {
+    Ok(load()?
+        .get_mut(team_id)
+        .and_then(|record| record.threads.remove(&number)))
 }
 
 /// Drop conversations from the record once they were marked as read.
 pub fn forget(team_id: &str, ids: &[String]) -> Result<()> {
     let mut store = load()?;
-    if let Some(shown) = store.get_mut(team_id) {
+    if let Some(record) = store.get_mut(team_id) {
         for id in ids {
-            shown.remove(id);
+            record.conversations.remove(id);
         }
     }
     save(&store)
@@ -62,9 +92,8 @@ pub fn forget(team_id: &str, ids: &[String]) -> Result<()> {
 
 /// Replace the workspace's record with what this view showed.
 pub fn remember(team_id: &str, view: &View) -> Result<()> {
-    // A corrupt cache is replaced, not fatal: it only feeds `slack read`.
     let mut store = load().unwrap_or_default();
-    let shown = view
+    let conversations = view
         .shown()
         .map(|(id, latest, attention)| {
             let shown = Shown {
@@ -74,6 +103,18 @@ pub fn remember(team_id: &str, view: &View) -> Result<()> {
             (id.to_string(), shown)
         })
         .collect();
-    store.insert(team_id.to_string(), shown);
+    let threads = view
+        .thread_refs()
+        .into_iter()
+        .enumerate()
+        .map(|(index, thread)| (index + 1, thread))
+        .collect();
+    store.insert(
+        team_id.to_string(),
+        Record {
+            conversations,
+            threads,
+        },
+    );
     save(&store)
 }

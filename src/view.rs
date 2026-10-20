@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::api::{self, Client};
 use crate::counts::{Conversation, Counts, Kind};
 use crate::history::{self, Message, compare_ts};
+use crate::lastview::ThreadRef;
 use crate::names::Names;
 use crate::style::Style;
 use crate::threads::{self, Thread, ThreadList};
@@ -98,6 +99,64 @@ impl View {
             .filter_map(|(entry, attention)| {
                 Some((entry.id.as_str(), entry.latest.as_deref()?, attention))
             })
+    }
+
+    /// Every thread the view shows, in reading order: the messages with
+    /// replies, then the threads of the Threads section. The 1-based
+    /// position is the number printed next to it, for `slack thread N`.
+    pub fn thread_refs(&self) -> Vec<ThreadRef> {
+        let mut refs: Vec<ThreadRef> = Vec::new();
+        let mut add = |channel: &str, ts: &str| {
+            let thread = ThreadRef {
+                channel: channel.to_string(),
+                ts: ts.to_string(),
+            };
+            if !refs.contains(&thread) {
+                refs.push(thread);
+            }
+        };
+        let entries = |entries: &[Entry], add: &mut dyn FnMut(&str, &str)| {
+            for entry in entries {
+                for message in entry.messages.iter().flatten() {
+                    if message.reply_count > 0 {
+                        add(
+                            &entry.id,
+                            message.thread_ts.as_deref().unwrap_or(&message.ts),
+                        );
+                    }
+                }
+            }
+        };
+        entries(&self.direct_messages, &mut add);
+        entries(&self.mentions, &mut add);
+        entries(&self.channels, &mut add);
+        for thread in self.threads.iter().flat_map(|t| t.items.iter().flatten()) {
+            add(&thread.channel, &thread.thread_ts);
+        }
+        if self.all {
+            entries(&self.more_channels, &mut add);
+        }
+        refs
+    }
+}
+
+/// The thread numbers of a view, for the rendering.
+pub(crate) struct Refs(Vec<ThreadRef>);
+
+impl Refs {
+    pub(crate) fn of(view: &View) -> Refs {
+        Refs(view.thread_refs())
+    }
+
+    pub(crate) fn none() -> Refs {
+        Refs(Vec::new())
+    }
+
+    fn number(&self, channel: &str, ts: &str) -> Option<usize> {
+        self.0
+            .iter()
+            .position(|thread| thread.channel == channel && thread.ts == ts)
+            .map(|index| index + 1)
     }
 }
 
@@ -265,7 +324,7 @@ fn collect_people(people: &mut BTreeSet<String>, message: &Message) {
 }
 
 /// The user ids named in a message, so their names can be looked up.
-fn mentioned_users(text: &str) -> Vec<String> {
+pub(crate) fn mentioned_users(text: &str) -> Vec<String> {
     text.match_indices("<@")
         .filter_map(|(at, _)| {
             let rest = &text[at + 2..];
@@ -295,6 +354,7 @@ fn render_at(
     now: &Zoned,
     out: &mut impl Write,
 ) -> io::Result<()> {
+    let refs = Refs::of(view);
     let printed = Cell::new(false);
     let section = |title: &str, entries: &[Entry], out: &mut dyn Write| -> io::Result<()> {
         if entries.is_empty() {
@@ -306,7 +366,7 @@ fn render_at(
         printed.set(true);
         writeln!(out, "{}", style.heading(title))?;
         for entry in entries {
-            render_entry(entry, names, style, me, now, out)?;
+            render_entry(entry, &refs, names, style, me, now, out)?;
         }
         Ok(())
     };
@@ -331,7 +391,7 @@ fn render_at(
             }
             Some(items) => {
                 for thread in items {
-                    render_thread(thread, names, style, me, now, out)?;
+                    render_thread(thread, &refs, names, style, me, now, out)?;
                 }
                 if threads.has_more {
                     writeln!(out, "  {}", style.dim("more threads not shown"))?;
@@ -381,6 +441,7 @@ fn render_at(
 
 fn render_entry(
     entry: &Entry,
+    refs: &Refs,
     names: &Names,
     style: &Style,
     me: Option<&str>,
@@ -407,22 +468,23 @@ fn render_entry(
         style.dim(&format!("({count}{mentions})"))
     )?;
     match &entry.messages {
-        Some(messages) => render_messages(
-            messages,
-            entry.has_more,
-            entry.kind != Kind::Im,
-            names,
-            style,
-            me,
-            now,
-            out,
-        ),
+        Some(messages) => {
+            let list = MessageList {
+                messages,
+                channel: &entry.id,
+                has_more: entry.has_more,
+                show_author: entry.kind != Kind::Im,
+                in_thread: false,
+            };
+            render_messages(&list, refs, names, style, me, now, out)
+        }
         None => Ok(()),
     }
 }
 
 fn render_thread(
     thread: &Thread,
+    refs: &Refs,
     names: &Names,
     style: &Style,
     me: Option<&str>,
@@ -436,42 +498,57 @@ fn render_thread(
         1 => "1 new reply".to_string(),
         n => format!("{n}{} new replies", if thread.has_more { "+" } else { "" }),
     };
+    let number = refs
+        .number(&thread.channel, &thread.thread_ts)
+        .map(|n| format!(", thread {n}"))
+        .unwrap_or_default();
     writeln!(
         out,
         "  {} › {}  {}",
         style.bold(&names.channel_label(&thread.channel)),
         excerpt(&root, 60),
-        style.dim(&format!("({count})"))
+        style.dim(&format!("({count}{number})"))
     )?;
-    render_messages(
-        &thread.unread_replies,
-        false,
-        true,
-        names,
-        style,
-        me,
-        now,
-        out,
-    )
+    let list = MessageList {
+        messages: &thread.unread_replies,
+        channel: &thread.channel,
+        has_more: false,
+        show_author: true,
+        in_thread: true,
+    };
+    render_messages(&list, refs, names, style, me, now, out)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_messages(
-    messages: &[Message],
-    has_more: bool,
-    show_author: bool,
+/// Messages to render as a block, with what the notes need to know.
+pub(crate) struct MessageList<'a> {
+    pub messages: &'a [Message],
+    pub channel: &'a str,
+    /// Older messages exist beyond this page.
+    pub has_more: bool,
+    pub show_author: bool,
+    /// Inside a thread every message is a reply; do not say so each time.
+    pub in_thread: bool,
+}
+
+pub(crate) fn render_messages(
+    list: &MessageList,
+    refs: &Refs,
     names: &Names,
     style: &Style,
     me: Option<&str>,
     now: &Zoned,
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    let times: Vec<String> = messages.iter().map(|m| format_ts(&m.ts, now)).collect();
+    let times: Vec<String> = list
+        .messages
+        .iter()
+        .map(|m| format_ts(&m.ts, now))
+        .collect();
     let width = times.iter().map(|t| t.chars().count()).max().unwrap_or(0);
     let indent = " ".repeat(4 + width + 2);
     let user = |id: &str| names.user_name(id);
     let channel = |id: &str| names.channel_name(id);
-    for (message, time) in messages.iter().zip(times) {
+    for (message, time) in list.messages.iter().zip(times) {
         let time = format!("{time:>width$}");
         let time = if me.is_some_and(|me| message.mentions(me)) {
             style.mention(&time)
@@ -479,7 +556,7 @@ fn render_messages(
             style.dim(&time)
         };
         let mut head = String::new();
-        if show_author {
+        if list.show_author {
             let author = match (&message.user, &message.bot) {
                 (Some(user), _) => Some(names.user_label(user)),
                 (None, Some(bot)) => Some(format!("{bot} (bot)")),
@@ -492,13 +569,19 @@ fn render_messages(
         }
         let mut text = mrkdwn::render(&message.text, &user, &channel, style);
         let mut notes = Vec::new();
-        if message.is_reply() {
+        if !list.in_thread && message.is_reply() {
             notes.push("in thread".to_string());
         }
-        match message.reply_count {
-            0 => {}
-            1 => notes.push("1 reply".to_string()),
-            n => notes.push(format!("{n} replies")),
+        if message.reply_count > 0 {
+            let replies = match message.reply_count {
+                1 => "1 reply".to_string(),
+                n => format!("{n} replies"),
+            };
+            let thread_ts = message.thread_ts.as_deref().unwrap_or(&message.ts);
+            notes.push(match refs.number(list.channel, thread_ts) {
+                Some(number) => format!("thread {number}: {replies}"),
+                None => replies,
+            });
         }
         for file in &message.files {
             notes.push(format!("file: {file}"));
@@ -515,12 +598,13 @@ fn render_messages(
         let text = text.replace('\n', &format!("\n{indent}"));
         writeln!(out, "    {time}  {head}{text}")?;
     }
-    if has_more {
-        writeln!(
-            out,
-            "{indent}{}",
-            style.dim("earlier unread messages not shown")
-        )?;
+    if list.has_more {
+        let note = if list.in_thread {
+            "more replies not shown"
+        } else {
+            "earlier unread messages not shown"
+        };
+        writeln!(out, "{indent}{}", style.dim(note))?;
     }
     Ok(())
 }
@@ -674,7 +758,9 @@ mod tests {
     }
 
     #[test]
-    fn the_text_rendering_groups_and_marks_what_was_shown() {
+    fn the_text_rendering_groups_numbers_and_marks_what_was_shown() {
+        let mut with_replies = message("1760899000.000200", Some("U1"), "no rush");
+        with_replies.reply_count = 2;
         let view = View {
             direct_messages: vec![entry(
                 "D1",
@@ -688,7 +774,7 @@ mod tests {
                         Some("U1"),
                         "can you look at the deploy?",
                     ),
-                    message("1760899000.000200", Some("U1"), "no rush"),
+                    with_replies,
                 ]),
                 false,
             )],
@@ -738,6 +824,11 @@ mod tests {
             "{}",
             lines[2]
         );
+        assert!(
+            lines[3].ends_with("  no rush [thread 1: 2 replies]"),
+            "{}",
+            lines[3]
+        );
         assert_eq!(lines[4], "");
         assert_eq!(lines[5], "Mentions");
         assert_eq!(lines[6], "  #alerts  (1+ unread, 1 mention)");
@@ -751,6 +842,7 @@ mod tests {
             lines[12]
         );
         assert_eq!(lines.len(), 13, "the other channel stays hidden");
+
         let shown: Vec<(&str, &str, bool)> = view.shown().collect();
         assert_eq!(
             shown,
@@ -760,10 +852,17 @@ mod tests {
                 ("C3", "1760899550.000350", true),
             ]
         );
+        assert_eq!(
+            view.thread_refs(),
+            [ThreadRef {
+                channel: "D1".into(),
+                ts: "1760899000.000200".into()
+            }]
+        );
     }
 
     #[test]
-    fn threads_are_listed_or_summarised() {
+    fn threads_are_listed_numbered_or_summarised() {
         let thread = Thread {
             channel: "C9".into(),
             thread_ts: "1760890000.000100".into(),
@@ -791,13 +890,17 @@ mod tests {
         let text = rendered(&view);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "Threads");
-        assert_eq!(lines[1], "  C9 › monthly update draft  (1 new reply)");
+        assert_eq!(
+            lines[1],
+            "  C9 › monthly update draft  (1 new reply, thread 1)"
+        );
         assert!(
             lines[2].ends_with("  U3: added the Q4 numbers"),
             "{}",
             lines[2]
         );
         assert_eq!(lines[3], "  more threads not shown");
+        assert_eq!(view.thread_refs().len(), 1);
 
         view.threads.as_mut().unwrap().items = None;
         let text = rendered(&view);

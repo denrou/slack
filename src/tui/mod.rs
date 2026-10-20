@@ -1,12 +1,14 @@
 //! `slack ui`: the view as something to move through and answer. One list
 //! of what needs you on the left, the messages of the selected item on the
-//! right, a reply box at the bottom. Same model as the text view; this
-//! module adds state and keys. API calls stay blocking: each takes a few
-//! hundred milliseconds, and the status line says so meanwhile.
+//! right (or the thread opened from one of them), a reply box at the
+//! bottom. Same model as the text view; this module adds state and keys.
+//! API calls stay blocking: each takes a few hundred milliseconds, and the
+//! status line says so meanwhile.
 
 mod model;
 mod ui;
 
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -16,10 +18,11 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use serde_json::Value;
 
-use self::model::{Action, Item, State};
+use self::model::{Action, Item, State, ThreadPane};
 use crate::api::{self, Client};
 use crate::names::Names;
-use crate::{counts, lastview, view};
+use crate::style::Style;
+use crate::{counts, lastview, mrkdwn, replies, view};
 
 pub fn run(
     client: &Client,
@@ -125,14 +128,14 @@ impl App<'_> {
                 self.state.status = Some(format!("Marked {marked} as read"));
                 Ok(())
             }
-            Action::Send { item, text } => {
+            Action::Send {
+                item,
+                text,
+                thread_ts,
+            } => {
                 self.busy(terminal, "Sending…")?;
-                match self.send(item, &text) {
-                    Ok(title) => {
-                        self.state.remove(item);
-                        self.state.status = Some(format!("Sent to {title}"));
-                        Ok(())
-                    }
+                match self.send(item, &text, thread_ts.as_deref()) {
+                    Ok(title) => self.after_send(item, &title),
                     Err(err) => self.fail(err),
                 }
             }
@@ -143,6 +146,17 @@ impl App<'_> {
                 }
                 Err(err) => self.fail(err),
             },
+            Action::OpenThread { item, message } => {
+                self.busy(terminal, "Loading the thread…")?;
+                match self.open_thread(item, message) {
+                    Ok(pane) => {
+                        self.state.open_thread(pane);
+                        self.state.status = None;
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
+                }
+            }
         }
     }
 
@@ -200,16 +214,16 @@ impl App<'_> {
         Ok(item.title.clone())
     }
 
-    /// Post the reply; a conversation is then read up to it, as it is in
-    /// the app when you answer.
-    fn send(&mut self, index: usize, text: &str) -> Result<String> {
+    /// Post the reply. A conversation answered from the list is then read
+    /// up to the reply, as it is in the app when you answer.
+    fn send(&mut self, index: usize, text: &str, thread_ts: Option<&str>) -> Result<String> {
         let item = &self.state.items[index];
         let mut params = vec![("channel", item.channel.as_str()), ("text", text)];
-        if let Some(thread_ts) = &item.thread_ts {
+        if let Some(thread_ts) = thread_ts {
             params.push(("thread_ts", thread_ts));
         }
         let posted = self.client.call("chat.postMessage", &params)?;
-        if item.thread_ts.is_none()
+        if thread_ts.is_none()
             && let Some(ts) = posted.get("ts").and_then(Value::as_str)
         {
             // Best effort: the reply is sent either way.
@@ -220,6 +234,78 @@ impl App<'_> {
             let _ = lastview::forget(self.team_id, std::slice::from_ref(&item.channel));
         }
         Ok(item.title.clone())
+    }
+
+    /// After a reply: inside an open thread the thread is reloaded to show
+    /// it; from the list the item is done with and leaves the list.
+    fn after_send(&mut self, item: usize, title: &str) -> Result<()> {
+        match self.state.thread.take() {
+            Some(pane) => match self.reload_thread(pane) {
+                Ok(pane) => {
+                    self.state.thread = Some(pane);
+                    self.state.status = Some("Sent".to_string());
+                    Ok(())
+                }
+                Err(err) => self.fail(err),
+            },
+            None => {
+                self.state.remove(item);
+                self.state.status = Some(format!("Sent to {title}"));
+                Ok(())
+            }
+        }
+    }
+
+    fn open_thread(&mut self, item: usize, message: usize) -> Result<ThreadPane> {
+        let it = &self.state.items[item];
+        let msg = it
+            .messages
+            .get(message)
+            .ok_or_else(|| anyhow!("no message is highlighted"))?;
+        let thread_ts = msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone());
+        let channel = it.channel.clone();
+        let fetched = replies::fetch(self.client, &channel, &thread_ts)?;
+        self.resolve_people(&fetched)?;
+        let user = |id: &str| self.names.user_name(id);
+        let chan = |id: &str| self.names.channel_name(id);
+        let root = mrkdwn::render(&fetched.root.text, &user, &chan, &Style::plain());
+        let title = format!(
+            "{} › {}",
+            self.names.channel_label(&channel),
+            view::excerpt(&root, 40)
+        );
+        let mut messages = vec![fetched.root];
+        messages.extend(fetched.replies);
+        Ok(ThreadPane {
+            channel,
+            thread_ts,
+            title,
+            messages,
+            has_more: fetched.has_more,
+            from_message: message,
+        })
+    }
+
+    fn reload_thread(&mut self, pane: ThreadPane) -> Result<ThreadPane> {
+        let fetched = replies::fetch(self.client, &pane.channel, &pane.thread_ts)?;
+        self.resolve_people(&fetched)?;
+        let mut messages = vec![fetched.root];
+        messages.extend(fetched.replies);
+        Ok(ThreadPane {
+            messages,
+            has_more: fetched.has_more,
+            ..pane
+        })
+    }
+
+    fn resolve_people(&mut self, fetched: &replies::Replies) -> Result<()> {
+        let mut people = BTreeSet::new();
+        for message in std::iter::once(&fetched.root).chain(&fetched.replies) {
+            people.extend(message.user.clone());
+            people.extend(view::mentioned_users(&message.text));
+        }
+        self.names.resolve_users(self.client, people)?;
+        Ok(())
     }
 
     fn open(&self, index: usize) -> Result<()> {
