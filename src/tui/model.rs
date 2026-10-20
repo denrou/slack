@@ -5,10 +5,11 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::history::{self, Message};
+use crate::mrkdwn::{self, Link};
 use crate::names::Names;
 use crate::style::Style;
 use crate::view::{self, Entry, View};
-use crate::{directory, mrkdwn, threads};
+use crate::{directory, threads};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -320,6 +321,12 @@ pub enum Mode {
     ConfirmReadAll,
     Help,
     Pick(Picker),
+    /// Which link of the highlighted message: a digit picks one, to
+    /// open it or to copy it.
+    Links {
+        links: Vec<Link>,
+        copy: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -344,6 +351,10 @@ pub enum Action {
     OpenPicker,
     /// Open a conversation from the picker with its recent history.
     Show(Choice),
+    /// Hand a URL to the browser.
+    OpenLink(String),
+    /// Put a URL in the clipboard.
+    CopyLink(String),
 }
 
 pub struct State {
@@ -494,6 +505,7 @@ impl State {
             },
             Mode::Help => Action::None,
             Mode::Pick(picker) => self.pick(picker, key),
+            Mode::Links { links, copy } => self.choose_link(links, copy, key),
         }
     }
 
@@ -538,6 +550,8 @@ impl State {
                 self.close_opened();
                 Action::None
             }
+            KeyCode::Char('u') => self.link(false),
+            KeyCode::Char('y') => self.link(true),
             KeyCode::Char('g') => Action::Refresh,
             KeyCode::Char('c') => Action::OpenPicker,
             KeyCode::Char('?') => {
@@ -686,6 +700,45 @@ impl State {
         }
     }
 
+    /// `u` and `y`: a link of the highlighted message, opened or copied.
+    /// One link goes straight away; several ask which; none, or no
+    /// message under the cursor, is a status line.
+    fn link(&mut self, copy: bool) -> Action {
+        if self.focus != Focus::Messages {
+            self.status = Some("Move onto a message first (l)".to_string());
+            return Action::None;
+        }
+        let mut links = self
+            .pane_messages()
+            .get(self.cursor)
+            .map(|message| mrkdwn::links(&message.text))
+            .unwrap_or_default();
+        match links.len() {
+            0 => {
+                self.status = Some("No link in this message".to_string());
+                Action::None
+            }
+            1 => link_action(links.swap_remove(0).url, copy),
+            _ => {
+                // A digit picks, so the prompt stops at nine.
+                links.truncate(9);
+                self.mode = Mode::Links { links, copy };
+                Action::None
+            }
+        }
+    }
+
+    /// A digit picks a link of the prompt; any other key gives up.
+    fn choose_link(&mut self, mut links: Vec<Link>, copy: bool, key: KeyEvent) -> Action {
+        if let KeyCode::Char(c) = key.code
+            && let Some(index) = c.to_digit(10).map(|digit| digit as usize)
+            && (1..=links.len()).contains(&index)
+        {
+            return link_action(links.swap_remove(index - 1).url, copy);
+        }
+        Action::None
+    }
+
     /// One level back: close the thread, else leave the messages pane.
     fn back(&mut self) {
         if let Some(thread) = self.thread.take() {
@@ -730,6 +783,14 @@ impl State {
             self.cursor = 0;
             self.scroll = 0;
         }
+    }
+}
+
+fn link_action(url: String, copy: bool) -> Action {
+    if copy {
+        Action::CopyLink(url)
+    } else {
+        Action::OpenLink(url)
     }
 }
 
@@ -1077,6 +1138,56 @@ mod tests {
         assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
         assert_eq!(state.items.len(), 3);
         assert_eq!((state.selected, state.focus), (Some(2), Focus::List));
+    }
+
+    #[test]
+    fn u_opens_a_link_of_the_highlighted_message_and_y_copies_it() {
+        let mut state = state();
+        state.items[0].messages[0].text = "one <https://a.b/1|doc>".into();
+        state.items[0].messages[1].text = "two <https://a.b/2> and <https://a.b/3|three>".into();
+        assert_eq!(state.key(press(KeyCode::Char('u'))), Action::None);
+        assert_eq!(
+            state.status.as_deref(),
+            Some("Move onto a message first (l)")
+        );
+
+        state.key(press(KeyCode::Char('l')));
+        assert_eq!(
+            state.key(press(KeyCode::Char('u'))),
+            Action::OpenLink("https://a.b/1".into()),
+            "one link goes straight away"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Char('y'))),
+            Action::CopyLink("https://a.b/1".into())
+        );
+
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.key(press(KeyCode::Char('u'))),
+            Action::None,
+            "two links ask"
+        );
+        assert!(matches!(&state.mode, Mode::Links { links, copy: false } if links.len() == 2));
+        assert_eq!(
+            state.key(press(KeyCode::Char('2'))),
+            Action::OpenLink("https://a.b/3".into())
+        );
+        assert_eq!(state.mode, Mode::Browse);
+        state.key(press(KeyCode::Char('y')));
+        assert!(matches!(&state.mode, Mode::Links { copy: true, .. }));
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::None, "Esc gives up");
+        assert_eq!(state.mode, Mode::Browse);
+        state.key(press(KeyCode::Char('u')));
+        assert_eq!(
+            state.key(press(KeyCode::Char('7'))),
+            Action::None,
+            "no seventh link"
+        );
+
+        state.items[0].messages[1].text = "plain".into();
+        state.key(press(KeyCode::Char('u')));
+        assert_eq!(state.status.as_deref(), Some("No link in this message"));
     }
 
     #[test]

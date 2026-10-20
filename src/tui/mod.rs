@@ -10,6 +10,7 @@ mod model;
 mod ui;
 
 use std::collections::BTreeSet;
+use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -148,6 +149,20 @@ impl App<'_> {
             Action::Open(index) => match self.open(index) {
                 Ok(()) => {
                     self.state.status = Some("Opened in Slack".to_string());
+                    Ok(())
+                }
+                Err(err) => self.fail(err),
+            },
+            Action::OpenLink(url) => match launch(&url) {
+                Ok(()) => {
+                    self.state.status = Some(format!("Opened {url}"));
+                    Ok(())
+                }
+                Err(err) => self.fail(err),
+            },
+            Action::CopyLink(url) => match copy(&url) {
+                Ok(()) => {
+                    self.state.status = Some(format!("Copied {url}"));
                     Ok(())
                 }
                 Err(err) => self.fail(err),
@@ -441,20 +456,60 @@ impl App<'_> {
             ),
             None => format!("{}/archives/{}", self.workspace_url, item.channel),
         };
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        let status = Command::new(opener)
-            .arg(&url)
-            .stdin(Stdio::null())
+        launch(&url)
+    }
+}
+
+/// Hand a URL to the system opener: the browser, or the mail client for
+/// a mailto link.
+fn launch(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(anyhow!("{opener} could not open {url}"));
+    }
+    Ok(())
+}
+
+/// Put text in the clipboard through the first tool found: pbcopy on
+/// macOS, wl-copy or xclip elsewhere. Without one, the text is in the
+/// error, so the status line shows it and the mouse can take it.
+fn copy(text: &str) -> Result<()> {
+    let tools: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["pbcopy"]]
+    } else {
+        &[&["wl-copy"], &["xclip", "-selection", "clipboard"]]
+    };
+    for tool in tools {
+        let mut child = match Command::new(tool[0])
+            .args(&tool[1..])
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(anyhow!("{opener} could not open {url}"));
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
         }
-        Ok(())
+        if !child.wait()?.success() {
+            return Err(anyhow!("{} failed", tool[0]));
+        }
+        return Ok(());
     }
+    Err(anyhow!(
+        "no clipboard tool (pbcopy, wl-copy, xclip); the link is {text}"
+    ))
 }

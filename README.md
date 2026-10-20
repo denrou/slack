@@ -58,7 +58,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## The interactive view
 
-`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `c` opens a picker over every channel, group message and person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it.
+`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over every channel, group message and person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it.
 
 | Key                | Action                                              |
 | ------------------ | --------------------------------------------------- |
@@ -68,6 +68,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `Enter`, `s`       | Reply to the conversation, or in the open thread    |
 | `c`                | Open any channel, group or person (`/` filters)     |
 | `x`                | Close an opened conversation                        |
+| `u`, `y`           | Open a link of the highlighted message, or copy it  |
 | `J`/`K`, PgDn/PgUp | Scroll the messages                                 |
 | `r`                | Mark it as read                                     |
 | `R`                | Mark everything listed as read (asks first)         |

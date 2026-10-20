@@ -13,8 +13,10 @@ use crate::{mrkdwn, view};
 
 const LIST_HINTS: &str = "j/k move  l messages  Enter reply  c open any  r read  R read all  o in Slack  g refresh  ? keys  q quit";
 const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  x close  c open any  r read  o in Slack  g refresh  ? keys  q quit";
-const MESSAGES_HINTS: &str = "j/k move  l open the thread  h back  q quit";
-const THREAD_HINTS: &str = "j/k move  Enter reply in the thread  h back  q quit";
+const MESSAGES_HINTS: &str =
+    "j/k move  l open the thread  u open link  y copy link  h back  q quit";
+const THREAD_HINTS: &str =
+    "j/k move  Enter reply in the thread  u open link  y copy link  h back  q quit";
 
 const HELP: &[&str] = &[
     "j, k, arrows   move through the list, or through the messages",
@@ -23,6 +25,7 @@ const HELP: &[&str] = &[
     "Enter, s       reply: to the conversation, or in the open thread",
     "c              open any channel, group or person: j/k move, / filters, Enter opens",
     "x              close an opened conversation",
+    "u, y           open, or copy, a link of the highlighted message",
     "J, K, PgDn/Up  scroll the messages",
     "r              mark the selected one as read",
     "R              mark everything listed as read (asks first)",
@@ -34,9 +37,10 @@ const HELP: &[&str] = &[
 /// Returns where the messages pane starts on its own in list focus, for
 /// `State::anchor`.
 pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> u16 {
-    let bottom_height = match state.mode {
+    let bottom_height = match &state.mode {
         Mode::Compose { .. } => 3,
         Mode::Help => HELP.len() as u16 + 2,
+        Mode::Links { links, .. } => links.len() as u16 + 2,
         Mode::Browse | Mode::ConfirmReadAll | Mode::Pick(_) => 1,
     };
     let [main, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_height)])
@@ -301,6 +305,31 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State) {
         Mode::ConfirmReadAll => {
             let text = format!("Mark all {} as read? (y/n)", state.items.len());
             frame.render_widget(Paragraph::new(text).yellow(), area);
+        }
+        Mode::Links { links, copy } => {
+            let title = if *copy {
+                " Copy which link? · a digit picks, Esc cancels "
+            } else {
+                " Open which link? · a digit picks, Esc cancels "
+            };
+            let lines: Vec<Line> = links
+                .iter()
+                .enumerate()
+                .map(|(index, link)| {
+                    let mut spans = vec![
+                        Span::styled(format!("{}  ", index + 1), Style::new().bold()),
+                        Span::raw(link.url.as_str()),
+                    ];
+                    if let Some(label) = &link.label {
+                        spans.push(Span::styled(format!("  {label}"), Style::new().dim()));
+                    }
+                    Line::from(spans)
+                })
+                .collect();
+            frame.render_widget(
+                Paragraph::new(lines).block(Block::bordered().title(title)),
+                area,
+            );
         }
         Mode::Help => {
             let lines: Vec<Line> = HELP.iter().map(|line| Line::from(*line)).collect();

@@ -77,11 +77,8 @@ fn expand_token(token: &str, user: Lookup, channel: Lookup, style: &Style) -> Op
         };
         return Some(style.mention(&text));
     }
-    if target.contains("://") || target.starts_with("mailto:") || target.starts_with("tel:") {
-        let url = target
-            .strip_prefix("mailto:")
-            .or_else(|| target.strip_prefix("tel:"))
-            .unwrap_or(target);
+    if is_url(target) {
+        let url = shown_url(target);
         return Some(
             match label.filter(|label| !label.is_empty() && !repeats_url(label, url)) {
                 Some(label) => format!("{} ({})", label, style.link(url)),
@@ -90,6 +87,56 @@ fn expand_token(token: &str, user: Lookup, channel: Lookup, style: &Style) -> Op
         );
     }
     None
+}
+
+fn is_url(target: &str) -> bool {
+    target.contains("://") || target.starts_with("mailto:") || target.starts_with("tel:")
+}
+
+/// A mail or phone link reads better without its scheme.
+fn shown_url(target: &str) -> &str {
+    target
+        .strip_prefix("mailto:")
+        .or_else(|| target.strip_prefix("tel:"))
+        .unwrap_or(target)
+}
+
+/// A link of a message: what the opener gets, and the words it was
+/// written under when they say more than the URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub url: String,
+    pub label: Option<String>,
+}
+
+/// The links of a message, in order, each URL once: Slack writes one as
+/// `<url|label>` or `<url>`. Mail and phone links count, since the
+/// system opener takes them too.
+pub fn links(text: &str) -> Vec<Link> {
+    let mut links: Vec<Link> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        let token = &after[..end];
+        rest = &after[end + 1..];
+        let (target, label) = match token.split_once('|') {
+            Some((target, label)) => (target, Some(label)),
+            None => (token, None),
+        };
+        if !is_url(target) || links.iter().any(|link| link.url == target) {
+            continue;
+        }
+        links.push(Link {
+            url: decode_entities(target),
+            label: label
+                .filter(|label| !label.is_empty() && !repeats_url(label, shown_url(target)))
+                .map(decode_entities),
+        });
+    }
+    links
 }
 
 /// Slack labels most links with the URL itself, minus the scheme and often
@@ -233,6 +280,32 @@ mod tests {
             plain("<!here> <!channel> <!subteam^S1|@sre> <!date^1700000000^{date}|Nov 14>"),
             "@here @channel @sre Nov 14"
         );
+    }
+
+    #[test]
+    fn links_are_listed_once_each_with_the_label_that_says_more() {
+        let found = links(
+            "see <https://x.y/z|the doc> and <https://x.y/z> then \
+             <https://x.y/a?b=1&amp;c=2|x.y/a> <@U1|jane> <mailto:a@b.c|a@b.c>",
+        );
+        assert_eq!(
+            found,
+            [
+                Link {
+                    url: "https://x.y/z".into(),
+                    label: Some("the doc".into()),
+                },
+                Link {
+                    url: "https://x.y/a?b=1&c=2".into(),
+                    label: None,
+                },
+                Link {
+                    url: "mailto:a@b.c".into(),
+                    label: None,
+                },
+            ]
+        );
+        assert!(links("nothing <here").is_empty());
     }
 
     #[test]
