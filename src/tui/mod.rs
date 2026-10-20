@@ -44,7 +44,7 @@ pub fn run(
 }
 
 fn load(client: &Client, names: &mut Names, all: bool) -> Result<Vec<Item>> {
-    let counts = counts::fetch(client)?;
+    let counts = counts::load(client, names)?;
     let view = view::build(client, &counts, names, all)?;
     Ok(Item::from_view(view, names))
 }

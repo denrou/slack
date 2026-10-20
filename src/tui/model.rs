@@ -14,8 +14,12 @@ use crate::{mrkdwn, threads};
 pub enum Section {
     DirectMessages,
     Mentions,
-    Threads,
+    /// Channels you follow: private ones, and those set to "All new
+    /// messages" in Slack.
     Channels,
+    Threads,
+    /// The other channels with unreads, listed with `-a` only.
+    MoreChannels,
 }
 
 impl Section {
@@ -23,8 +27,9 @@ impl Section {
         match self {
             Section::DirectMessages => "Direct messages",
             Section::Mentions => "Mentions",
-            Section::Threads => "Threads",
             Section::Channels => "Channels",
+            Section::Threads => "Threads",
+            Section::MoreChannels => "More channels",
         }
     }
 }
@@ -56,13 +61,14 @@ impl Item {
         };
         conversations(Section::DirectMessages, view.direct_messages, &mut items);
         conversations(Section::Mentions, view.mentions, &mut items);
+        conversations(Section::Channels, view.channels, &mut items);
         if let Some(threads) = view.threads {
             for thread in threads.items.unwrap_or_default() {
                 items.push(Item::thread(thread, names));
             }
         }
         if view.all {
-            conversations(Section::Channels, view.channels, &mut items);
+            conversations(Section::MoreChannels, view.more_channels, &mut items);
         }
         items
     }

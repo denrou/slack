@@ -1,7 +1,9 @@
-//! The user's own Slack preferences, read for one thing: the channels they
-//! muted. `users.prefs.get` is a web-client endpoint and the mute list is
-//! a JSON string inside it, so a missing or unreadable pref is an empty
-//! set, which shows more rather than less.
+//! The user's own Slack preferences, read for two things: the channels
+//! they muted, and the channels they asked to be told about every message
+//! of. `users.prefs.get` is a web-client endpoint and the per-channel
+//! settings are a JSON string inside it, so a missing or unreadable pref
+//! reads as "nothing muted, nothing followed", which shows more rather
+//! than less.
 
 use std::collections::HashSet;
 
@@ -9,43 +11,52 @@ use serde_json::Value;
 
 use crate::api::{self, Client};
 
-/// The ids of the muted conversations. Only a dead session is an error;
-/// any other failure is reported and reads as "nothing muted".
-pub fn muted_channels(client: &Client) -> Result<HashSet<String>, api::Error> {
+#[derive(Debug, Default, Clone)]
+pub struct Prefs {
+    /// Muted conversations: the app badges them for mentions only.
+    pub muted: HashSet<String>,
+    /// Channels set to "All new messages": every message is wanted.
+    pub notify_all: HashSet<String>,
+}
+
+/// The preferences that shape the view. Only a dead session is an error;
+/// any other failure is reported and reads as the defaults.
+pub fn fetch(client: &Client) -> Result<Prefs, api::Error> {
     match client.call("users.prefs.get", &[]) {
-        Ok(body) => Ok(parse_muted(&body)),
+        Ok(body) => Ok(parse(&body)),
         Err(err @ api::Error::Auth { .. }) => Err(err),
         Err(err) => {
-            eprintln!("warning: could not read the mute list: {err}");
-            Ok(HashSet::new())
+            eprintln!("warning: could not read the notification preferences: {err}");
+            Ok(Prefs::default())
         }
     }
 }
 
-/// The muted conversations in a `users.prefs.get` response:
 /// `prefs.all_notifications_prefs` is a JSON string whose `channels` map
-/// carries `muted: true` per conversation.
-pub fn parse_muted(body: &Value) -> HashSet<String> {
+/// carries `muted: true` and `desktop: "everything"` per conversation.
+pub fn parse(body: &Value) -> Prefs {
     let Some(raw) = body
         .pointer("/prefs/all_notifications_prefs")
         .and_then(Value::as_str)
     else {
-        return HashSet::new();
+        return Prefs::default();
     };
-    let Ok(prefs) = serde_json::from_str::<Value>(raw) else {
-        return HashSet::new();
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return Prefs::default();
     };
+    let Some(channels) = parsed.get("channels").and_then(Value::as_object) else {
+        return Prefs::default();
+    };
+    let mut prefs = Prefs::default();
+    for (id, pref) in channels {
+        if pref.get("muted").and_then(Value::as_bool) == Some(true) {
+            prefs.muted.insert(id.clone());
+        }
+        if pref.get("desktop").and_then(Value::as_str) == Some("everything") {
+            prefs.notify_all.insert(id.clone());
+        }
+    }
     prefs
-        .get("channels")
-        .and_then(Value::as_object)
-        .map(|channels| {
-            channels
-                .iter()
-                .filter(|(_, pref)| pref.get("muted").and_then(Value::as_bool) == Some(true))
-                .map(|(id, _)| id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -55,26 +66,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn muted_conversations_are_read_out_of_the_nested_json_string() {
+    fn mutes_and_follow_everything_are_read_out_of_the_nested_json_string() {
         let inner = json!({"channels": {
             "C1": {"muted": true, "desktop": "everything"},
-            "C2": {"muted": false},
+            "C2": {"muted": false, "desktop": "everything"},
             "C3": {"desktop": "nothing"},
             "D4": {"muted": true}
         }, "global": {}});
         let body = json!({"ok": true, "prefs": {"all_notifications_prefs": inner.to_string()}});
-        let muted = parse_muted(&body);
-        assert_eq!(muted.len(), 2);
-        assert!(muted.contains("C1") && muted.contains("D4"));
+        let prefs = parse(&body);
+        assert_eq!(
+            prefs.muted,
+            HashSet::from(["C1".to_string(), "D4".to_string()])
+        );
+        assert_eq!(
+            prefs.notify_all,
+            HashSet::from(["C1".to_string(), "C2".to_string()])
+        );
     }
 
     #[test]
-    fn a_missing_or_broken_pref_mutes_nothing() {
-        assert!(parse_muted(&json!({"ok": true, "prefs": {}})).is_empty());
-        assert!(parse_muted(&json!({"prefs": {"all_notifications_prefs": "not json"}})).is_empty());
-        assert!(
-            parse_muted(&json!({"prefs": {"all_notifications_prefs": "{\"channels\": []}"}}))
-                .is_empty()
-        );
+    fn a_missing_or_broken_pref_changes_nothing() {
+        for body in [
+            json!({"ok": true, "prefs": {}}),
+            json!({"prefs": {"all_notifications_prefs": "not json"}}),
+            json!({"prefs": {"all_notifications_prefs": "{\"channels\": []}"}}),
+        ] {
+            let prefs = parse(&body);
+            assert!(prefs.muted.is_empty() && prefs.notify_all.is_empty());
+        }
     }
 }

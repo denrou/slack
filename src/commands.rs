@@ -20,8 +20,8 @@ pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let client = workspace.client();
-    let counts = counts::fetch(&client)?;
     let mut names = Names::load();
+    let counts = counts::load(&client, &mut names)?;
     let view = view::build(&client, &counts, &mut names, all)?;
     names.save();
     if let Err(err) = lastview::remember(team_id, &view) {
@@ -49,7 +49,9 @@ pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
 pub fn count(all: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (_, workspace) = store.default_workspace()?;
-    let counts = counts::fetch(&workspace.client())?;
+    let mut names = Names::load();
+    let counts = counts::load(&workspace.client(), &mut names)?;
+    names.save();
     println!(
         "{}",
         if all {
