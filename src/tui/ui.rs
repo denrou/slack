@@ -269,8 +269,13 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
             .line_count(inner_width)
     };
     // From the list, a history starts at its new part with a few rows of
-    // what came before above it; `K` shows the rest.
-    let anchor = separator.map_or(0, |at| row_of(at).saturating_sub(inner_height / 4)) as u16;
+    // what came before above it, or at its end when nothing is new, the
+    // way a chat scrolls; `K` shows the rest.
+    let anchor = match separator {
+        Some(at) => row_of(at).saturating_sub(inner_height / 4),
+        None if history => row_of(lines.len()).saturating_sub(inner_height),
+        None => 0,
+    } as u16;
     // With the focus in the pane, the highlighted message stays in view,
     // around the middle once the pane has scrolled.
     let scroll = if state.focus == Focus::Messages {
