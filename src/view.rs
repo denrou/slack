@@ -1,4 +1,4 @@
-//! The default view: what needs you, grouped the way a person answers it.
+//! The default view: what is unread, grouped the way a person answers it.
 //! The model is built first and rendered second, so `--json` and the TUI
 //! read the same thing the text rendering does.
 
@@ -24,16 +24,10 @@ pub struct View {
     pub direct_messages: Vec<Entry>,
     /// Channels where you were named.
     pub mentions: Vec<Entry>,
-    /// Channels you follow with unreads: private ones, and those set to
-    /// "All new messages" in Slack. Shown by default.
+    /// The other channels with unreads, mentions aside.
     pub channels: Vec<Entry>,
-    /// Every other channel with unreads. The text rendering hides them
-    /// unless `--all`; the JSON always carries them.
-    pub more_channels: Vec<Entry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threads: Option<ThreadsView>,
-    #[serde(skip)]
-    pub all: bool,
     /// Unread conversations left out because they are muted in Slack.
     #[serde(skip)]
     pub muted: usize,
@@ -78,27 +72,14 @@ impl ThreadsView {
 
 impl View {
     /// The conversations whose messages were shown, with the newest
-    /// message each had and whether it needed you (a DM, a mention, a
-    /// followed channel) rather than being listed by `-a`: what
-    /// `slack read` may mark as read.
-    pub fn shown(&self) -> impl Iterator<Item = (&str, &str, bool)> {
-        let attention = self
-            .direct_messages
+    /// message each had: what `slack read` may mark as read.
+    pub fn shown(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.direct_messages
             .iter()
             .chain(&self.mentions)
             .chain(&self.channels)
-            .map(|entry| (entry, true));
-        let more = self
-            .more_channels
-            .iter()
-            .filter(|_| self.all)
-            .map(|entry| (entry, false));
-        attention
-            .chain(more)
-            .filter(|(entry, _)| entry.messages.is_some())
-            .filter_map(|(entry, attention)| {
-                Some((entry.id.as_str(), entry.latest.as_deref()?, attention))
-            })
+            .filter(|entry| entry.messages.is_some())
+            .filter_map(|entry| Some((entry.id.as_str(), entry.latest.as_deref()?)))
     }
 
     /// Every thread the view shows, in reading order: the messages with
@@ -118,9 +99,6 @@ impl View {
         entries(&self.channels, &mut refs);
         for thread in self.threads.iter().flat_map(|t| t.items.iter().flatten()) {
             add_thread(&mut refs, &thread.channel, &thread.thread_ts);
-        }
-        if self.all {
-            entries(&self.more_channels, &mut refs);
         }
         refs
     }
@@ -178,12 +156,7 @@ impl Refs {
     }
 }
 
-pub fn build(
-    client: &Client,
-    counts: &Counts,
-    names: &mut Names,
-    all: bool,
-) -> Result<View, api::Error> {
+pub fn build(client: &Client, counts: &Counts, names: &mut Names) -> Result<View, api::Error> {
     let unread: Vec<&Conversation> = counts.unread().collect();
     names.resolve_channels(client, unread.iter().map(|c| c.id.clone()))?;
 
@@ -192,9 +165,6 @@ pub fn build(
     to_read.extend(sections.direct_messages.iter().copied());
     to_read.extend(sections.mentions.iter().copied());
     to_read.extend(sections.channels.iter().copied());
-    if all {
-        to_read.extend(sections.more_channels.iter().copied());
-    }
 
     let cursors: Vec<(String, Option<String>)> = to_read
         .iter()
@@ -284,9 +254,7 @@ pub fn build(
         direct_messages: entries(sections.direct_messages),
         mentions: entries(sections.mentions),
         channels: entries(sections.channels),
-        more_channels: entries(sections.more_channels),
         threads,
-        all,
         muted: counts.muted_unread_count(),
     })
 }
@@ -295,7 +263,6 @@ struct Sections<'a> {
     direct_messages: Vec<&'a Conversation>,
     mentions: Vec<&'a Conversation>,
     channels: Vec<&'a Conversation>,
-    more_channels: Vec<&'a Conversation>,
 }
 
 /// Split the unread conversations into the sections, most recent
@@ -305,7 +272,6 @@ fn sections<'a>(unread: &[&'a Conversation]) -> Sections<'a> {
         direct_messages: Vec::new(),
         mentions: Vec::new(),
         channels: Vec::new(),
-        more_channels: Vec::new(),
     };
     for conversation in unread {
         match conversation.kind {
@@ -313,10 +279,7 @@ fn sections<'a>(unread: &[&'a Conversation]) -> Sections<'a> {
             Kind::Channel if conversation.mention_count > 0 => {
                 sections.mentions.push(*conversation)
             }
-            Kind::Channel if conversation.is_followed_channel() => {
-                sections.channels.push(*conversation);
-            }
-            Kind::Channel => sections.more_channels.push(*conversation),
+            Kind::Channel => sections.channels.push(*conversation),
         }
     }
     let newest_first = |a: &&Conversation, b: &&Conversation| {
@@ -332,7 +295,6 @@ fn sections<'a>(unread: &[&'a Conversation]) -> Sections<'a> {
             .then_with(|| newest_first(a, b))
     });
     sections.channels.sort_by(newest_first);
-    sections.more_channels.sort_by(newest_first);
     sections
 }
 
@@ -418,39 +380,16 @@ fn render_at(
         }
     }
 
-    if view.all {
-        section("More channels", &view.more_channels, out)?;
-    }
-
-    let hidden = if view.all {
-        0
-    } else {
-        view.more_channels.len()
-    };
     if !printed.get() {
-        let line = if hidden > 0 {
-            "Nothing needs you."
-        } else {
-            "All caught up."
-        };
-        writeln!(out, "{line}")?;
+        writeln!(out, "All caught up.")?;
     }
-    if view.all && view.muted > 0 {
+    if view.muted > 0 {
         let plural = if view.muted == 1 { "" } else { "s" };
         eprintln!(
             "{}",
             style.dim(&format!(
-                "{} muted channel{plural} left out, as in the app",
+                "{} muted conversation{plural} left out, as in the app",
                 view.muted
-            ))
-        );
-    }
-    if hidden > 0 {
-        let plural = if hidden == 1 { "" } else { "s" };
-        eprintln!(
-            "{}",
-            style.dim(&format!(
-                "{hidden} more channel{plural} with unreads hidden; `slack -a` shows them"
             ))
         );
     }
@@ -708,22 +647,14 @@ mod tests {
     }
 
     #[test]
-    fn sections_split_dms_mentions_followed_and_other_channels() {
-        let mut counts = fixture();
+    fn sections_split_dms_mentions_and_channels() {
+        let counts = fixture();
         let ids = |list: &[&Conversation]| list.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
-        {
-            let unread: Vec<&Conversation> = counts.unread().collect();
-            let sections = sections(&unread);
-            assert_eq!(ids(&sections.direct_messages), ["D06JANE"]);
-            assert_eq!(ids(&sections.mentions), ["C02ALERTS"]);
-            assert!(sections.channels.is_empty());
-            assert_eq!(ids(&sections.more_channels), ["C03RANDOM"]);
-        }
-        counts.apply_privacy(|id| id == "C03RANDOM");
         let unread: Vec<&Conversation> = counts.unread().collect();
         let sections = sections(&unread);
+        assert_eq!(ids(&sections.direct_messages), ["D06JANE"]);
+        assert_eq!(ids(&sections.mentions), ["C02ALERTS"]);
         assert_eq!(ids(&sections.channels), ["C03RANDOM"]);
-        assert!(sections.more_channels.is_empty());
     }
 
     #[test]
@@ -780,9 +711,7 @@ mod tests {
             direct_messages: Vec::new(),
             mentions: Vec::new(),
             channels: Vec::new(),
-            more_channels: Vec::new(),
             threads: None,
-            all: false,
             muted: 0,
         }
     }
@@ -841,28 +770,31 @@ mod tests {
                 )]),
                 true,
             )],
-            channels: vec![entry(
-                "C3",
-                Kind::Channel,
-                "#team",
-                0,
-                "1760899550.000350",
-                Some(vec![message(
+            channels: vec![
+                entry(
+                    "C3",
+                    Kind::Channel,
+                    "#team",
+                    0,
                     "1760899550.000350",
-                    Some("U3"),
-                    "standup moved to 10",
-                )]),
-                false,
-            )],
-            more_channels: vec![entry(
-                "C2",
-                Kind::Channel,
-                "#random",
-                0,
-                "1760899600.000400",
-                None,
-                false,
-            )],
+                    Some(vec![message(
+                        "1760899550.000350",
+                        Some("U3"),
+                        "standup moved to 10",
+                    )]),
+                    false,
+                ),
+                // Its messages could not be read (reported on stderr).
+                entry(
+                    "C2",
+                    Kind::Channel,
+                    "#random",
+                    0,
+                    "1760899600.000400",
+                    None,
+                    false,
+                ),
+            ],
             ..empty_view()
         };
         let text = rendered(&view);
@@ -891,16 +823,18 @@ mod tests {
             "{}",
             lines[12]
         );
-        assert_eq!(lines.len(), 13, "the other channel stays hidden");
+        assert_eq!(lines[13], "  #random  (unread)");
+        assert_eq!(lines.len(), 14);
 
-        let shown: Vec<(&str, &str, bool)> = view.shown().collect();
+        let shown: Vec<(&str, &str)> = view.shown().collect();
         assert_eq!(
             shown,
             [
-                ("D1", "1760899000.000200", true),
-                ("C1", "1760899500.000300", true),
-                ("C3", "1760899550.000350", true),
-            ]
+                ("D1", "1760899000.000200"),
+                ("C1", "1760899500.000300"),
+                ("C3", "1760899550.000350"),
+            ],
+            "a channel whose messages were not shown is not marked"
         );
         assert_eq!(
             view.thread_refs(),

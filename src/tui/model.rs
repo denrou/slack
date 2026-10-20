@@ -14,12 +14,9 @@ use crate::{directory, mrkdwn, threads};
 pub enum Section {
     DirectMessages,
     Mentions,
-    /// Channels you follow: private ones, and those set to "All new
-    /// messages" in Slack.
+    /// The other channels with unreads, mentions aside.
     Channels,
     Threads,
-    /// The other channels with unreads, listed with `-a` only.
-    MoreChannels,
     /// Conversations opened from the picker (`c`), with their recent
     /// history. They stay through a refresh and a reply.
     Opened,
@@ -32,7 +29,6 @@ impl Section {
             Section::Mentions => "Mentions",
             Section::Channels => "Channels",
             Section::Threads => "Threads",
-            Section::MoreChannels => "More channels",
             Section::Opened => "Opened",
         }
     }
@@ -73,9 +69,6 @@ impl Item {
             for thread in threads.items.unwrap_or_default() {
                 items.push(Item::thread(thread, names));
             }
-        }
-        if view.all {
-            conversations(Section::MoreChannels, view.more_channels, &mut items);
         }
         items
     }
@@ -306,7 +299,6 @@ pub enum Action {
     None,
     Quit,
     Refresh,
-    ToggleAll,
     MarkRead(usize),
     MarkAllRead,
     Send {
@@ -335,7 +327,6 @@ pub struct State {
     pub mode: Mode,
     /// Shown in the bottom line until the next key.
     pub status: Option<String>,
-    pub all: bool,
     pub me: Option<String>,
     pub focus: Focus,
     /// The highlighted message of the pane, when the pane has the focus.
@@ -346,7 +337,7 @@ pub struct State {
 const SCROLL_STEP: u16 = 10;
 
 impl State {
-    pub fn new(items: Vec<Item>, all: bool, me: Option<String>) -> State {
+    pub fn new(items: Vec<Item>, me: Option<String>) -> State {
         let selected = (!items.is_empty()).then_some(0);
         State {
             items,
@@ -354,7 +345,6 @@ impl State {
             scroll: 0,
             mode: Mode::Browse,
             status: None,
-            all,
             me,
             focus: Focus::List,
             cursor: 0,
@@ -506,7 +496,6 @@ impl State {
                 Action::None
             }
             KeyCode::Char('g') => Action::Refresh,
-            KeyCode::Char('a') => Action::ToggleAll,
             KeyCode::Char('c') => Action::OpenPicker,
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
@@ -706,7 +695,6 @@ mod tests {
                 item(Section::Mentions, "C1", None),
                 item(Section::Threads, "C2", Some("2.000100")),
             ],
-            false,
             None,
         )
     }

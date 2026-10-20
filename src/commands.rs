@@ -20,13 +20,13 @@ use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{counts, directory, history, lastview, mrkdwn, read, replies, send, target, tui, view};
 
-pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
+pub fn view(json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let client = workspace.client();
     let mut names = Names::load();
-    let counts = counts::load(&client, &mut names)?;
-    let view = view::build(&client, &counts, &mut names, all)?;
+    let counts = counts::fetch(&client)?;
+    let view = view::build(&client, &counts, &mut names)?;
     names.save();
     if let Err(err) = lastview::remember(team_id, &view) {
         eprintln!("warning: could not record the view for `slack read`: {err:#}");
@@ -49,24 +49,15 @@ fn to_stdout(print: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()>
     }
 }
 
-pub fn count(all: bool) -> Result<()> {
+pub fn count() -> Result<()> {
     let store = Workspaces::load()?;
     let (_, workspace) = store.default_workspace()?;
-    let mut names = Names::load();
-    let counts = counts::load(&workspace.client(), &mut names)?;
-    names.save();
-    println!(
-        "{}",
-        if all {
-            counts.unread_count()
-        } else {
-            counts.attention_count()
-        }
-    );
+    let counts = counts::fetch(&workspace.client())?;
+    println!("{}", counts.unread_count());
     Ok(())
 }
 
-pub fn ui(all: bool) -> Result<()> {
+pub fn ui() -> Result<()> {
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let mut names = Names::load();
@@ -76,7 +67,6 @@ pub fn ui(all: bool) -> Result<()> {
         team_id,
         workspace.user_id.as_deref(),
         &workspace.url,
-        all,
     );
     names.save();
     result
@@ -419,11 +409,11 @@ fn send_target(names: &Names, channel: &str) -> String {
     }
 }
 
-pub fn read(targets: &[String], all: bool) -> Result<()> {
+pub fn read(targets: &[String]) -> Result<()> {
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let mut names = Names::load();
-    let result = read::run(&workspace.client(), &mut names, team_id, targets, all);
+    let result = read::run(&workspace.client(), &mut names, team_id, targets);
     names.save();
     result
 }

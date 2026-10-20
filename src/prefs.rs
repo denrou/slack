@@ -1,9 +1,8 @@
-//! The user's own Slack preferences, read for two things: the channels
-//! they muted, and the channels they asked to be told about every message
-//! of. `users.prefs.get` is a web-client endpoint and the per-channel
-//! settings are a JSON string inside it, so a missing or unreadable pref
-//! reads as "nothing muted, nothing followed", which shows more rather
-//! than less.
+//! The user's own Slack preferences, read for one thing: the conversations
+//! they muted. `users.prefs.get` is a web-client endpoint and the
+//! per-channel settings are a JSON string inside it, so a missing or
+//! unreadable pref reads as "nothing muted", which shows more rather than
+//! less.
 
 use std::collections::HashSet;
 
@@ -15,8 +14,6 @@ use crate::api::{self, Client};
 pub struct Prefs {
     /// Muted conversations: the app badges them for mentions only.
     pub muted: HashSet<String>,
-    /// Channels set to "All new messages": every message is wanted.
-    pub notify_all: HashSet<String>,
 }
 
 /// The preferences that shape the view. Only a dead session is an error;
@@ -33,7 +30,7 @@ pub fn fetch(client: &Client) -> Result<Prefs, api::Error> {
 }
 
 /// `prefs.all_notifications_prefs` is a JSON string whose `channels` map
-/// carries `muted: true` and `desktop: "everything"` per conversation.
+/// carries `muted: true` per conversation, among its notification levels.
 pub fn parse(body: &Value) -> Prefs {
     let Some(raw) = body
         .pointer("/prefs/all_notifications_prefs")
@@ -52,9 +49,6 @@ pub fn parse(body: &Value) -> Prefs {
         if pref.get("muted").and_then(Value::as_bool) == Some(true) {
             prefs.muted.insert(id.clone());
         }
-        if pref.get("desktop").and_then(Value::as_str) == Some("everything") {
-            prefs.notify_all.insert(id.clone());
-        }
     }
     prefs
 }
@@ -66,7 +60,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mutes_and_follow_everything_are_read_out_of_the_nested_json_string() {
+    fn mutes_are_read_out_of_the_nested_json_string() {
         let inner = json!({"channels": {
             "C1": {"muted": true, "desktop": "everything"},
             "C2": {"muted": false, "desktop": "everything"},
@@ -79,10 +73,6 @@ mod tests {
             prefs.muted,
             HashSet::from(["C1".to_string(), "D4".to_string()])
         );
-        assert_eq!(
-            prefs.notify_all,
-            HashSet::from(["C1".to_string(), "C2".to_string()])
-        );
     }
 
     #[test]
@@ -93,7 +83,7 @@ mod tests {
             json!({"prefs": {"all_notifications_prefs": "{\"channels\": []}"}}),
         ] {
             let prefs = parse(&body);
-            assert!(prefs.muted.is_empty() && prefs.notify_all.is_empty());
+            assert!(prefs.muted.is_empty());
         }
     }
 }

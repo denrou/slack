@@ -8,7 +8,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::api::{self, Client};
-use crate::names::Names;
 use crate::prefs::{self, Prefs};
 
 const METHOD: &str = "client.counts";
@@ -35,10 +34,6 @@ pub struct Conversation {
     pub latest: Option<String>,
     /// Muted in Slack: the app badges it for mentions only.
     pub muted: bool,
-    /// A private channel: someone chose to put you in it.
-    pub private: bool,
-    /// Set to "All new messages" in Slack.
-    pub notify_all: bool,
 }
 
 impl Conversation {
@@ -46,31 +41,13 @@ impl Conversation {
         self.has_unreads || self.mention_count > 0
     }
 
-    /// Someone wrote to you (a DM or group DM with unreads), named you in
-    /// a channel, or wrote in a channel you follow: a private one, where
-    /// someone chose to put you, or one set to "All new messages" in
-    /// Slack. Public channel chatter does not count, nor does anything
-    /// you muted, except a mention, which the app badges too.
-    pub fn needs_attention(&self) -> bool {
-        match self.kind {
-            Kind::Channel => {
-                self.mention_count > 0
-                    || (self.is_unread() && !self.muted && (self.private || self.notify_all))
-            }
-            Kind::Im | Kind::Mpim => self.is_unread() && !self.muted,
-        }
-    }
-
-    /// A followed channel with something new but no mention: shown by
-    /// default, unlike the other channels.
-    pub fn is_followed_channel(&self) -> bool {
-        self.kind == Kind::Channel && self.mention_count == 0 && self.needs_attention()
-    }
-
-    /// Unread the way the app badges it: a muted conversation only counts
-    /// for its mentions.
+    /// Unread the way the app's sidebar shows it: anything with something
+    /// new, except a muted conversation, which only counts for a mention
+    /// in a channel (a DM's `mention_count` is just its unread count).
+    /// Slack's own mute list decides, nothing local.
     pub fn counts_as_unread(&self) -> bool {
-        self.is_unread() && (!self.muted || self.needs_attention())
+        let mentioned = self.kind == Kind::Channel && self.mention_count > 0;
+        self.is_unread() && (!self.muted || mentioned)
     }
 }
 
@@ -118,19 +95,10 @@ impl Counts {
         })
     }
 
-    /// Flag the conversations the user muted or follows in Slack.
+    /// Flag the conversations the user muted in Slack.
     pub fn apply_prefs(&mut self, prefs: &Prefs) {
         for conversation in &mut self.conversations {
             conversation.muted = prefs.muted.contains(&conversation.id);
-            conversation.notify_all = prefs.notify_all.contains(&conversation.id);
-        }
-    }
-
-    /// Flag the private channels; `conversations.info` is what knows.
-    pub fn apply_privacy(&mut self, is_private: impl Fn(&str) -> bool) {
-        for conversation in &mut self.conversations {
-            conversation.private =
-                conversation.kind == Kind::Channel && is_private(&conversation.id);
         }
     }
 
@@ -146,10 +114,6 @@ impl Counts {
             .count()
     }
 
-    pub fn attention(&self) -> impl Iterator<Item = &Conversation> {
-        self.conversations.iter().filter(|c| c.needs_attention())
-    }
-
     /// A thread mention counts even if Slack left `has_unreads` false, the
     /// same rule as for conversations.
     pub fn threads_unread(&self) -> bool {
@@ -157,12 +121,8 @@ impl Counts {
             .is_some_and(|t| t.has_unreads || t.mention_count > 0)
     }
 
-    /// Conversations that need you, plus one for the Threads view.
-    pub fn attention_count(&self) -> usize {
-        self.attention().count() + usize::from(self.threads_unread())
-    }
-
-    /// Every conversation with unreads, plus one for the Threads view.
+    /// Every unread conversation, plus one for the Threads view: the
+    /// status-bar number.
     pub fn unread_count(&self) -> usize {
         self.unread().count() + usize::from(self.threads_unread())
     }
@@ -182,22 +142,6 @@ pub fn fetch(client: &Client) -> Result<Counts, api::Error> {
     Ok(counts)
 }
 
-/// `fetch`, plus the privacy of the unread channels, which only
-/// `conversations.info` knows; the names cache keeps that to one call per
-/// channel ever.
-pub fn load(client: &Client, names: &mut Names) -> Result<Counts, api::Error> {
-    let mut counts = fetch(client)?;
-    let unread: Vec<String> = counts
-        .conversations
-        .iter()
-        .filter(|c| c.kind == Kind::Channel && c.is_unread())
-        .map(|c| c.id.clone())
-        .collect();
-    names.resolve_channels(client, unread)?;
-    counts.apply_privacy(|id| names.channel(id).is_some_and(|c| c.is_private));
-    Ok(counts)
-}
-
 fn conversation(entry: &Value, kind: Kind) -> Option<Conversation> {
     let string = |name: &str| entry.get(name).and_then(Value::as_str).map(str::to_string);
     Some(Conversation {
@@ -214,8 +158,6 @@ fn conversation(entry: &Value, kind: Kind) -> Option<Conversation> {
         last_read: string("last_read"),
         latest: string("latest"),
         muted: false,
-        private: false,
-        notify_all: false,
     })
 }
 
@@ -251,10 +193,9 @@ mod tests {
         Counts::parse(&body).unwrap()
     }
 
-    fn prefs(muted: &[&str], notify_all: &[&str]) -> Prefs {
+    fn prefs(muted: &[&str]) -> Prefs {
         Prefs {
             muted: muted.iter().map(|s| s.to_string()).collect(),
-            notify_all: notify_all.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -280,70 +221,28 @@ mod tests {
     }
 
     #[test]
-    fn attention_is_dms_mentions_and_the_threads_view() {
-        let counts = fixture();
-        assert_eq!(ids(counts.attention()), ["C02ALERTS", "D06JANE"]);
-        assert!(counts.threads_unread());
-        assert_eq!(counts.attention_count(), 3);
-    }
-
-    #[test]
-    fn unread_adds_the_channels_without_a_mention() {
+    fn unread_is_every_conversation_with_something_new_and_the_threads_view() {
         let counts = fixture();
         assert_eq!(ids(counts.unread()), ["C02ALERTS", "C03RANDOM", "D06JANE"]);
+        assert!(counts.threads_unread());
         assert_eq!(counts.unread_count(), 4);
-    }
-
-    #[test]
-    fn followed_channels_need_attention_without_a_mention() {
-        let mut counts = fixture();
-        assert!(!counts.conversations.iter().any(|c| c.is_followed_channel()));
-
-        counts.apply_prefs(&prefs(&[], &["C03RANDOM"]));
-        let followed = ids(counts
-            .conversations
-            .iter()
-            .filter(|c| c.is_followed_channel()));
-        assert_eq!(followed, ["C03RANDOM"]);
-        assert_eq!(counts.attention_count(), 4);
-
-        // Privacy is the other way in; muting wins over both, and a channel
-        // with a mention is never "followed", it is a mention.
-        counts.apply_prefs(&prefs(&[], &[]));
-        counts.apply_privacy(|id| id == "C03RANDOM" || id == "C02ALERTS" || id == "D06JANE");
-        let followed = ids(counts
-            .conversations
-            .iter()
-            .filter(|c| c.is_followed_channel()));
-        assert_eq!(followed, ["C03RANDOM"]);
-        assert!(
-            !counts
-                .conversations
-                .iter()
-                .find(|c| c.id == "D06JANE")
-                .unwrap()
-                .private
-        );
-        counts.apply_prefs(&prefs(&["C03RANDOM"], &["C03RANDOM"]));
-        assert!(!counts.conversations.iter().any(|c| c.is_followed_channel()));
-        assert_eq!(counts.attention_count(), 3);
     }
 
     #[test]
     fn muted_conversations_count_for_their_mentions_only() {
         let mut counts = fixture();
-        counts.apply_prefs(&prefs(&["C03RANDOM", "D06JANE"], &[]));
+        counts.apply_prefs(&prefs(&["C03RANDOM", "D06JANE"]));
         assert_eq!(
             ids(counts.unread()),
             ["C02ALERTS"],
             "a muted channel without a mention and a muted DM drop out"
         );
         assert_eq!(counts.muted_unread_count(), 2);
-        assert_eq!(counts.attention_count(), 2);
+        assert_eq!(counts.unread_count(), 2);
 
-        counts.apply_prefs(&prefs(&["C02ALERTS"], &[]));
+        counts.apply_prefs(&prefs(&["C02ALERTS"]));
         assert!(
-            counts.attention().any(|c| c.id == "C02ALERTS"),
+            counts.unread().any(|c| c.id == "C02ALERTS"),
             "a mention in a muted channel still counts"
         );
         assert_eq!(counts.muted_unread_count(), 0);
@@ -354,7 +253,7 @@ mod tests {
         let body =
             json!({ "channels": [{ "id": "C1", "has_unreads": false, "mention_count": 2 }] });
         let counts = Counts::parse(&body).unwrap();
-        assert_eq!(counts.attention_count(), 1);
+        assert_eq!(counts.unread_count(), 1);
         assert!(counts.threads.is_none());
     }
 
@@ -376,6 +275,6 @@ mod tests {
         let body = json!({ "ims": [{ "id": "D1", "has_unreads": true }, { "oops": 1 }] });
         let counts = Counts::parse(&body).unwrap();
         assert_eq!(counts.conversations.len(), 1);
-        assert_eq!(counts.attention_count(), 1);
+        assert_eq!(counts.unread_count(), 1);
     }
 }

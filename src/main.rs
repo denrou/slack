@@ -32,9 +32,6 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "slack", version, args_conflicts_with_subcommands = true)]
 struct Cli {
-    /// Show every conversation with unreads, not only what needs you
-    #[arg(short, long)]
-    all: bool,
     /// Print only the number of conversations, for a status bar
     #[arg(long)]
     count: bool,
@@ -60,13 +57,10 @@ enum Command {
         #[arg(long)]
         thread: Option<String>,
     },
-    /// Mark as read what the last view showed (DMs and mentions)
+    /// Mark as read what the last view showed
     Read {
         /// Only these conversations
         targets: Vec<String>,
-        /// Also the channels the last `slack -a` listed
-        #[arg(short, long)]
-        all: bool,
     },
     /// Sign in through a browser window and save the session
     Login {
@@ -99,12 +93,8 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
-    /// Move through what needs you and answer it, interactively
-    Ui {
-        /// Also list the channels without a mention
-        #[arg(short, long)]
-        all: bool,
-    },
+    /// Move through what is unread and answer it, interactively
+    Ui,
     /// List the channels and group messages you are in
     Channels {
         /// Only those whose name contains these words
@@ -140,20 +130,20 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        None if cli.count => commands::count(cli.all),
-        None => commands::view(cli.all, cli.json, cli.no_color),
+        None if cli.count => commands::count(),
+        None => commands::view(cli.json, cli.no_color),
         Some(Command::Send {
             target,
             text,
             thread,
         }) => commands::send(&target, text.as_deref(), thread.as_deref()),
-        Some(Command::Read { targets, all }) => commands::read(&targets, all),
+        Some(Command::Read { targets }) => commands::read(&targets),
         Some(Command::Login { headless, timeout }) => commands::login(headless, timeout),
         Some(Command::Logout {
             keep_browser_session,
         }) => commands::logout(keep_browser_session),
         Some(Command::Whoami { json }) => commands::whoami(json),
-        Some(Command::Ui { all }) => commands::ui(all),
+        Some(Command::Ui) => commands::ui(),
         Some(Command::Thread {
             thread,
             json,

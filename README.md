@@ -23,8 +23,7 @@ Login needs Google Chrome (Chromium, Edge or Brave also work; `$SLACK_BROWSER` p
 ```bash
 slack login     # a Chrome window opens; sign in to Slack once
 slack whoami    # which workspace and user the CLI acts as, verified
-slack           # what needs you: DMs, mentions, unread threads
-slack -a        # ...plus every other channel with unreads
+slack           # what is unread: DMs, mentions, channels, threads
 slack --count   # the same, as one number for a status bar
 slack --json    # the same data, for scripts
 slack ui        # the same, interactive: move through it, reply, mark read
@@ -41,16 +40,15 @@ slack send '#sre-alerts' "on it"                    # post to a channel
 slack send @jane "merci !"                          # ...or a DM
 slack send <permalink> "answering here"             # ...or a thread
 slack send @jane < note.md                          # text from stdin
-slack read                                          # mark as read the DMs and mentions the last view showed
-slack read '#sre-alerts' @jane                      # ...only these
-slack read --all                                    # ...also the channels the last `slack -a` listed
+slack read                                          # mark as read what the last view showed
+slack read '#sre-alerts' @jane                      # ...only these, or a conversation `slack show` printed
 ```
 
 ## The view
 
-`slack` shows what needs you, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Channels** (the channels you follow with new messages: private channels, where someone chose to put you, and channels set to "All new messages" in Slack), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Messages with replies are numbered, as in `[thread 2: 5 replies]`: `slack thread 2` prints the whole thread, and `slack send 2 "text"` answers in it (a permalink works in both places). Chatter in other channels is counted but hidden; a line on stderr says how many channels were held back, and `slack -a` lists them with their messages. Channels you muted in Slack are left out altogether, as the app does; a mention in a muted channel still counts.
+`slack` shows what is unread, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Channels** (every other channel with new messages), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Messages with replies are numbered, as in `[thread 2: 5 replies]`: `slack thread 2` prints the whole thread, and `slack send 2 "text"` answers in it (a permalink works in both places). Conversations you muted in Slack are left out, as the app does, and a line on stderr says how many; a mention in a muted channel still counts. There is no local list: muting a channel in Slack is how to keep it out of the view.
 
-Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read the DMs and mentions the last view showed (no more: a message that arrived since stays unread). The channels a `slack -a` listed are a wider net, so they take `slack read --all` or their name. Names are cached in `~/.cache/slack/names.json`, safe to delete.
+Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read what the last view showed (no more: a message that arrived since stays unread). A conversation `slack show` printed is marked by its name only. Names are cached in `~/.cache/slack/names.json`, safe to delete.
 
 ## Any conversation
 
@@ -60,7 +58,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## The interactive view
 
-`slack ui` puts the same view in a two-pane screen: the list of what needs you on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `slack ui -a` includes the channels without a mention. `c` opens a picker over every channel, group message and person in the workspace: type to narrow it, Enter loads the last 50 messages of the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies.
+`slack ui` puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `c` opens a picker over every channel, group message and person in the workspace: type to narrow it, Enter loads the last 50 messages of the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies.
 
 | Key                | Action                                             |
 | ------------------ | -------------------------------------------------- |
@@ -74,7 +72,6 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `R`                | Mark everything listed as read (asks first)        |
 | `o`                | Open it in Slack                                   |
 | `g`                | Refresh                                            |
-| `a`                | Show or hide the channels without a mention        |
 | `?`                | Keys                                               |
 | `q`                | Quit                                               |
 
@@ -99,7 +96,7 @@ Security notes, the short version:
 
 ## Status bar
 
-`slack --count` makes one API call, prints one number and exits non-zero when the fetch fails, so a poller can tell "nothing" from "broken". The number is the conversations that need you (DMs with unreads, channels where you were mentioned, followed channels with new messages) plus one when followed threads have unread replies. `slack --count --all` counts every conversation with unreads instead, muted ones excepted.
+`slack --count` makes one API call, prints one number and exits non-zero when the fetch fails, so a poller can tell "nothing" from "broken". The number is the unread conversations (DMs, group messages and channels with something new, muted ones excepted unless you were mentioned) plus one when followed threads have unread replies.
 
 ## Files
 

@@ -11,7 +11,7 @@ use super::model::{Focus, Mode, Picker, Row, Section, State, row_of, rows};
 use crate::names::Names;
 use crate::{mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  l messages  Enter reply  c open any  r read  R read all  o in Slack  g refresh  a more  ? keys  q quit";
+const LIST_HINTS: &str = "j/k move  l messages  Enter reply  c open any  r read  R read all  o in Slack  g refresh  ? keys  q quit";
 const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  h back  q quit";
 const THREAD_HINTS: &str = "j/k move  Enter reply in the thread  h back  q quit";
 
@@ -26,7 +26,6 @@ const HELP: &[&str] = &[
     "R              mark everything listed as read (asks first)",
     "o              open it in Slack",
     "g              refresh",
-    "a              show or hide the channels without a mention",
     "q              quit",
 ];
 

@@ -9,29 +9,23 @@ use crate::history::compare_ts;
 use crate::names::Names;
 use crate::{counts, lastview, target};
 
-pub fn run(
-    client: &Client,
-    names: &mut Names,
-    team_id: &str,
-    targets: &[String],
-    all: bool,
-) -> Result<()> {
+pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]) -> Result<()> {
     let shown = lastview::recall(team_id)?;
     if shown.is_empty() {
         bail!("nothing to mark: run `slack` first, then `slack read` marks what it showed");
     }
     let selected: Vec<(String, String)> = if targets.is_empty() {
-        // Without a name, stop at what needed you: the channels `-a`
-        // listed are a wider net than "I read these", so they take --all.
+        // Without a name, what the view listed: a conversation `slack show`
+        // printed was asked for, read or not, so marking it takes its name.
         let picked: Vec<(String, String)> = shown
             .iter()
-            .filter(|(_, shown)| all || shown.attention)
+            .filter(|(_, shown)| shown.listed)
             .map(|(id, shown)| (id.clone(), shown.latest.clone()))
             .collect();
         if picked.is_empty() {
             bail!(
-                "the last view showed no DM or mention; `slack read --all` also marks the \
-                 channels it listed, or name them"
+                "nothing from the last view is left to mark; `slack read <name>` marks a \
+                 conversation `slack show` printed"
             );
         }
         picked
@@ -42,7 +36,9 @@ pub fn run(
                 let channel = target::resolve(client, names, team_id, spec)?.channel;
                 let latest = shown.get(&channel).map(|shown| shown.latest.clone());
                 let latest = latest.ok_or_else(|| {
-                    anyhow!("{spec} was not in the last view; run `slack` (or `slack -a`) first")
+                    anyhow!(
+                        "{spec} was not in the last view; run `slack` or `slack show {spec}` first"
+                    )
                 })?;
                 Ok((channel, latest))
             })

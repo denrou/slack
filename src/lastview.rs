@@ -17,10 +17,9 @@ use crate::view::View;
 pub struct Shown {
     /// The newest message the conversation had when it was shown.
     pub latest: String,
-    /// It was in the attention sections (a DM, a mention, a followed
-    /// channel), not a channel listed by `-a`. `slack read` without
-    /// arguments stops at these.
-    pub attention: bool,
+    /// The view listed it, as opposed to a conversation `slack show`
+    /// printed on request: a bare `slack read` marks the listed ones only.
+    pub listed: bool,
 }
 
 /// A thread the view numbered.
@@ -103,16 +102,16 @@ pub fn remember_conversation(
     let mut store = load().unwrap_or_default();
     let record = store.entry(team_id.to_string()).or_default();
     if let Some(latest) = latest {
-        // A DM the view listed keeps its place in a bare `slack read`.
-        let attention = record
+        // A conversation the view listed keeps its place in a bare `slack read`.
+        let listed = record
             .conversations
             .get(channel)
-            .is_some_and(|shown| shown.attention);
+            .is_some_and(|shown| shown.listed);
         record.conversations.insert(
             channel.to_string(),
             Shown {
                 latest: latest.to_string(),
-                attention,
+                listed,
             },
         );
     }
@@ -133,10 +132,10 @@ pub fn remember(team_id: &str, view: &View) -> Result<()> {
     let mut store = load().unwrap_or_default();
     let conversations = view
         .shown()
-        .map(|(id, latest, attention)| {
+        .map(|(id, latest)| {
             let shown = Shown {
                 latest: latest.to_string(),
-                attention,
+                listed: true,
             };
             (id.to_string(), shown)
         })

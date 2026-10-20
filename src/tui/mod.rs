@@ -36,15 +36,14 @@ pub fn run(
     team_id: &str,
     me: Option<&str>,
     workspace_url: &str,
-    all: bool,
 ) -> Result<()> {
-    let items = load(client, names, all)?;
+    let items = load(client, names)?;
     let mut app = App {
         client,
         names,
         team_id,
         workspace_url: workspace_url.trim_end_matches('/'),
-        state: State::new(items, all, me.map(str::to_string)),
+        state: State::new(items, me.map(str::to_string)),
         directory_walked: false,
     };
     let mut terminal = ratatui::init();
@@ -53,9 +52,9 @@ pub fn run(
     result
 }
 
-fn load(client: &Client, names: &mut Names, all: bool) -> Result<Vec<Item>> {
-    let counts = counts::load(client, names)?;
-    let view = view::build(client, &counts, names, all)?;
+fn load(client: &Client, names: &mut Names) -> Result<Vec<Item>> {
+    let counts = counts::fetch(client)?;
+    let view = view::build(client, &counts, names)?;
     Ok(Item::from_view(view, names))
 }
 
@@ -107,10 +106,6 @@ impl App<'_> {
         match action {
             Action::None | Action::Quit => Ok(()),
             Action::Refresh => self.refresh(terminal),
-            Action::ToggleAll => {
-                self.state.all = !self.state.all;
-                self.refresh(terminal)
-            }
             Action::MarkRead(index) => {
                 self.busy(terminal, "Marking as read…")?;
                 match self.mark_read(index) {
@@ -194,7 +189,7 @@ impl App<'_> {
 
     fn refresh(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.busy(terminal, "Refreshing…")?;
-        match load(self.client, self.names, self.state.all) {
+        match load(self.client, self.names) {
             Ok(items) => {
                 self.state.replace_items(items);
                 self.state.status = None;
