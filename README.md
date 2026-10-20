@@ -11,10 +11,10 @@ Apple Silicon or Linux x86_64: download the archive for your platform from the [
 From source, with Rust 1.85+:
 
 ```bash
-cargo install --git https://github.com/denrou/slack --tag v0.1.0
+cargo install --git https://github.com/denrou/slack
 ```
 
-`--tag` pins a release; without it you get the tip of `main`.
+That is the tip of `main`, which can be ahead of the last release; `--tag vX.Y.Z` pins one.
 
 Login needs Google Chrome (Chromium, Edge or Brave also work; `$SLACK_BROWSER` points at an executable the lookup does not know).
 

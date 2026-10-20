@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code in this repository.
+Guidance for Claude Code in this repository. `ARCHITECTURE.md` has the module map, the run of each command, the files on disk and the contracts between modules: read it before touching `src/`. This file is the workflow and the decisions.
 
 ## Commands
 
@@ -26,40 +26,10 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
 
   Do not route around the denial by pushing a branch and opening a pull request.
 
-- **Offer a release after every landed change.** A release is: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
+- **Releases are on request and bundle several changes** (since 2026-10-20). Land each change as its own commit on `main`; never bump the version or create a tag on your own. Denis tries the tip of `main` first (`cargo install --path .` puts it in `~/.cargo/bin`) and asks for a release once he is happy with the batch. A release is then: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
 - **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. **Never run `send`, `read` or anything in `slack ui` that writes from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
-## Architecture
-
-One crate, binary `slack`, blocking I/O throughout (`ureq`, `tungstenite`); no async runtime, deliberately. Modules by what they know:
-
-- `main.rs`: clap definitions and dispatch. No subcommand is the view; `--count` is the status-bar path.
-- `commands.rs`: one function per command, the only place that prints. `show` reads a conversation's recent history (`conversations.history` without a cursor, `conversations.info` for the read cursor that places the `── new ──` line) and records it in `lastview` so `slack read <name>` and the thread numbers work from that output.
-- `api.rs`: the one transport. A form POST to `<workspace url>/api/<method>` with `token=<xoxc>` in the body and `Cookie: d=<xoxd>`, the way the web client does it. Parses the `ok` envelope, maps `invalid_auth` and friends to `Error::Auth` ("run `slack login`"), retries HTTP 429 twice honouring `Retry-After` (capped at 30 s). Commands never see headers or tokens.
-- `store.rs`: `~/.config/slack/workspaces.json`, workspaces keyed by team id with their credentials, written atomically with mode `0600`. `Workspace` has no `Debug` so a token can never land in a log.
-- `paths.rs`: XDG lookup (`~/.config/slack`, like gh-prs and slackcli; not `~/Library/Application Support`) and owner-only file writes.
-- `auth/chrome.rs`: find Chrome, launch it with `--remote-debugging-port=0` on our own profile, read `DevToolsActivePort`, find the page target, shut down (SIGTERM, SIGKILL, then `pkill -f user-data-dir=<profile>` for the helpers Chrome leaves behind). The profile is owned through a sentinel file; `logout` deletes only an owned profile.
-- `auth/cdp.rs`: a hand-rolled CDP session over one WebSocket: numbered commands, buffered events, read timeouts on the socket so a poll never blocks.
-- `auth/capture.rs`: the capture policy and its pure extractors (`xoxc` from a request body in the three encodings Slack uses, the `d` cookie, the workspace list in `localConfig_v2`, the origin gate). Ported from slackcli's `browser-auth.ts`; the tests pin the parsing rules.
-- `counts.rs`: `client.counts` into `Conversation`s and the `Threads` block. Every conversation with something new counts, plus one for threads; a muted one counts for a channel mention only, like the app's badges. `fetch` also reads the notification preferences (`prefs.rs`, `users.prefs.get`, the `muted` flag inside the `all_notifications_prefs` JSON string) in a second thread. No local lists: Slack's own mute list is the source, so the way to keep a channel out of the view is to mute it in Slack.
-- `view.rs`: the model (`View`: direct messages, mentions, channels, threads) built from the counts, then rendered as text or `--json`. The model is kept apart from the rendering so a TUI can sit on the same data. `shown()` is what `slack read` may mark.
-- `history.rs`: the unread part of a conversation (`conversations.history` from `last_read`, newest page, oldest first in the output, joins and leaves dropped).
-- `threads.rs`: `subscriptions.thread.getView`, paginated on `current_ts`, unread threads first; a read thread ends the walk, a shape change degrades to the summary line with a warning.
-- `names.rs`: the id-to-name cache (`~/.cache/slack/names.json`), filled per id on a miss through `users.info` and `conversations.info`, a few lookups at a time, or in one walk (`users.conversations` for everything you are in, `users.list` for the directory) when the directory needs it whole.
-- `directory.rs`: every conversation you are in (`client.counts` ids, named from the cache) and everyone in the workspace, with the word filter: behind `slack channels`, `slack people` and the TUI picker.
-- `mrkdwn.rs`: Slack markup to terminal text (mentions, channel links, URLs with a label that only repeats the URL dropped, entities, bold/italic/strike/code when colors are on). Pure, with the parsing rules pinned by tests.
-- `lastview.rs`: `~/.cache/slack/last-view.json`, the conversations the last view showed with the newest message each had, and the threads it numbered (`View::thread_refs`, reading order), which `slack thread 2` and `slack send 2` resolve. `slack show` adds its conversation and replaces the numbering: a number refers to the last output that printed one.
-- `replies.rs`: `conversations.replies`, root first then every reply, up to five pages; behind `slack thread` and the TUI's thread pane.
-- `target.rs`: what a conversation argument means (`#channel`, `@person`, an id, a permalink); the name walks (`conversations.list`, `users.list`) live in `names.rs` and fill the cache.
-- `send.rs` and `read.rs`: the two commands that write to Slack (`chat.postMessage`, `conversations.mark`). `read` only ever marks what `lastview` recorded.
-- `tui/`: `slack ui`, ratatui 0.29 over crossterm. `model.rs` is the state and its pure key transitions (`State::key` returns an `Action`, tested); `ui.rs` draws; `mod.rs` runs the loop and performs the actions with blocking calls, a status line showing meanwhile. Items come from the same `View` as the text view. Two levels of focus: the list, and the messages pane (`l`), where `Enter` opens the highlighted message's thread in the pane (`ThreadPane`) and `Enter` again replies in it. `c` opens the picker (`Mode::Pick`, every conversation and person from `directory.rs`, narrowed by typing); the chosen one lands in the `Opened` section with its last 50 messages, read from the end, and stays through refreshes, marks and replies (it is reloaded after a reply). Marking a thread read uses `subscriptions.thread.mark` (channel, thread_ts, ts, read=1), an undocumented call written from memory and not yet verified live: if Slack refuses it, the status line shows the error and that is the first thing to fix.
-- `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups.
-
-### Error direction
-
-An error must never look like "nothing to do", above all for `--count` in a status bar. Any Slack or transport failure fails the run with a non-zero exit. Undocumented endpoints (`client.counts`, later `subscriptions.thread.getView`, `localConfig_v2`) are read defensively: a missing or changed shape is an `Error::Shape`, or a warning on stderr where degrading is the better call (the thread view), never silence.
-
-### Security rules
+## Security rules
 
 - Never print, log or serialise a token (`xoxc`, `xoxd`, the Cookie header), in output, errors or `--json`.
 - Only `https://*.slack.com` origins, never `app.slack.com`, may be paired with the session cookie: `capture::is_slack_workspace_url` is the gate, and it is load-bearing.

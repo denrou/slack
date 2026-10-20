@@ -1,5 +1,5 @@
-//! `slack`: read and answer Slack from the terminal. PLAN.md has the shape
-//! of the tool, CLAUDE.md how it is built.
+//! `slack`: read and answer Slack from the terminal. README.md has what it
+//! does, ARCHITECTURE.md how it is put together.
 
 mod api;
 mod auth;
