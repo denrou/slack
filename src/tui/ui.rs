@@ -8,22 +8,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{Focus, Mode, Picker, Row, Section, State, row_of, rows};
+use crate::history::Message;
 use crate::names::Names;
 use crate::{mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  l messages  Enter reply  c open any  r read  R read all  o in Slack  g refresh  ? keys  q quit";
-const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  x close  c open any  r read  o in Slack  g refresh  ? keys  q quit";
+const LIST_HINTS: &str = "j/k move  l messages  Enter reply  n new  c open any  r read  R read all  o in Slack  g refresh  ? keys  q quit";
+const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  n new  x close  c open any  r read  o in Slack  g refresh  ? keys  q quit";
 const MESSAGES_HINTS: &str =
-    "j/k move  l open the thread  u open link  y copy link  h back  q quit";
+    "j/k move  Enter reply to it  l open the thread  u open link  y copy link  h back  q quit";
 const THREAD_HINTS: &str =
     "j/k move  Enter reply in the thread  u open link  y copy link  h back  q quit";
 
 const HELP: &[&str] = &[
     "j, k, arrows   move through the list, or through the messages",
-    "l, Right, Tab  deeper: the messages, then the thread (Enter opens it too)",
+    "l, Right, Tab  deeper: the messages, then the highlighted message's thread",
     "h, Left, Esc   back: close the thread, leave the messages, quit",
-    "Enter, s       reply: to the conversation, or in the open thread",
-    "c              open any channel, group or person: j/k move, / filters, Enter opens",
+    "Enter          reply: to the conversation, to the highlighted message, or in the open thread",
+    "s              a message to the conversation, wherever you are in it",
+    "n              new message: pick a channel or people (Space marks several), then write",
+    "c              open any channel, group or person: j/k move, / filters, Space marks people",
     "x              close an opened conversation",
     "u, y           open, or copy, a link of the highlighted message",
     "J, K, PgDn/Up  scroll the messages",
@@ -52,7 +55,7 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> u16
         _ => draw_list(frame, left, state),
     }
     let anchor = draw_messages(frame, right, state, names, now);
-    draw_bottom(frame, bottom, state);
+    draw_bottom(frame, bottom, state, names);
     anchor
 }
 
@@ -88,28 +91,39 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
 }
 
 /// The picker takes the list's place: the filter in the title, the
-/// matching choices below, the selected one highlighted (reversed when
-/// the keys move the list, bold while they type the filter).
+/// matching choices below, the marked people ticked, the selected one
+/// highlighted (reversed when the keys move the list, bold while they
+/// type the filter).
 fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     let matches = picker.matches();
     let lines: Vec<ListItem> = matches
         .iter()
         .map(|&index| {
             let choice = &picker.choices[index];
+            let tick = if picker.marked.contains(&index) {
+                "✓ "
+            } else {
+                "  "
+            };
             ListItem::new(Line::from(vec![
-                Span::raw("  "),
+                Span::raw(tick),
                 Span::raw(choice.label.as_str()),
                 Span::raw("  "),
                 Span::styled(choice.note.as_str(), Style::new().dim()),
             ]))
         })
         .collect();
-    let title = if picker.filtering {
-        format!(" open › {}▏ ", picker.query)
-    } else if picker.query.is_empty() {
-        " open ".to_string()
+    let verb = if picker.compose {
+        "new message to"
     } else {
-        format!(" open › {} ", picker.query)
+        "open"
+    };
+    let title = if picker.filtering {
+        format!(" {verb} › {}▏ ", picker.query)
+    } else if picker.query.is_empty() {
+        format!(" {verb} ")
+    } else {
+        format!(" {verb} › {} ", picker.query)
     };
     let highlight = if picker.filtering {
         Style::new().add_modifier(Modifier::BOLD)
@@ -322,20 +336,31 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
     anchor
 }
 
-fn draw_bottom(frame: &mut Frame, area: Rect, state: &State) {
+fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
     match &state.mode {
         Mode::Compose { text, thread_ts } => {
+            let to = state
+                .selected_item()
+                .map_or_else(String::new, |item| item.title.clone());
             let title = match thread_ts {
-                Some(_) if state.thread.is_some() => {
-                    " Reply in the thread · Enter sends, Esc cancels ".to_string()
-                }
-                _ => {
-                    let to = state
+                Some(_) if state.thread.is_some() => " Reply in the thread".to_string(),
+                // A message of the pane: say whose, the way the pane shows it.
+                Some(ts)
+                    if state
                         .selected_item()
-                        .map_or_else(String::new, |item| item.title.clone());
-                    format!(" Reply to {to} · Enter sends, Esc cancels ")
+                        .is_some_and(|item| item.thread_ts.is_none()) =>
+                {
+                    let who = state
+                        .pane_messages()
+                        .iter()
+                        .find(|m| m.thread_ts.as_deref().unwrap_or(&m.ts) == ts.as_str())
+                        .map_or_else(|| "the message".to_string(), |m| describe(m, names));
+                    format!(" Reply to {who}")
                 }
+                Some(_) => format!(" Reply to {to}"),
+                None => format!(" Message to {to}"),
             };
+            let title = format!("{title} · Enter sends, Esc cancels ");
             let line = Line::from(vec![
                 Span::raw(text.as_str()),
                 Span::styled("▏", Style::new().dim()),
@@ -382,13 +407,23 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State) {
             );
         }
         Mode::Pick(picker) => {
-            let keys = if picker.filtering {
-                "type to filter  Enter back to the list  Esc clear"
+            let keys = match (picker.filtering, picker.compose) {
+                (true, _) => "type to filter  Enter back to the list  Esc clear",
+                (false, false) => "j/k move  / filter  Space mark people  Enter open  Esc cancel",
+                (false, true) => "j/k move  / filter  Space mark people  Enter write  Esc cancel",
+            };
+            let marked: Vec<&str> = picker
+                .marked
+                .iter()
+                .map(|&index| picker.choices[index].label.as_str())
+                .collect();
+            let to = if marked.is_empty() {
+                String::new()
             } else {
-                "j/k move  / filter  Enter open  Esc cancel"
+                format!(" · to {}", marked.join(", "))
             };
             let text = format!(
-                "{} of {}  {keys}",
+                "{} of {}{to}  {keys}",
                 picker.matches().len(),
                 picker.choices.len()
             );
@@ -408,4 +443,22 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State) {
             frame.render_widget(Paragraph::new(text).dim(), area);
         }
     }
+}
+
+/// `@author: the first words`, for a prompt that names a message.
+fn describe(message: &Message, names: &Names) -> String {
+    let user = |id: &str| names.user_name(id);
+    let channel = |id: &str| names.channel_name(id);
+    let text = mrkdwn::render(
+        &message.text,
+        &user,
+        &channel,
+        &crate::style::Style::plain(),
+    );
+    let author = match (&message.user, &message.bot) {
+        (Some(user), _) => names.user_label(user),
+        (None, Some(bot)) => bot.clone(),
+        (None, None) => "someone".to_string(),
+    };
+    format!("{author}: {}", view::excerpt(&text, 30))
 }

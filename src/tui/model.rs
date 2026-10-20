@@ -262,6 +262,9 @@ pub struct Choice {
     pub note: String,
     /// The read cursor, when the conversation has unreads.
     pub unread_from: Option<String>,
+    /// The person behind a direct message, or the person: what a group
+    /// message is made of. None for a channel or a group.
+    pub user: Option<String>,
 }
 
 /// The picker: every conversation and person, narrowed by what is typed.
@@ -273,15 +276,23 @@ pub struct Picker {
     pub selected: usize,
     /// The keys go to the filter (after `/`) rather than to the list.
     pub filtering: bool,
+    /// People marked with Space, as indexes into `choices`: Enter opens
+    /// their group message instead of the highlighted choice.
+    pub marked: Vec<usize>,
+    /// Write to the chosen conversation straight away (`n`), rather
+    /// than only open it (`c`).
+    pub compose: bool,
 }
 
 impl Picker {
-    pub fn new(choices: Vec<Choice>) -> Picker {
+    pub fn new(choices: Vec<Choice>, compose: bool) -> Picker {
         Picker {
             choices,
             query: String::new(),
             selected: 0,
             filtering: false,
+            marked: Vec::new(),
+            compose,
         }
     }
 
@@ -307,6 +318,43 @@ impl Picker {
     fn step(&mut self, step: isize) {
         let last = self.matches().len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + step).clamp(0, last) as usize;
+    }
+
+    /// Space: mark the highlighted person for a group message, or unmark
+    /// them. A channel or a group cannot be put in one.
+    fn mark(&mut self) {
+        let Some(&index) = self.matches().get(self.selected) else {
+            return;
+        };
+        if self.choices[index].user.is_none() {
+            return;
+        }
+        match self.marked.iter().position(|&marked| marked == index) {
+            Some(at) => {
+                self.marked.remove(at);
+            }
+            None => self.marked.push(index),
+        }
+    }
+
+    /// What Enter opens: the marked people as one group message, else
+    /// the highlighted choice.
+    fn chosen(&self) -> Option<Action> {
+        if !self.marked.is_empty() {
+            let users = self
+                .marked
+                .iter()
+                .filter_map(|&index| self.choices[index].user.clone())
+                .collect();
+            return Some(Action::ShowGroup {
+                users,
+                compose: self.compose,
+            });
+        }
+        self.picked().map(|choice| Action::Show {
+            choice,
+            compose: self.compose,
+        })
     }
 }
 
@@ -347,10 +395,21 @@ pub enum Action {
         item: usize,
         message: usize,
     },
-    /// Load the directory and show the picker.
-    OpenPicker,
+    /// Load the directory and show the picker; `compose` goes on to
+    /// write to what it opens.
+    OpenPicker {
+        compose: bool,
+    },
     /// Open a conversation from the picker with its recent history.
-    Show(Choice),
+    Show {
+        choice: Choice,
+        compose: bool,
+    },
+    /// Open the group message of these people (`conversations.open`).
+    ShowGroup {
+        users: Vec<String>,
+        compose: bool,
+    },
     /// Hand a URL to the browser.
     OpenLink(String),
     /// Put a URL in the clipboard.
@@ -553,7 +612,8 @@ impl State {
             KeyCode::Char('u') => self.link(false),
             KeyCode::Char('y') => self.link(true),
             KeyCode::Char('g') => Action::Refresh,
-            KeyCode::Char('c') => Action::OpenPicker,
+            KeyCode::Char('c') => Action::OpenPicker { compose: false },
+            KeyCode::Char('n') => Action::OpenPicker { compose: true },
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
                 Action::None
@@ -564,34 +624,51 @@ impl State {
                 Action::None
             }
             KeyCode::Char('o') => self.selected.map_or(Action::None, Action::Open),
-            KeyCode::Enter | KeyCode::Char('s') => self.enter(),
+            KeyCode::Enter => self.enter(),
+            KeyCode::Char('s') => {
+                self.compose_to_conversation();
+                Action::None
+            }
             _ => Action::None,
         }
     }
 
-    /// Enter: reply to the selected item from the list; open the
-    /// highlighted message's thread from the pane; reply in the thread
-    /// once one is open.
+    /// Enter: reply where you are. From the list, to the conversation
+    /// (in the thread for a thread item); on a message of the pane, in
+    /// that message's thread; inside a thread, in it.
     fn enter(&mut self) -> Action {
         let Some(item) = self.selected else {
             return Action::None;
         };
-        match (self.focus, &self.thread) {
-            (Focus::List, _) => {
-                self.mode = Mode::Compose {
-                    text: String::new(),
-                    thread_ts: self.items[item].thread_ts.clone(),
-                };
-                Action::None
-            }
-            (Focus::Messages, Some(thread)) => {
-                self.mode = Mode::Compose {
-                    text: String::new(),
-                    thread_ts: Some(thread.thread_ts.clone()),
-                };
-                Action::None
-            }
-            (Focus::Messages, None) => self.deeper(),
+        let thread_ts = match (self.focus, &self.thread) {
+            (Focus::List, _) => self.items[item].thread_ts.clone(),
+            (Focus::Messages, Some(thread)) => Some(thread.thread_ts.clone()),
+            (Focus::Messages, None) => match self.items[item].messages.get(self.cursor) {
+                Some(message) => Some(
+                    message
+                        .thread_ts
+                        .clone()
+                        .unwrap_or_else(|| message.ts.clone()),
+                ),
+                None => return Action::None,
+            },
+        };
+        self.mode = Mode::Compose {
+            text: String::new(),
+            thread_ts,
+        };
+        Action::None
+    }
+
+    /// `s`, and the end of `n`: a message to the selected conversation
+    /// itself, wherever the focus is in it (a thread item takes it in
+    /// the thread, since that is the conversation it stands for).
+    pub fn compose_to_conversation(&mut self) {
+        if let Some(item) = self.selected {
+            self.mode = Mode::Compose {
+                text: String::new(),
+                thread_ts: self.items[item].thread_ts.clone(),
+            };
         }
     }
 
@@ -649,11 +726,11 @@ impl State {
         }
     }
 
-    /// The picker: `j`/`k` move through the choices, Enter or `l` opens,
-    /// Esc or `h` gives up. `/` takes the keys to the filter, where
-    /// typing narrows, until Enter brings them back to the narrowed list
-    /// (Esc drops the filter instead). The arrows, Tab and Ctrl-n/p move
-    /// in both.
+    /// The picker: `j`/`k` move through the choices, Space marks a
+    /// person for a group message, Enter or `l` opens, Esc or `h` gives
+    /// up. `/` takes the keys to the filter, where typing narrows, until
+    /// Enter brings them back to the narrowed list (Esc drops the filter
+    /// instead). The arrows, Tab and Ctrl-n/p move in both.
     fn pick(&mut self, mut picker: Picker, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -676,12 +753,13 @@ impl State {
                 picker.selected = 0;
             }
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                if let Some(choice) = picker.picked() {
-                    return Action::Show(choice);
+                if let Some(action) = picker.chosen() {
+                    return action;
                 }
             }
             KeyCode::Esc | KeyCode::Char('q' | 'h') | KeyCode::Left => return Action::None,
             KeyCode::Char('/') => picker.filtering = true,
+            KeyCode::Char(' ') => picker.mark(),
             KeyCode::Char('j') => picker.step(1),
             KeyCode::Char('k') => picker.step(-1),
             _ => {}
@@ -850,6 +928,7 @@ mod tests {
             search: search.to_string(),
             note: String::new(),
             unread_from: None,
+            user: None,
         }
     }
 
@@ -937,8 +1016,18 @@ mod tests {
         assert_eq!(state.cursor, 1);
         state.key(press(KeyCode::Char('j')));
         assert_eq!(state.cursor, 1, "stays on the last message");
+        assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
         assert_eq!(
-            state.key(press(KeyCode::Enter)),
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: Some("1.000200".to_string())
+            },
+            "Enter on a message replies in its thread"
+        );
+        state.key(press(KeyCode::Esc));
+        assert_eq!(
+            state.key(press(KeyCode::Char('l'))),
             Action::OpenThread {
                 item: 0,
                 message: 1
@@ -991,7 +1080,7 @@ mod tests {
                 item: 0,
                 message: 1
             },
-            "l on a message opens its thread, like Enter"
+            "l on a message opens its thread"
         );
         state.open_thread(ThreadPane {
             channel: "D1".into(),
@@ -1057,14 +1146,17 @@ mod tests {
     #[test]
     fn the_picker_moves_with_j_and_k_and_filters_after_a_slash() {
         let mut state = state();
-        assert_eq!(state.key(press(KeyCode::Char('c'))), Action::OpenPicker);
+        assert_eq!(
+            state.key(press(KeyCode::Char('c'))),
+            Action::OpenPicker { compose: false }
+        );
         let choices = vec![
             choice(ChoiceKind::Channel, "C5", "#dev-team", ""),
             choice(ChoiceKind::Channel, "C6", "#general", ""),
             choice(ChoiceKind::Dm, "D9", "@Jane", "jdoe Jane Doe SRE"),
             choice(ChoiceKind::Person, "U3", "@Bob", "bob Bob Devlin"),
         ];
-        state.mode = Mode::Pick(Picker::new(choices.clone()));
+        state.mode = Mode::Pick(Picker::new(choices.clone(), false));
         state.key(press(KeyCode::Char('j')));
         state.key(press(KeyCode::Char('j')));
         assert!(
@@ -1097,11 +1189,14 @@ mod tests {
         assert_eq!(picker.selected, 1, "stops at the last match");
         assert_eq!(
             state.key(press(KeyCode::Char('l'))),
-            Action::Show(choices[3].clone())
+            Action::Show {
+                choice: choices[3].clone(),
+                compose: false
+            }
         );
         assert_eq!(state.mode, Mode::Browse);
 
-        state.mode = Mode::Pick(Picker::new(choices));
+        state.mode = Mode::Pick(Picker::new(choices, false));
         state.key(press(KeyCode::Char('/')));
         for c in "zzz".chars() {
             state.key(press(KeyCode::Char(c)));
@@ -1122,6 +1217,105 @@ mod tests {
         );
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
         assert_eq!(state.mode, Mode::Browse, "then closes the picker");
+    }
+
+    #[test]
+    fn n_picks_people_for_a_new_message_and_space_marks_several() {
+        let mut state = state();
+        assert_eq!(
+            state.key(press(KeyCode::Char('n'))),
+            Action::OpenPicker { compose: true }
+        );
+        let mut choices = vec![
+            choice(ChoiceKind::Channel, "C5", "#dev-team", ""),
+            choice(ChoiceKind::Dm, "D9", "@Jane", "jdoe Jane Doe SRE"),
+            choice(ChoiceKind::Person, "U3", "@Bob", "bob Bob Devlin"),
+        ];
+        choices[1].user = Some("U9".to_string());
+        choices[2].user = Some("U3".to_string());
+        state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        state.key(press(KeyCode::Char(' ')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.marked.is_empty()),
+            "a channel cannot be grouped"
+        );
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char(' ')));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char(' ')));
+        assert!(matches!(&state.mode, Mode::Pick(p) if p.marked == [1, 2]));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowGroup {
+                users: vec!["U9".to_string(), "U3".to_string()],
+                compose: true
+            }
+        );
+
+        state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char(' ')));
+        state.key(press(KeyCode::Char(' ')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.marked.is_empty()),
+            "Space again unmarks"
+        );
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Show {
+                choice: choices[2].clone(),
+                compose: true
+            }
+        );
+        // Once the conversation is in the list, the box opens on it.
+        let page = history::Unread {
+            messages: vec![message("5.000100")],
+            has_more: false,
+        };
+        state.open_item(Item::opened("D3".into(), "@Bob".into(), page, None));
+        state.compose_to_conversation();
+        assert_eq!(
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: None
+            }
+        );
+    }
+
+    #[test]
+    fn s_writes_to_the_conversation_from_anywhere() {
+        let mut state = state();
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('s')));
+        assert_eq!(
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: None
+            },
+            "not the highlighted message's thread"
+        );
+        state.key(press(KeyCode::Esc));
+        state.open_thread(ThreadPane {
+            channel: "D1".into(),
+            thread_ts: "1.000200".into(),
+            title: "@jane › no rush".into(),
+            messages: vec![message("1.000200")],
+            has_more: false,
+            from_message: 1,
+        });
+        state.key(press(KeyCode::Char('s')));
+        assert_eq!(
+            state.mode,
+            Mode::Compose {
+                text: String::new(),
+                thread_ts: None
+            },
+            "not the open thread either"
+        );
     }
 
     #[test]

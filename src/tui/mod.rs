@@ -142,7 +142,7 @@ impl App<'_> {
             } => {
                 self.busy(terminal, "Sending…")?;
                 match self.send(item, &text, thread_ts.as_deref()) {
-                    Ok(title) => self.after_send(item, &title),
+                    Ok(title) => self.after_send(item, &title, thread_ts.as_deref()),
                     Err(err) => self.fail(err),
                 }
             }
@@ -178,25 +178,28 @@ impl App<'_> {
                     Err(err) => self.fail(err),
                 }
             }
-            Action::OpenPicker => {
+            Action::OpenPicker { compose } => {
                 self.busy(terminal, "Loading the directory…")?;
                 match self.choices() {
                     Ok(choices) => {
-                        self.state.mode = Mode::Pick(Picker::new(choices));
+                        self.state.mode = Mode::Pick(Picker::new(choices, compose));
                         self.state.status = None;
                         Ok(())
                     }
                     Err(err) => self.fail(err),
                 }
             }
-            Action::Show(choice) => {
+            Action::Show { choice, compose } => {
                 self.busy(terminal, &format!("Loading {}…", choice.label))?;
                 match self.show(&choice) {
-                    Ok(item) => {
-                        self.state.open_item(item);
-                        self.state.status = None;
-                        Ok(())
-                    }
+                    Ok(item) => self.opened(item, compose),
+                    Err(err) => self.fail(err),
+                }
+            }
+            Action::ShowGroup { users, compose } => {
+                self.busy(terminal, "Opening the group message…")?;
+                match self.show_group(&users) {
+                    Ok(item) => self.opened(item, compose),
                     Err(err) => self.fail(err),
                 }
             }
@@ -290,9 +293,10 @@ impl App<'_> {
     }
 
     /// After a reply: inside an open thread the thread is reloaded to show
-    /// it; an opened conversation is reloaded the same way; from the list
-    /// the item is done with and leaves the list.
-    fn after_send(&mut self, item: usize, title: &str) -> Result<()> {
+    /// it; an opened conversation is reloaded the same way; a reply to a
+    /// message of an unread conversation leaves it listed, since it stays
+    /// unread in Slack; from the list the item is done with and leaves.
+    fn after_send(&mut self, item: usize, title: &str, thread_ts: Option<&str>) -> Result<()> {
         if let Some(pane) = self.state.thread.take() {
             return match self.reload_thread(pane) {
                 Ok(pane) => {
@@ -313,6 +317,10 @@ impl App<'_> {
                 }
                 Err(err) => self.fail(err),
             };
+        }
+        if thread_ts.is_some() && self.state.items[item].section != Section::Threads {
+            self.state.status = Some("Sent in the thread".to_string());
+            return Ok(());
         }
         self.state.remove(item);
         self.state.status = Some(format!("Sent to {title}"));
@@ -393,6 +401,7 @@ impl App<'_> {
                     .unwrap_or_default(),
                 note: conversation.notes().join(", "),
                 unread_from: conversation.unread_from().map(str::to_string),
+                user: conversation.user.clone(),
             });
         }
         let me = self.state.me.as_deref();
@@ -410,6 +419,7 @@ impl App<'_> {
                 label: format!("@{}", person.display),
                 search: person.search(),
                 note,
+                user: Some(person.id.clone()),
                 id: person.id,
                 unread_from: None,
             });
@@ -423,6 +433,22 @@ impl App<'_> {
             _ => choice.id.clone(),
         };
         self.load_opened(channel, choice.unread_from.clone())
+    }
+
+    /// The group message with the marked people, opened if need be.
+    fn show_group(&mut self, users: &[String]) -> Result<Item> {
+        let channel = target::open_group(self.client, users)?;
+        self.load_opened(channel, None)
+    }
+
+    /// The conversation is in the list; `n` goes on to write to it.
+    fn opened(&mut self, item: Item, compose: bool) -> Result<()> {
+        self.state.open_item(item);
+        self.state.status = None;
+        if compose {
+            self.state.compose_to_conversation();
+        }
+        Ok(())
     }
 
     /// The recent history of a conversation, as an item of the list.

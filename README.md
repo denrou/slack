@@ -58,26 +58,28 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## The interactive view
 
-`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over every channel, group message and person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it.
+`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over every channel, group message and person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
 
-| Key                | Action                                              |
-| ------------------ | --------------------------------------------------- |
-| `j`/`k`, arrows    | Move through the list, or through the messages      |
-| `l`, Right, Tab    | Deeper: the messages, then the thread (`Enter` too) |
-| `h`, Left, `Esc`   | Back: close the thread, leave the messages, quit    |
-| `Enter`, `s`       | Reply to the conversation, or in the open thread    |
-| `c`                | Open any channel, group or person (`/` filters)     |
-| `x`                | Close an opened conversation                        |
-| `u`, `y`           | Open a link of the highlighted message, or copy it  |
-| `J`/`K`, PgDn/PgUp | Scroll the messages                                 |
-| `r`                | Mark it as read                                     |
-| `R`                | Mark everything listed as read (asks first)         |
-| `o`                | Open it in Slack                                    |
-| `g`                | Refresh                                             |
-| `?`                | Keys                                                |
-| `q`                | Quit                                                |
+| Key                | Action                                                                        |
+| ------------------ | ----------------------------------------------------------------------------- |
+| `j`/`k`, arrows    | Move through the list, or through the messages                                |
+| `l`, Right, Tab    | Deeper: the messages, then the highlighted message's thread                   |
+| `h`, Left, `Esc`   | Back: close the thread, leave the messages, quit                              |
+| `Enter`            | Reply: to the conversation, to the highlighted message, or in the open thread |
+| `s`                | A message to the conversation, wherever you are in it                         |
+| `n`                | New message: pick a channel or people, then write                             |
+| `c`                | Open any channel, group or person (`/` filters, Space marks people)           |
+| `x`                | Close an opened conversation                                                  |
+| `u`, `y`           | Open a link of the highlighted message, or copy it                            |
+| `J`/`K`, PgDn/PgUp | Scroll the messages                                                           |
+| `r`                | Mark it as read                                                               |
+| `R`                | Mark everything listed as read (asks first)                                   |
+| `o`                | Open it in Slack                                                              |
+| `g`                | Refresh                                                                       |
+| `?`                | Keys                                                                          |
+| `q`                | Quit                                                                          |
 
-A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message. Replies are one line; use `slack send` with stdin for a longer message.
+A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. Replies are one line; use `slack send` with stdin for a longer message.
 
 Without a terminal on both ends, as in a pipe or a script, `slack` prints what `slack unreads` prints instead of drawing.
 
