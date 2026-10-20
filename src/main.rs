@@ -18,6 +18,7 @@ mod store;
 mod style;
 mod target;
 mod threads;
+mod tui;
 mod view;
 
 use std::process::ExitCode;
@@ -85,6 +86,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Move through what needs you and answer it, interactively
+    Ui {
+        /// Also list the channels without a mention
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -103,6 +110,7 @@ fn main() -> ExitCode {
             keep_browser_session,
         }) => commands::logout(keep_browser_session),
         Some(Command::Whoami { json }) => commands::whoami(json),
+        Some(Command::Ui { all }) => commands::ui(all),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

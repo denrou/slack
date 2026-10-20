@@ -499,7 +499,7 @@ fn render_messages(
 }
 
 /// The first non-empty line, cut to `max` characters.
-fn excerpt(text: &str, max: usize) -> String {
+pub(crate) fn excerpt(text: &str, max: usize) -> String {
     let first = text
         .lines()
         .map(str::trim)
@@ -515,7 +515,7 @@ fn excerpt(text: &str, max: usize) -> String {
 }
 
 /// Local time, with the day when it is not today.
-fn format_ts(ts: &str, now: &Zoned) -> String {
+pub(crate) fn format_ts(ts: &str, now: &Zoned) -> String {
     let Some(seconds) = ts.split('.').next().and_then(|s| s.parse::<i64>().ok()) else {
         return ts.to_string();
     };

@@ -27,7 +27,7 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
   Do not route around the denial by pushing a branch and opening a pull request.
 
 - **Offer a release after every landed change.** A release is: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
-- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. **Never run `send` or `read` from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
+- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, the view) can be run from here to check the output. **Never run `send`, `read` or anything in `slack ui` that writes from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
 ## Architecture
 
@@ -50,6 +50,7 @@ One crate, binary `slack`, blocking I/O throughout (`ureq`, `tungstenite`); no a
 - `lastview.rs`: `~/.cache/slack/last-view.json`, the conversations the last view showed with the newest message each had.
 - `target.rs`: what a conversation argument means (`#channel`, `@person`, an id, a permalink); the name walks (`conversations.list`, `users.list`) live in `names.rs` and fill the cache.
 - `send.rs` and `read.rs`: the two commands that write to Slack (`chat.postMessage`, `conversations.mark`). `read` only ever marks what `lastview` recorded.
+- `tui/`: `slack ui`, ratatui 0.29 over crossterm. `model.rs` is the state and its pure key transitions (`State::key` returns an `Action`, tested); `ui.rs` draws; `mod.rs` runs the loop and performs the actions with blocking calls, a status line showing meanwhile. Items come from the same `View` as the text view. Marking a thread read uses `subscriptions.thread.mark` (channel, thread_ts, ts, read=1), an undocumented call written from memory and not yet verified live: if Slack refuses it, the status line shows the error and that is the first thing to fix.
 - `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups.
 
 ### Error direction

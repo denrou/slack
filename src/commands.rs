@@ -14,7 +14,7 @@ use crate::auth::{capture, cdp};
 use crate::names::Names;
 use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
-use crate::{counts, lastview, read, send, view};
+use crate::{counts, lastview, read, send, tui, view};
 
 pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
@@ -59,6 +59,22 @@ pub fn count(all: bool) -> Result<()> {
         }
     );
     Ok(())
+}
+
+pub fn ui(all: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (team_id, workspace) = store.default_workspace()?;
+    let mut names = Names::load();
+    let result = tui::run(
+        &workspace.client(),
+        &mut names,
+        team_id,
+        workspace.user_id.as_deref(),
+        &workspace.url,
+        all,
+    );
+    names.save();
+    result
 }
 
 pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()> {

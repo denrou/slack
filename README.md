@@ -27,6 +27,7 @@ slack           # what needs you: DMs, mentions, unread threads
 slack -a        # ...plus every other channel with unreads
 slack --count   # the same, as one number for a status bar
 slack --json    # the same data, for scripts
+slack ui        # the same, interactive: move through it, reply, mark read
 
 slack send '#sre-alerts' "on it"                    # post to a channel
 slack send @jane "merci !"                          # ...or a DM
@@ -42,6 +43,25 @@ slack read --all                                    # ...also the channels the l
 `slack` shows what needs you, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Channel chatter without a mention is counted but hidden; a line on stderr says how many channels were held back, and `slack -a` lists them with their messages. Channels you muted in Slack are left out altogether, as the app does; a mention in a muted channel still counts.
 
 Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read the DMs and mentions the last view showed (no more: a message that arrived since stays unread). The channels a `slack -a` listed are a wider net, so they take `slack read --all` or their name. Names are cached in `~/.cache/slack/names.json`, safe to delete.
+
+## The interactive view
+
+`slack ui` puts the same view in a two-pane screen: the list of what needs you on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `slack ui -a` includes the channels without a mention.
+
+| Key                | Action                                       |
+| ------------------ | -------------------------------------------- |
+| `j`/`k`, arrows    | Move through the list                        |
+| `J`/`K`, PgDn/PgUp | Scroll the messages                          |
+| `Enter`, `s`       | Reply to the selected conversation or thread |
+| `r`                | Mark it as read                              |
+| `R`                | Mark everything listed as read (asks first)  |
+| `o`                | Open it in Slack                             |
+| `g`                | Refresh                                      |
+| `a`                | Show or hide the channels without a mention  |
+| `?`                | Keys                                         |
+| `q`, `Esc`         | Quit                                         |
+
+A reply marks the conversation as read up to your message, as in the app. Replies are one line; use `slack send` with stdin for a longer message.
 
 ## Sending
 
