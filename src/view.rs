@@ -106,37 +106,44 @@ impl View {
     /// position is the number printed next to it, for `slack thread N`.
     pub fn thread_refs(&self) -> Vec<ThreadRef> {
         let mut refs: Vec<ThreadRef> = Vec::new();
-        let mut add = |channel: &str, ts: &str| {
-            let thread = ThreadRef {
-                channel: channel.to_string(),
-                ts: ts.to_string(),
-            };
-            if !refs.contains(&thread) {
-                refs.push(thread);
-            }
-        };
-        let entries = |entries: &[Entry], add: &mut dyn FnMut(&str, &str)| {
+        let entries = |entries: &[Entry], refs: &mut Vec<ThreadRef>| {
             for entry in entries {
-                for message in entry.messages.iter().flatten() {
-                    if message.reply_count > 0 {
-                        add(
-                            &entry.id,
-                            message.thread_ts.as_deref().unwrap_or(&message.ts),
-                        );
-                    }
+                if let Some(messages) = &entry.messages {
+                    add_threads(refs, &entry.id, messages);
                 }
             }
         };
-        entries(&self.direct_messages, &mut add);
-        entries(&self.mentions, &mut add);
-        entries(&self.channels, &mut add);
+        entries(&self.direct_messages, &mut refs);
+        entries(&self.mentions, &mut refs);
+        entries(&self.channels, &mut refs);
         for thread in self.threads.iter().flat_map(|t| t.items.iter().flatten()) {
-            add(&thread.channel, &thread.thread_ts);
+            add_thread(&mut refs, &thread.channel, &thread.thread_ts);
         }
         if self.all {
-            entries(&self.more_channels, &mut add);
+            entries(&self.more_channels, &mut refs);
         }
         refs
+    }
+}
+
+/// The threads the messages with replies belong to, in order, once each.
+fn add_threads(refs: &mut Vec<ThreadRef>, channel: &str, messages: &[Message]) {
+    for message in messages.iter().filter(|m| m.reply_count > 0) {
+        add_thread(
+            refs,
+            channel,
+            message.thread_ts.as_deref().unwrap_or(&message.ts),
+        );
+    }
+}
+
+fn add_thread(refs: &mut Vec<ThreadRef>, channel: &str, ts: &str) {
+    let thread = ThreadRef {
+        channel: channel.to_string(),
+        ts: ts.to_string(),
+    };
+    if !refs.contains(&thread) {
+        refs.push(thread);
     }
 }
 
@@ -148,8 +155,19 @@ impl Refs {
         Refs(view.thread_refs())
     }
 
+    /// The threads among one conversation's messages, for `slack show`.
+    pub(crate) fn of_messages(channel: &str, messages: &[Message]) -> Refs {
+        let mut refs = Vec::new();
+        add_threads(&mut refs, channel, messages);
+        Refs(refs)
+    }
+
     pub(crate) fn none() -> Refs {
         Refs(Vec::new())
+    }
+
+    pub(crate) fn into_threads(self) -> Vec<ThreadRef> {
+        self.0
     }
 
     fn number(&self, channel: &str, ts: &str) -> Option<usize> {
@@ -341,7 +359,7 @@ pub fn render(
     names: &Names,
     style: &Style,
     me: Option<&str>,
-    out: &mut impl Write,
+    out: &mut dyn Write,
 ) -> io::Result<()> {
     render_at(view, names, style, me, &Zoned::now(), out)
 }
@@ -352,7 +370,7 @@ fn render_at(
     style: &Style,
     me: Option<&str>,
     now: &Zoned,
-    out: &mut impl Write,
+    out: &mut dyn Write,
 ) -> io::Result<()> {
     let refs = Refs::of(view);
     let printed = Cell::new(false);
@@ -474,7 +492,8 @@ fn render_entry(
                 channel: &entry.id,
                 has_more: entry.has_more,
                 show_author: entry.kind != Kind::Im,
-                in_thread: false,
+                scope: Scope::Unread,
+                unread_from: None,
             };
             render_messages(&list, refs, names, style, me, now, out)
         }
@@ -514,9 +533,21 @@ fn render_thread(
         channel: &thread.channel,
         has_more: false,
         show_author: true,
-        in_thread: true,
+        scope: Scope::Thread,
+        unread_from: None,
     };
     render_messages(&list, refs, names, style, me, now, out)
+}
+
+/// What a block of messages is, for the notes around it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// The unread part of a conversation.
+    Unread,
+    /// A thread: every message is a reply, no need to say so each time.
+    Thread,
+    /// The recent history of a conversation, read or not.
+    History,
 }
 
 /// Messages to render as a block, with what the notes need to know.
@@ -526,8 +557,9 @@ pub(crate) struct MessageList<'a> {
     /// Older messages exist beyond this page.
     pub has_more: bool,
     pub show_author: bool,
-    /// Inside a thread every message is a reply; do not say so each time.
-    pub in_thread: bool,
+    pub scope: Scope,
+    /// The read cursor: a separator goes before the first message after it.
+    pub unread_from: Option<&'a str>,
 }
 
 pub(crate) fn render_messages(
@@ -548,7 +580,21 @@ pub(crate) fn render_messages(
     let indent = " ".repeat(4 + width + 2);
     let user = |id: &str| names.user_name(id);
     let channel = |id: &str| names.channel_name(id);
+    // A history reads down from its oldest message, so what is missing
+    // before it is said first; the other blocks keep the note as a footnote.
+    if list.has_more && list.scope == Scope::History {
+        writeln!(
+            out,
+            "{indent}{}",
+            style.dim("earlier messages not shown; -n asks for more")
+        )?;
+    }
+    let mut separated = false;
     for (message, time) in list.messages.iter().zip(times) {
+        if !separated && is_new(message, list.unread_from) {
+            separated = true;
+            writeln!(out, "{indent}{}", style.dim("── new ──"))?;
+        }
         let time = format!("{time:>width$}");
         let time = if me.is_some_and(|me| message.mentions(me)) {
             style.mention(&time)
@@ -569,7 +615,7 @@ pub(crate) fn render_messages(
         }
         let mut text = mrkdwn::render(&message.text, &user, &channel, style);
         let mut notes = Vec::new();
-        if !list.in_thread && message.is_reply() {
+        if list.scope != Scope::Thread && message.is_reply() {
             notes.push("in thread".to_string());
         }
         if message.reply_count > 0 {
@@ -598,15 +644,19 @@ pub(crate) fn render_messages(
         let text = text.replace('\n', &format!("\n{indent}"));
         writeln!(out, "    {time}  {head}{text}")?;
     }
-    if list.has_more {
-        let note = if list.in_thread {
-            "more replies not shown"
-        } else {
-            "earlier unread messages not shown"
+    if list.has_more && list.scope != Scope::History {
+        let note = match list.scope {
+            Scope::Unread => "earlier unread messages not shown",
+            Scope::Thread | Scope::History => "more replies not shown",
         };
         writeln!(out, "{indent}{}", style.dim(note))?;
     }
     Ok(())
+}
+
+/// Newer than the read cursor, when there is one.
+pub(crate) fn is_new(message: &Message, unread_from: Option<&str>) -> bool {
+    unread_from.is_some_and(|cursor| compare_ts(&message.ts, cursor).is_gt())
 }
 
 /// The first non-empty line, cut to `max` characters.

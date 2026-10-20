@@ -18,11 +18,17 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use serde_json::Value;
 
-use self::model::{Action, Item, State, ThreadPane};
+use self::model::{Action, Choice, ChoiceKind, Item, Mode, Picker, Section, State, ThreadPane};
 use crate::api::{self, Client};
+use crate::counts::Kind;
+use crate::history::Message;
 use crate::names::Names;
 use crate::style::Style;
-use crate::{counts, lastview, mrkdwn, replies, view};
+use crate::{counts, directory, history, lastview, mrkdwn, replies, target, view};
+
+/// Messages read when a conversation is opened from the picker: enough to
+/// catch up, one line each on the screen.
+const HISTORY_LIMIT: usize = 50;
 
 pub fn run(
     client: &Client,
@@ -39,6 +45,7 @@ pub fn run(
         team_id,
         workspace_url: workspace_url.trim_end_matches('/'),
         state: State::new(items, all, me.map(str::to_string)),
+        directory_walked: false,
     };
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
@@ -58,6 +65,9 @@ struct App<'a> {
     team_id: &'a str,
     workspace_url: &'a str,
     state: State,
+    /// The whole directory was read once this session; the picker needs
+    /// it for the people without a DM, and once is enough.
+    directory_walked: bool,
 }
 
 impl App<'_> {
@@ -105,7 +115,7 @@ impl App<'_> {
                 self.busy(terminal, "Marking as read…")?;
                 match self.mark_read(index) {
                     Ok(title) => {
-                        self.state.remove(index);
+                        self.after_mark(index);
                         self.state.status = Some(format!("Marked {title} as read"));
                         Ok(())
                     }
@@ -119,7 +129,7 @@ impl App<'_> {
                 for index in (0..self.state.items.len()).rev() {
                     match self.mark_read(index) {
                         Ok(_) => {
-                            self.state.remove(index);
+                            self.after_mark(index);
                             marked += 1;
                         }
                         Err(err) => return self.fail(err),
@@ -151,6 +161,28 @@ impl App<'_> {
                 match self.open_thread(item, message) {
                     Ok(pane) => {
                         self.state.open_thread(pane);
+                        self.state.status = None;
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
+                }
+            }
+            Action::OpenPicker => {
+                self.busy(terminal, "Loading the directory…")?;
+                match self.choices() {
+                    Ok(choices) => {
+                        self.state.mode = Mode::Pick(Picker::new(choices));
+                        self.state.status = None;
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
+                }
+            }
+            Action::Show(choice) => {
+                self.busy(terminal, &format!("Loading {}…", choice.label))?;
+                match self.show(&choice) {
+                    Ok(item) => {
+                        self.state.open_item(item);
                         self.state.status = None;
                         Ok(())
                     }
@@ -214,6 +246,16 @@ impl App<'_> {
         Ok(item.title.clone())
     }
 
+    /// What needed you leaves the list once read; an opened conversation
+    /// stays, with nothing new in it.
+    fn after_mark(&mut self, index: usize) {
+        if self.state.items[index].section == Section::Opened {
+            self.state.items[index].caught_up();
+        } else {
+            self.state.remove(index);
+        }
+    }
+
     /// Post the reply. A conversation answered from the list is then read
     /// up to the reply, as it is in the app when you answer.
     fn send(&mut self, index: usize, text: &str, thread_ts: Option<&str>) -> Result<String> {
@@ -237,23 +279,33 @@ impl App<'_> {
     }
 
     /// After a reply: inside an open thread the thread is reloaded to show
-    /// it; from the list the item is done with and leaves the list.
+    /// it; an opened conversation is reloaded the same way; from the list
+    /// the item is done with and leaves the list.
     fn after_send(&mut self, item: usize, title: &str) -> Result<()> {
-        match self.state.thread.take() {
-            Some(pane) => match self.reload_thread(pane) {
+        if let Some(pane) = self.state.thread.take() {
+            return match self.reload_thread(pane) {
                 Ok(pane) => {
                     self.state.thread = Some(pane);
                     self.state.status = Some("Sent".to_string());
                     Ok(())
                 }
                 Err(err) => self.fail(err),
-            },
-            None => {
-                self.state.remove(item);
-                self.state.status = Some(format!("Sent to {title}"));
-                Ok(())
-            }
+            };
         }
+        if self.state.items[item].section == Section::Opened {
+            let channel = self.state.items[item].channel.clone();
+            return match self.load_opened(channel, None) {
+                Ok(reloaded) => {
+                    self.state.open_item(reloaded);
+                    self.state.status = Some("Sent".to_string());
+                    Ok(())
+                }
+                Err(err) => self.fail(err),
+            };
+        }
+        self.state.remove(item);
+        self.state.status = Some(format!("Sent to {title}"));
+        Ok(())
     }
 
     fn open_thread(&mut self, item: usize, message: usize) -> Result<ThreadPane> {
@@ -265,7 +317,7 @@ impl App<'_> {
         let thread_ts = msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone());
         let channel = it.channel.clone();
         let fetched = replies::fetch(self.client, &channel, &thread_ts)?;
-        self.resolve_people(&fetched)?;
+        self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         let user = |id: &str| self.names.user_name(id);
         let chan = |id: &str| self.names.channel_name(id);
         let root = mrkdwn::render(&fetched.root.text, &user, &chan, &Style::plain());
@@ -288,7 +340,7 @@ impl App<'_> {
 
     fn reload_thread(&mut self, pane: ThreadPane) -> Result<ThreadPane> {
         let fetched = replies::fetch(self.client, &pane.channel, &pane.thread_ts)?;
-        self.resolve_people(&fetched)?;
+        self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         let mut messages = vec![fetched.root];
         messages.extend(fetched.replies);
         Ok(ThreadPane {
@@ -298,9 +350,83 @@ impl App<'_> {
         })
     }
 
-    fn resolve_people(&mut self, fetched: &replies::Replies) -> Result<()> {
+    /// Every conversation you are in, then everyone else in the
+    /// workspace, for the picker.
+    fn choices(&mut self) -> Result<Vec<Choice>> {
+        let listed = directory::conversations(self.client, self.names)?;
+        if !self.directory_walked {
+            self.names.walk_users(self.client)?;
+            self.directory_walked = true;
+        }
+        let mut choices = Vec::new();
+        let mut with_dm = BTreeSet::new();
+        for conversation in &listed {
+            let kind = match conversation.kind {
+                Kind::Channel => ChoiceKind::Channel,
+                Kind::Mpim => ChoiceKind::Group,
+                Kind::Im => ChoiceKind::Dm,
+            };
+            let person = conversation
+                .user
+                .as_deref()
+                .and_then(|id| self.names.user(id));
+            if let Some(id) = &conversation.user {
+                with_dm.insert(id.clone());
+            }
+            choices.push(Choice {
+                kind,
+                id: conversation.id.clone(),
+                label: conversation.name.clone(),
+                search: person
+                    .map(|p| format!("{} {} {}", p.name, p.real, p.title))
+                    .unwrap_or_default(),
+                note: conversation.notes().join(", "),
+                unread_from: conversation.unread_from().map(str::to_string),
+            });
+        }
+        let me = self.state.me.as_deref();
+        for person in directory::everyone(self.names) {
+            if with_dm.contains(&person.id) || Some(person.id.as_str()) == me {
+                continue;
+            }
+            let note = if person.title.is_empty() {
+                person.real.clone()
+            } else {
+                person.title.clone()
+            };
+            choices.push(Choice {
+                kind: ChoiceKind::Person,
+                label: format!("@{}", person.display),
+                search: person.search(),
+                note,
+                id: person.id,
+                unread_from: None,
+            });
+        }
+        Ok(choices)
+    }
+
+    fn show(&mut self, choice: &Choice) -> Result<Item> {
+        let channel = match choice.kind {
+            ChoiceKind::Person => target::open_dm(self.client, &choice.id)?,
+            _ => choice.id.clone(),
+        };
+        self.load_opened(channel, choice.unread_from.clone())
+    }
+
+    /// The recent history of a conversation, as an item of the list.
+    fn load_opened(&mut self, channel: String, unread_from: Option<String>) -> Result<Item> {
+        let page = history::fetch(self.client, &channel, None, HISTORY_LIMIT)?;
+        self.names
+            .resolve_channels(self.client, [channel.clone()])?;
+        self.resolve_people(page.messages.iter())?;
+        let title = self.names.channel_label(&channel);
+        Ok(Item::opened(channel, title, page, unread_from))
+    }
+
+    fn resolve_people<'m>(&mut self, messages: impl Iterator<Item = &'m Message>) -> Result<()> {
         let mut people = BTreeSet::new();
-        for message in std::iter::once(&fetched.root).chain(&fetched.replies) {
+        for message in messages {
             people.extend(message.user.clone());
             people.extend(view::mentioned_users(&message.text));
         }

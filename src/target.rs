@@ -70,17 +70,22 @@ pub fn resolve(client: &Client, names: &mut Names, team_id: &str, spec: &str) ->
         let user = names
             .user_id_by_name(client, name)?
             .ok_or_else(|| anyhow!("no one called @{name} in the workspace"))?;
-        let opened = client.call("conversations.open", &[("users", &user)])?;
-        let channel = opened
-            .pointer("/channel/id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("conversations.open answered without a channel id"))?;
         return Ok(Target {
-            channel: channel.to_string(),
+            channel: open_dm(client, &user)?,
             thread_ts: None,
         });
     }
     bail!("`{spec}` is not a #channel, an @person, a conversation id or a Slack permalink")
+}
+
+/// The direct message with a person, opened if it did not exist yet.
+pub fn open_dm(client: &Client, user: &str) -> Result<String> {
+    let opened = client.call("conversations.open", &[("users", user)])?;
+    let channel = opened
+        .pointer("/channel/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("conversations.open answered without a channel id"))?;
+    Ok(channel.to_string())
 }
 
 /// `C…`, `D…` or `G…` followed by uppercase letters and digits.

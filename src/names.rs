@@ -24,7 +24,7 @@ pub struct Names {
     path: Option<PathBuf>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct User {
     /// The handle, as in `@handle`.
     pub name: String,
@@ -32,6 +32,12 @@ pub struct User {
     pub display: String,
     #[serde(default)]
     pub is_bot: bool,
+    /// The full name, for the directory; empty when Slack has none.
+    #[serde(default)]
+    pub real: String,
+    /// The job title from the profile, often empty.
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -80,6 +86,15 @@ impl Names {
 
     pub fn channel(&self, id: &str) -> Option<&Channel> {
         self.channels.get(id)
+    }
+
+    pub fn user(&self, id: &str) -> Option<&User> {
+        self.users.get(id)
+    }
+
+    /// Everyone in the cache, by id.
+    pub fn users(&self) -> impl Iterator<Item = (&str, &User)> {
+        self.users.iter().map(|(id, user)| (id.as_str(), user))
     }
 
     /// The display name of a user, without the sigil.
@@ -200,8 +215,29 @@ impl Names {
         if let Some(id) = self.find_user(name) {
             return Ok(Some(id));
         }
-        self.walk(client, "users.list", &[], Names::add_users_page)?;
+        self.walk_users(client)?;
         Ok(self.find_user(name))
+    }
+
+    /// Fill the cache with every conversation you are in, in a call or
+    /// two: `users.conversations` names the channels and the group
+    /// messages and gives the person behind each DM at once, where
+    /// `conversations.info` would be one call per conversation.
+    pub fn walk_memberships(&mut self, client: &Client) -> Result<(), api::Error> {
+        self.walk(
+            client,
+            "users.conversations",
+            &[
+                ("types", "public_channel,private_channel,mpim,im"),
+                ("exclude_archived", "true"),
+            ],
+            Names::add_channels_page,
+        )
+    }
+
+    /// Fill the cache with everyone in the workspace, a thousand at a time.
+    pub fn walk_users(&mut self, client: &Client) -> Result<(), api::Error> {
+        self.walk(client, "users.list", &[], Names::add_users_page)
     }
 
     fn find_channel(&self, name: &str) -> Option<String> {
@@ -308,6 +344,13 @@ fn user_from_raw(user: &Value) -> Option<User> {
         name,
         display,
         is_bot: user.get("is_bot").and_then(Value::as_bool).unwrap_or(false),
+        real: non_empty(user.get("real_name"))
+            .or_else(|| non_empty(user.pointer("/profile/real_name")))
+            .unwrap_or_default()
+            .to_string(),
+        title: non_empty(user.pointer("/profile/title"))
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -365,10 +408,14 @@ mod tests {
 
     #[test]
     fn display_name_falls_back_to_real_name_then_handle() {
-        let user = user_from(&json!({"user": {"name": "jdoe", "real_name": "Jane Doe", "profile": {"display_name": "jane"}}})).unwrap();
+        let user = user_from(&json!({"user": {"name": "jdoe", "real_name": "Jane Doe", "profile": {"display_name": "jane", "title": "SRE"}}})).unwrap();
         assert_eq!(
             (user.name.as_str(), user.display.as_str()),
             ("jdoe", "jane")
+        );
+        assert_eq!(
+            (user.real.as_str(), user.title.as_str()),
+            ("Jane Doe", "SRE")
         );
         let user = user_from(&json!({"user": {"name": "jdoe", "real_name": "Jane Doe", "profile": {"display_name": ""}}})).unwrap();
         assert_eq!(user.display, "Jane Doe");
@@ -385,7 +432,7 @@ mod tests {
             User {
                 name: "jdoe".into(),
                 display: "jane".into(),
-                is_bot: false,
+                ..User::default()
             },
         );
         names.channels.insert(

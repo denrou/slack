@@ -6,17 +6,19 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::api::{self, Client, Credentials, Identity};
 use crate::auth::chrome::{self, ClearOutcome};
 use crate::auth::{capture, cdp};
+use crate::counts::Kind;
+use crate::directory::Listed;
 use crate::names::Names;
 use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
 use crate::target::parse_permalink;
-use crate::view::{MessageList, Refs};
-use crate::{counts, lastview, mrkdwn, read, replies, send, tui, view};
+use crate::view::{MessageList, Refs, Scope};
+use crate::{counts, directory, history, lastview, mrkdwn, read, replies, send, target, tui, view};
 
 pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
@@ -34,15 +36,14 @@ pub fn view(all: bool, json: bool, no_color: bool) -> Result<()> {
         return Ok(());
     }
     let style = Style::detect(no_color);
+    to_stdout(|out| view::render(&view, &names, &style, workspace.user_id.as_deref(), out))
+}
+
+/// Print through a locked stdout. `slack | head` closes the pipe early;
+/// that is not an error.
+fn to_stdout(print: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()> {
     let stdout = io::stdout();
-    match view::render(
-        &view,
-        &names,
-        &style,
-        workspace.user_id.as_deref(),
-        &mut stdout.lock(),
-    ) {
-        // `slack | head` closes the pipe early; that is not an error.
+    match print(&mut stdout.lock()) {
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         other => Ok(other?),
     }
@@ -145,7 +146,8 @@ pub fn thread(spec: &str, json: bool, no_color: bool) -> Result<()> {
         channel: &channel,
         has_more: fetched.has_more,
         show_author: true,
-        in_thread: true,
+        scope: Scope::Thread,
+        unread_from: None,
     };
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -185,6 +187,236 @@ fn thread_target(team_id: &str, spec: &str) -> Result<(String, String)> {
         return Ok((link.channel, thread_ts));
     }
     bail!("`{spec}` is neither a thread number from the last `slack` output nor a Slack permalink")
+}
+
+pub fn channels(filter: &str, json: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let mut names = Names::load();
+    let listed = directory::conversations(&workspace.client(), &mut names);
+    names.save();
+    let listed: Vec<Listed> = listed?
+        .into_iter()
+        .filter(|c| c.kind != Kind::Im && directory::matches(filter, &c.name))
+        .collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(());
+    }
+    if listed.is_empty() {
+        if filter.is_empty() {
+            println!("You are in no channel.");
+        } else {
+            println!("No channel matches `{filter}`.");
+        }
+        return Ok(());
+    }
+    let style = Style::detect(false);
+    let (channels, groups): (Vec<&Listed>, Vec<&Listed>) =
+        listed.iter().partition(|c| c.kind == Kind::Channel);
+    to_stdout(|out| {
+        let mut printed = false;
+        for (title, entries) in [("Channels", channels), ("Group messages", groups)] {
+            if entries.is_empty() {
+                continue;
+            }
+            if printed {
+                writeln!(out)?;
+            }
+            printed = true;
+            writeln!(out, "{}", style.heading(title))?;
+            for listed in entries {
+                let notes = listed.notes();
+                let notes = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", style.dim(&format!("({})", notes.join(", "))))
+                };
+                writeln!(out, "  {}{notes}", style.bold(&listed.name))?;
+            }
+        }
+        Ok(())
+    })
+}
+
+pub fn people(filter: &str, json: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let mut names = Names::load();
+    let people = if filter.is_empty() {
+        directory::correspondents(&client, &mut names)
+    } else {
+        directory::people(&client, &mut names, filter)
+    };
+    names.save();
+    let people = people?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&people)?);
+        return Ok(());
+    }
+    if people.is_empty() {
+        if filter.is_empty() {
+            println!("No direct message yet; `slack people <name>` searches the workspace.");
+        } else {
+            println!("No one matches `{filter}`.");
+        }
+        return Ok(());
+    }
+    let style = Style::detect(false);
+    let width = people
+        .iter()
+        .map(|p| p.display.chars().count() + 1)
+        .max()
+        .unwrap_or(0);
+    to_stdout(|out| {
+        for person in &people {
+            let label = format!("@{}", person.display);
+            let padding = " ".repeat(width - label.chars().count());
+            let mut rest = Vec::new();
+            if person.handle != person.display {
+                rest.push(style.dim(&format!("@{}", person.handle)));
+            }
+            if !person.real.is_empty() && person.real != person.display {
+                rest.push(person.real.clone());
+            }
+            if !person.title.is_empty() {
+                rest.push(style.dim(&person.title));
+            }
+            writeln!(
+                out,
+                "  {}{padding}  {}",
+                style.bold(&label),
+                rest.join("  ")
+            )?;
+        }
+        Ok(())
+    })
+}
+
+pub fn show(spec: &str, limit: usize, json: bool, no_color: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (team_id, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let mut names = Names::load();
+    let loaded = load_conversation(&client, &mut names, team_id, spec, limit);
+    names.save();
+    let (channel, page, last_read) = loaded?;
+    if json {
+        let value = json!({
+            "channel": channel,
+            "name": names.channel_label(&channel),
+            "messages": page.messages,
+            "has_more": page.has_more,
+            "last_read": last_read,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let refs = Refs::of_messages(&channel, &page.messages);
+    let latest = page.messages.last().map(|m| m.ts.as_str());
+    let threads = Refs::of_messages(&channel, &page.messages).into_threads();
+    if let Err(err) = lastview::remember_conversation(team_id, &channel, latest, threads) {
+        eprintln!(
+            "warning: could not record the conversation for `slack read` and `slack thread`: {err:#}"
+        );
+    }
+    let style = Style::detect(no_color);
+    let new = page
+        .messages
+        .iter()
+        .filter(|m| view::is_new(m, last_read.as_deref()))
+        .count();
+    let mut count = match page.messages.len() {
+        0 => "no messages".to_string(),
+        n if page.has_more => format!("last {n} messages"),
+        1 => "1 message".to_string(),
+        n => format!("{n} messages"),
+    };
+    if new > 0 {
+        count.push_str(&format!(", {new} new"));
+    }
+    let list = MessageList {
+        messages: &page.messages,
+        channel: &channel,
+        has_more: page.has_more,
+        show_author: true,
+        scope: Scope::History,
+        unread_from: last_read.as_deref(),
+    };
+    let now = jiff::Zoned::now();
+    let me = workspace.user_id.as_deref();
+    to_stdout(|out| {
+        writeln!(
+            out,
+            "{}  {}",
+            style.bold(&names.channel_label(&channel)),
+            style.dim(&format!("({count})"))
+        )?;
+        if page.messages.is_empty() {
+            return Ok(());
+        }
+        view::render_messages(&list, &refs, &names, &style, me, &now, out)?;
+        writeln!(
+            out,
+            "{}",
+            style.dim(&format!(
+                "reply with: slack send {} \"…\"",
+                send_target(&names, &channel)
+            ))
+        )
+    })
+}
+
+/// A conversation argument, its recent messages, and its read cursor
+/// (the newest unread messages are the ones after it).
+fn load_conversation(
+    client: &Client,
+    names: &mut Names,
+    team_id: &str,
+    spec: &str,
+    limit: usize,
+) -> Result<(String, history::Unread, Option<String>)> {
+    let target = target::resolve(client, names, team_id, spec)?;
+    if target.thread_ts.is_some() {
+        bail!(
+            "`slack show` takes a #channel, an @person or a conversation id; `slack thread` shows \
+             a thread"
+        );
+    }
+    let channel = target.channel;
+    let (page, info) = std::thread::scope(|scope| {
+        let info = scope.spawn(|| client.call("conversations.info", &[("channel", &channel)]));
+        let page = history::fetch(client, &channel, None, limit);
+        // A panic in the info thread is a bug, not a condition to handle.
+        (page, info.join().expect("the info thread panicked"))
+    });
+    let page = page?;
+    let last_read = info?
+        .pointer("/channel/last_read")
+        .and_then(Value::as_str)
+        .filter(|cursor| history::is_usable_cursor(cursor))
+        .map(str::to_string);
+    names.resolve_channels(client, [channel.clone()])?;
+    let mut people = BTreeSet::new();
+    people.extend(names.channel(&channel).and_then(|c| c.user.clone()));
+    for message in &page.messages {
+        people.extend(message.user.clone());
+        people.extend(view::mentioned_users(&message.text));
+    }
+    names.resolve_users(client, people)?;
+    Ok((channel, page, last_read))
+}
+
+/// The conversation as a command-line target: `'#name'` (quoted, since
+/// zsh reads `#` as a comment), `@person`, or the id of a group message,
+/// which has no name to type.
+fn send_target(names: &Names, channel: &str) -> String {
+    match names.channel(channel) {
+        Some(c) if c.is_im => names.channel_label(channel),
+        Some(c) if !c.is_mpim && !c.name.is_empty() => format!("'#{}'", c.name),
+        _ => channel.to_string(),
+    }
 }
 
 pub fn read(targets: &[String], all: bool) -> Result<()> {

@@ -34,7 +34,7 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
 One crate, binary `slack`, blocking I/O throughout (`ureq`, `tungstenite`); no async runtime, deliberately. Modules by what they know:
 
 - `main.rs`: clap definitions and dispatch. No subcommand is the view; `--count` is the status-bar path.
-- `commands.rs`: one function per command, the only place that prints.
+- `commands.rs`: one function per command, the only place that prints. `show` reads a conversation's recent history (`conversations.history` without a cursor, `conversations.info` for the read cursor that places the `── new ──` line) and records it in `lastview` so `slack read <name>` and the thread numbers work from that output.
 - `api.rs`: the one transport. A form POST to `<workspace url>/api/<method>` with `token=<xoxc>` in the body and `Cookie: d=<xoxd>`, the way the web client does it. Parses the `ok` envelope, maps `invalid_auth` and friends to `Error::Auth` ("run `slack login`"), retries HTTP 429 twice honouring `Retry-After` (capped at 30 s). Commands never see headers or tokens.
 - `store.rs`: `~/.config/slack/workspaces.json`, workspaces keyed by team id with their credentials, written atomically with mode `0600`. `Workspace` has no `Debug` so a token can never land in a log.
 - `paths.rs`: XDG lookup (`~/.config/slack`, like gh-prs and slackcli; not `~/Library/Application Support`) and owner-only file writes.
@@ -45,13 +45,14 @@ One crate, binary `slack`, blocking I/O throughout (`ureq`, `tungstenite`); no a
 - `view.rs`: the model (`View`: direct messages, mentions, channels, threads) built from the counts, then rendered as text or `--json`. The model is kept apart from the rendering so a TUI can sit on the same data. `shown()` is what `slack read` may mark.
 - `history.rs`: the unread part of a conversation (`conversations.history` from `last_read`, newest page, oldest first in the output, joins and leaves dropped).
 - `threads.rs`: `subscriptions.thread.getView`, paginated on `current_ts`, unread threads first; a read thread ends the walk, a shape change degrades to the summary line with a warning.
-- `names.rs`: the id-to-name cache (`~/.cache/slack/names.json`), filled per id on a miss through `users.info` and `conversations.info`, a few lookups at a time.
+- `names.rs`: the id-to-name cache (`~/.cache/slack/names.json`), filled per id on a miss through `users.info` and `conversations.info`, a few lookups at a time, or in one walk (`users.conversations` for everything you are in, `users.list` for the directory) when the directory needs it whole.
+- `directory.rs`: every conversation you are in (`client.counts` ids, named from the cache) and everyone in the workspace, with the word filter: behind `slack channels`, `slack people` and the TUI picker.
 - `mrkdwn.rs`: Slack markup to terminal text (mentions, channel links, URLs with a label that only repeats the URL dropped, entities, bold/italic/strike/code when colors are on). Pure, with the parsing rules pinned by tests.
-- `lastview.rs`: `~/.cache/slack/last-view.json`, the conversations the last view showed with the newest message each had, and the threads it numbered (`View::thread_refs`, reading order), which `slack thread 2` and `slack send 2` resolve.
+- `lastview.rs`: `~/.cache/slack/last-view.json`, the conversations the last view showed with the newest message each had, and the threads it numbered (`View::thread_refs`, reading order), which `slack thread 2` and `slack send 2` resolve. `slack show` adds its conversation and replaces the numbering: a number refers to the last output that printed one.
 - `replies.rs`: `conversations.replies`, root first then every reply, up to five pages; behind `slack thread` and the TUI's thread pane.
 - `target.rs`: what a conversation argument means (`#channel`, `@person`, an id, a permalink); the name walks (`conversations.list`, `users.list`) live in `names.rs` and fill the cache.
 - `send.rs` and `read.rs`: the two commands that write to Slack (`chat.postMessage`, `conversations.mark`). `read` only ever marks what `lastview` recorded.
-- `tui/`: `slack ui`, ratatui 0.29 over crossterm. `model.rs` is the state and its pure key transitions (`State::key` returns an `Action`, tested); `ui.rs` draws; `mod.rs` runs the loop and performs the actions with blocking calls, a status line showing meanwhile. Items come from the same `View` as the text view. Two levels of focus: the list, and the messages pane (`l`), where `Enter` opens the highlighted message's thread in the pane (`ThreadPane`) and `Enter` again replies in it. Marking a thread read uses `subscriptions.thread.mark` (channel, thread_ts, ts, read=1), an undocumented call written from memory and not yet verified live: if Slack refuses it, the status line shows the error and that is the first thing to fix.
+- `tui/`: `slack ui`, ratatui 0.29 over crossterm. `model.rs` is the state and its pure key transitions (`State::key` returns an `Action`, tested); `ui.rs` draws; `mod.rs` runs the loop and performs the actions with blocking calls, a status line showing meanwhile. Items come from the same `View` as the text view. Two levels of focus: the list, and the messages pane (`l`), where `Enter` opens the highlighted message's thread in the pane (`ThreadPane`) and `Enter` again replies in it. `c` opens the picker (`Mode::Pick`, every conversation and person from `directory.rs`, narrowed by typing); the chosen one lands in the `Opened` section with its last 50 messages, read from the end, and stays through refreshes, marks and replies (it is reloaded after a reply). Marking a thread read uses `subscriptions.thread.mark` (channel, thread_ts, ts, read=1), an undocumented call written from memory and not yet verified live: if Slack refuses it, the status line shows the error and that is the first thing to fix.
 - `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups.
 
 ### Error direction
@@ -79,7 +80,7 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 
 ## Not planned yet
 
-A TUI to move through and answer the messages (`ratatui` on top of the same view model, which is why `view.rs` keeps the model apart from the rendering), numbered replies (`slack send 3 "ok"` answering item 3 of the last view), `--workspace`, Linux browser paths, a `watch` mode, a Homebrew tap once the tool has settled.
+`--workspace`, Linux browser paths, a `watch` mode, loading older history from the TUI, a Homebrew tap once the tool has settled.
 
 ## Reference implementation
 

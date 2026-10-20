@@ -5,6 +5,7 @@ mod api;
 mod auth;
 mod commands;
 mod counts;
+mod directory;
 mod history;
 mod lastview;
 mod mrkdwn;
@@ -104,6 +105,36 @@ enum Command {
         #[arg(short, long)]
         all: bool,
     },
+    /// List the channels and group messages you are in
+    Channels {
+        /// Only those whose name contains these words
+        filter: Vec<String>,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the people you have a direct message with, or search the workspace
+    People {
+        /// Search the workspace directory for these words (name, handle, title)
+        filter: Vec<String>,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the recent messages of a channel or a person
+    Show {
+        /// `#channel`, `@person` or a conversation id
+        target: String,
+        /// How many messages, the newest ones
+        #[arg(short = 'n', long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=1000))]
+        limit: u16,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+        /// Disable colors
+        #[arg(long)]
+        no_color: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -128,6 +159,14 @@ fn main() -> ExitCode {
             json,
             no_color,
         }) => commands::thread(&thread, json, no_color),
+        Some(Command::Channels { filter, json }) => commands::channels(&filter.join(" "), json),
+        Some(Command::People { filter, json }) => commands::people(&filter.join(" "), json),
+        Some(Command::Show {
+            target,
+            limit,
+            json,
+            no_color,
+        }) => commands::show(&target, usize::from(limit), json, no_color),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

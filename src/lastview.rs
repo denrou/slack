@@ -90,6 +90,44 @@ pub fn forget(team_id: &str, ids: &[String]) -> Result<()> {
     save(&store)
 }
 
+/// Record one conversation shown on its own (`slack show`): its newest
+/// message, so `slack read <name>` can mark it, and the threads that
+/// output numbered, which replace the view's numbering: a number always
+/// refers to the last output that printed one.
+pub fn remember_conversation(
+    team_id: &str,
+    channel: &str,
+    latest: Option<&str>,
+    threads: Vec<ThreadRef>,
+) -> Result<()> {
+    let mut store = load().unwrap_or_default();
+    let record = store.entry(team_id.to_string()).or_default();
+    if let Some(latest) = latest {
+        // A DM the view listed keeps its place in a bare `slack read`.
+        let attention = record
+            .conversations
+            .get(channel)
+            .is_some_and(|shown| shown.attention);
+        record.conversations.insert(
+            channel.to_string(),
+            Shown {
+                latest: latest.to_string(),
+                attention,
+            },
+        );
+    }
+    record.threads = number(threads);
+    save(&store)
+}
+
+fn number(threads: Vec<ThreadRef>) -> BTreeMap<usize, ThreadRef> {
+    threads
+        .into_iter()
+        .enumerate()
+        .map(|(index, thread)| (index + 1, thread))
+        .collect()
+}
+
 /// Replace the workspace's record with what this view showed.
 pub fn remember(team_id: &str, view: &View) -> Result<()> {
     let mut store = load().unwrap_or_default();
@@ -103,17 +141,11 @@ pub fn remember(team_id: &str, view: &View) -> Result<()> {
             (id.to_string(), shown)
         })
         .collect();
-    let threads = view
-        .thread_refs()
-        .into_iter()
-        .enumerate()
-        .map(|(index, thread)| (index + 1, thread))
-        .collect();
     store.insert(
         team_id.to_string(),
         Record {
             conversations,
-            threads,
+            threads: number(view.thread_refs()),
         },
     );
     save(&store)

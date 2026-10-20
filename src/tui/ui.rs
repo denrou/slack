@@ -7,11 +7,11 @@ use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Focus, Mode, Row, State, row_of, rows};
+use super::model::{Focus, Mode, Picker, Row, Section, State, row_of, rows};
 use crate::names::Names;
 use crate::{mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  l messages  Enter reply  r read  R read all  o open  g refresh  a channels  ? keys  q quit";
+const LIST_HINTS: &str = "j/k move  l messages  Enter reply  c open any  r read  R read all  o in Slack  g refresh  a more  ? keys  q quit";
 const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  h back  q quit";
 const THREAD_HINTS: &str = "j/k move  Enter reply in the thread  h back  q quit";
 
@@ -20,6 +20,7 @@ const HELP: &[&str] = &[
     "l, Right, Tab  focus the messages; Enter there opens the thread",
     "h, Left, Esc   back: close the thread, leave the messages, quit",
     "Enter, s       reply: to the conversation, or in the open thread",
+    "c              open any channel, group or person: type to filter, Enter opens",
     "J, K, PgDn/Up  scroll the messages",
     "r              mark the selected one as read",
     "R              mark everything listed as read (asks first)",
@@ -33,13 +34,16 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) {
     let bottom_height = match state.mode {
         Mode::Compose { .. } => 3,
         Mode::Help => HELP.len() as u16 + 2,
-        Mode::Browse | Mode::ConfirmReadAll => 1,
+        Mode::Browse | Mode::ConfirmReadAll | Mode::Pick(_) => 1,
     };
     let [main, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_height)])
         .areas(frame.area());
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(main);
-    draw_list(frame, left, state);
+    match &state.mode {
+        Mode::Pick(picker) => draw_picker(frame, left, picker),
+        _ => draw_list(frame, left, state),
+    }
     draw_messages(frame, right, state, names, now);
     draw_bottom(frame, bottom, state);
 }
@@ -75,8 +79,33 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+/// The picker takes the list's place: the query in the title, the
+/// matching choices below, the selected one highlighted.
+fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
+    let matches = picker.matches();
+    let lines: Vec<ListItem> = matches
+        .iter()
+        .map(|&index| {
+            let choice = &picker.choices[index];
+            ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(choice.label.as_str()),
+                Span::raw("  "),
+                Span::styled(choice.note.as_str(), Style::new().dim()),
+            ]))
+        })
+        .collect();
+    let title = format!(" open › {}▏ ", picker.query);
+    let list = List::new(lines)
+        .block(Block::bordered().title(title))
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    let selected = (!matches.is_empty()).then(|| picker.selected.min(matches.len() - 1));
+    let mut list_state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
 fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, now: &Zoned) {
-    let (title, has_more, in_thread) = match (&state.thread, state.selected_item()) {
+    let (title, has_more, in_thread, unread_from) = match (&state.thread, state.selected_item()) {
         (Some(thread), _) => {
             let replies = thread.messages.len().saturating_sub(1);
             let count = match replies {
@@ -87,12 +116,14 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
                 format!(" Thread · {} · {count} ", thread.title),
                 thread.has_more,
                 true,
+                None,
             )
         }
         (None, Some(item)) => (
             format!(" {} · {} ", item.title, item.detail),
             item.has_more,
             false,
+            item.unread_from.as_deref(),
         ),
         (None, None) => {
             let text = if state.items.is_empty() {
@@ -104,6 +135,9 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
             return;
         }
     };
+    let opened = state
+        .selected_item()
+        .is_some_and(|item| item.section == Section::Opened);
     let messages = state.pane_messages();
     let user = |id: &str| names.user_name(id);
     let channel = |id: &str| names.channel_name(id);
@@ -116,8 +150,16 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
     let indent = " ".repeat(width + 2);
 
     let mut lines: Vec<Line> = Vec::new();
+    if has_more && !in_thread && opened {
+        lines.push(Line::from("earlier messages not shown").dim());
+    }
     let mut starts = Vec::with_capacity(messages.len());
+    let mut separated = false;
     for (index, (message, time)) in messages.iter().zip(times).enumerate() {
+        if !separated && !in_thread && view::is_new(message, unread_from) {
+            separated = true;
+            lines.push(Line::from(format!("{indent}── new ──")).dim());
+        }
         starts.push(lines.len());
         let mentions_me = state.me.as_deref().is_some_and(|me| message.mentions(me));
         let time_style = if mentions_me {
@@ -171,7 +213,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
             ]));
         }
     }
-    if has_more {
+    if has_more && (in_thread || !opened) {
         let note = if in_thread {
             "more replies not shown"
         } else {
@@ -233,6 +275,14 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State) {
                 Paragraph::new(lines).block(Block::bordered().title(" keys · any key closes ")),
                 area,
             );
+        }
+        Mode::Pick(picker) => {
+            let text = format!(
+                "{} of {}  type to filter  ↑/↓ move  Enter open  Esc cancel",
+                picker.matches().len(),
+                picker.choices.len()
+            );
+            frame.render_widget(Paragraph::new(text).dim(), area);
         }
         Mode::Browse => {
             let hints = match (state.focus, &state.thread) {

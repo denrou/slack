@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack read` marks as read. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` shows what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack read` marks as read, `slack show` reads any conversation. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -30,6 +30,13 @@ slack --json    # the same data, for scripts
 slack ui        # the same, interactive: move through it, reply, mark read
 slack thread 2  # the thread numbered 2 in the last output, or a permalink
 
+slack channels                  # the channels and group messages you are in
+slack channels dev              # ...whose name contains "dev"
+slack people                    # the people you have a direct message with
+slack people jane               # ...or anyone in the workspace matching "jane"
+slack show '#dev-team'          # the last 20 messages of a channel, read or not
+slack show @jane -n 50          # ...or of a direct message, 50 of them
+
 slack send '#sre-alerts' "on it"                    # post to a channel
 slack send @jane "merci !"                          # ...or a DM
 slack send <permalink> "answering here"             # ...or a thread
@@ -45,9 +52,15 @@ slack read --all                                    # ...also the channels the l
 
 Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read the DMs and mentions the last view showed (no more: a message that arrived since stays unread). The channels a `slack -a` listed are a wider net, so they take `slack read --all` or their name. Names are cached in `~/.cache/slack/names.json`, safe to delete.
 
+## Any conversation
+
+The view stops at what is unread. `slack show '#dev-team'` prints the last 20 messages of a conversation whether you read them or not (`-n 50` for more), with a `── new ──` line where the unread part starts and the threads numbered as in the view, so `slack thread 1` and `slack send 1 "…"` work from that output too. The target is a `#channel`, an `@person` or a conversation id.
+
+To find the name, `slack channels` lists the channels and group messages you are in, with `private`, `muted` and `unread` where they apply, and `slack people` lists the people you have a direct message with. Both take words to match: `slack channels sre`, `slack people jane doe`. For people, a filter searches the whole workspace directory (handle, name, title), not only your direct messages. `--json` on any of the three gives the data.
+
 ## The interactive view
 
-`slack ui` puts the same view in a two-pane screen: the list of what needs you on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `slack ui -a` includes the channels without a mention.
+`slack ui` puts the same view in a two-pane screen: the list of what needs you on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `slack ui -a` includes the channels without a mention. `c` opens a picker over every channel, group message and person in the workspace: type to narrow it, Enter loads the last 50 messages of the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies.
 
 | Key                | Action                                             |
 | ------------------ | -------------------------------------------------- |
@@ -55,6 +68,7 @@ Reading in the terminal never moves Slack's read cursor: the view is read-only, 
 | `l`, Right, Tab    | Focus the messages; `Enter` there opens the thread |
 | `h`, Left, `Esc`   | Back: close the thread, leave the messages, quit   |
 | `Enter`, `s`       | Reply to the conversation, or in the open thread   |
+| `c`                | Open any channel, group or person (type to filter) |
 | `J`/`K`, PgDn/PgUp | Scroll the messages                                |
 | `r`                | Mark it as read                                    |
 | `R`                | Mark everything listed as read (asks first)        |
