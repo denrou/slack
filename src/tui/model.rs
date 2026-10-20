@@ -316,7 +316,7 @@ impl Picker {
 
     fn step(&mut self, step: isize) {
         let last = self.matches().len().saturating_sub(1) as isize;
-        self.selected = (self.selected as isize + step).clamp(0, last) as usize;
+        self.selected = (self.selected as isize).saturating_add(step).clamp(0, last) as usize;
     }
 
     /// Space: mark the highlighted person for a group message, or unmark
@@ -388,7 +388,12 @@ pub enum Action {
         text: String,
         thread_ts: Option<String>,
     },
-    Open(usize),
+    /// Open the conversation in Slack, at the highlighted message when
+    /// the pane has the focus.
+    Open {
+        item: usize,
+        message: Option<usize>,
+    },
     /// Open the thread of a message of the selected item.
     OpenThread {
         item: usize,
@@ -415,17 +420,33 @@ pub enum Action {
     CopyLink(String),
 }
 
+/// The messages pane as drawn, for the keys that move by screens: only
+/// the drawing knows how the text wraps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Viewport {
+    /// Where the pane starts on its own in list focus, in rows: the new
+    /// part of a history.
+    pub anchor: u16,
+    /// Rows inside the border.
+    pub height: u16,
+    /// Rows of the whole text, wrapped.
+    pub rows: usize,
+    /// Messages whose first row is on the screen.
+    pub in_view: usize,
+}
+
 pub struct State {
     pub items: Vec<Item>,
     /// Index into `items`; headers are never selected.
     pub selected: Option<usize>,
-    /// Lines scrolled in the messages pane (list focus only), from
-    /// `anchor`: negative shows what is above it.
+    /// Rows scrolled in the messages pane (list focus only), from the
+    /// viewport's anchor: negative shows what is above it.
     pub scroll: i32,
-    /// Where the pane starts on its own in list focus, in lines: the new
-    /// part of a history. Only the drawing knows the line count, so it
-    /// reports it here after each draw.
-    pub anchor: u16,
+    /// What only the drawing knows about the pane, reported after each
+    /// draw.
+    pub viewport: Viewport,
+    /// A `g` was pressed, waiting for the second one.
+    pub pending_g: bool,
     pub mode: Mode,
     /// Shown in the bottom line until the next key.
     pub status: Option<String>,
@@ -435,8 +456,6 @@ pub struct State {
     pub cursor: usize,
     pub thread: Option<ThreadPane>,
 }
-
-const SCROLL_STEP: i32 = 10;
 
 impl State {
     pub fn new(items: Vec<Item>, me: Option<String>) -> State {
@@ -451,7 +470,8 @@ impl State {
             focus: Focus::List,
             cursor: 0,
             thread: None,
-            anchor: 0,
+            viewport: Viewport::default(),
+            pending_g: false,
         }
     }
 
@@ -591,51 +611,42 @@ impl State {
         Action::None
     }
 
+    /// `q` and Ctrl-C quit from anywhere; Esc and `h` step back; `gg`,
+    /// `G` and the Ctrl keys of vim move by screens.
     fn browse(&mut self, key: KeyEvent) -> Action {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let after_g = std::mem::take(&mut self.pending_g);
         match key.code {
             KeyCode::Char('q') => Action::Quit,
-            KeyCode::Esc => {
-                if self.thread.is_some() || self.focus == Focus::Messages {
-                    self.back();
-                    Action::None
-                } else {
-                    Action::Quit
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
+            KeyCode::Char('r') if control => Action::Refresh,
+            KeyCode::Char('d') if control => self.page(true, true),
+            KeyCode::Char('u') if control => self.page(false, true),
+            KeyCode::Char('f') if control => self.page(true, false),
+            KeyCode::Char('b') if control => self.page(false, false),
+            KeyCode::PageDown => self.page(true, false),
+            KeyCode::PageUp => self.page(false, false),
+            // Esc backs out of whatever is open, as everywhere else on
+            // the screen; at the list there is nothing to back out of.
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => {
                 self.back();
                 Action::None
             }
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => self.deeper(),
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.step(1);
+            KeyCode::Char('l') | KeyCode::Right => self.deeper(),
+            KeyCode::Char('j') | KeyCode::Down => self.step(1),
+            KeyCode::Char('k') | KeyCode::Up => self.step(-1),
+            KeyCode::Char('g') if after_g => self.step(isize::MIN),
+            KeyCode::Char('g') => {
+                self.pending_g = true;
                 Action::None
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.step(-1);
-                Action::None
-            }
-            // Once the pane has the focus it follows the highlighted message.
-            KeyCode::Char('J') | KeyCode::PageDown if self.focus == Focus::List => {
-                self.scroll = self.scroll.saturating_add(SCROLL_STEP);
-                Action::None
-            }
-            KeyCode::Char('K') | KeyCode::PageUp if self.focus == Focus::List => {
-                // Up to the top of the pane, which sits `anchor` lines
-                // above where it started.
-                self.scroll = self
-                    .scroll
-                    .saturating_sub(SCROLL_STEP)
-                    .max(-i32::from(self.anchor));
-                Action::None
-            }
+            KeyCode::Home => self.step(isize::MIN),
+            KeyCode::Char('G') | KeyCode::End => self.step(isize::MAX),
             KeyCode::Char('x') => {
                 self.close_opened();
                 Action::None
             }
             KeyCode::Char('u') => self.link(false),
             KeyCode::Char('y') => self.link(true),
-            KeyCode::Char('g') => Action::Refresh,
             KeyCode::Char('c') => Action::OpenPicker { compose: false },
             KeyCode::Char('n') => Action::OpenPicker { compose: true },
             KeyCode::Char('?') => {
@@ -647,7 +658,10 @@ impl State {
                 self.mode = Mode::ConfirmReadAll;
                 Action::None
             }
-            KeyCode::Char('o') => self.selected.map_or(Action::None, Action::Open),
+            KeyCode::Char('o') => self.selected.map_or(Action::None, |item| Action::Open {
+                item,
+                message: (self.focus == Focus::Messages).then_some(self.cursor),
+            }),
             KeyCode::Enter => self.enter(),
             KeyCode::Char('s') => {
                 self.compose_to_conversation();
@@ -750,13 +764,15 @@ impl State {
         }
     }
 
-    /// The picker: `j`/`k` move through the choices, Space marks a
-    /// person for a group message, Enter or `l` opens, Esc or `h` gives
-    /// up. `/` takes the keys to the filter, where typing narrows, until
-    /// Enter brings them back to the narrowed list (Esc drops the filter
-    /// instead). The arrows, Tab and Ctrl-n/p move in both.
+    /// The picker: `j`/`k`, `gg` and `G` move through the choices, Space
+    /// marks a person for a group message, Enter or `l` opens, Esc or
+    /// `h` gives up, `q` quits as everywhere. `/` takes the keys to the
+    /// filter, where typing narrows, until Enter brings them back to the
+    /// narrowed list (Esc drops the filter instead). The arrows, Tab and
+    /// Ctrl-n/p move in both.
     fn pick(&mut self, mut picker: Picker, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let after_g = std::mem::take(&mut self.pending_g);
         match key.code {
             KeyCode::Down | KeyCode::Tab => picker.step(1),
             KeyCode::Up | KeyCode::BackTab => picker.step(-1),
@@ -781,11 +797,15 @@ impl State {
                     return action;
                 }
             }
-            KeyCode::Esc | KeyCode::Char('q' | 'h') | KeyCode::Left => return Action::None,
+            KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => return Action::None,
+            KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('/') => picker.filtering = true,
             KeyCode::Char(' ') => picker.mark(),
             KeyCode::Char('j') => picker.step(1),
             KeyCode::Char('k') => picker.step(-1),
+            KeyCode::Char('g') if after_g => picker.step(isize::MIN),
+            KeyCode::Char('g') => self.pending_g = true,
+            KeyCode::Char('G') => picker.step(isize::MAX),
             _ => {}
         }
         self.mode = Mode::Pick(picker);
@@ -859,16 +879,51 @@ impl State {
         self.scroll = 0;
     }
 
-    fn step(&mut self, step: isize) {
+    /// Moves the selection, or the highlighted message once the pane
+    /// has the focus; `isize::MIN` and `isize::MAX` reach the ends.
+    fn step(&mut self, step: isize) -> Action {
         match self.focus {
             Focus::List => self.select(step),
             Focus::Messages => {
                 let len = self.pane_messages().len();
                 if len == 0 {
-                    return;
+                    return Action::None;
                 }
                 let last = len as isize - 1;
-                self.cursor = (self.cursor as isize + step).clamp(0, last) as usize;
+                self.cursor = (self.cursor as isize).saturating_add(step).clamp(0, last) as usize;
+            }
+        }
+        Action::None
+    }
+
+    /// Half a screen (Ctrl-D, Ctrl-U) or a whole one (Ctrl-F, Ctrl-B).
+    /// From the list the pane scrolls by rows, within its text; in the
+    /// pane the highlighted message moves by as many messages as the
+    /// screen shows, and the pane follows it.
+    fn page(&mut self, down: bool, half: bool) -> Action {
+        let Viewport {
+            anchor,
+            height,
+            rows,
+            in_view,
+        } = self.viewport;
+        match self.focus {
+            Focus::List => {
+                let step = i32::from(if half { height / 2 } else { height }).max(1);
+                let step = if down { step } else { -step };
+                // The pane started `anchor` rows down the text, and the
+                // last screen of the text starts `height` rows before its end.
+                let top = -i32::from(anchor);
+                let last = i32::try_from(rows.saturating_sub(usize::from(height)))
+                    .unwrap_or(i32::MAX)
+                    .saturating_add(top)
+                    .max(top);
+                self.scroll = self.scroll.saturating_add(step).clamp(top, last);
+                Action::None
+            }
+            Focus::Messages => {
+                let messages = if half { in_view / 2 } else { in_view }.max(1) as isize;
+                self.step(if down { messages } else { -messages })
             }
         }
     }
@@ -878,7 +933,7 @@ impl State {
             return;
         };
         let last = self.items.len().saturating_sub(1) as isize;
-        let next = (current as isize + step).clamp(0, last);
+        let next = (current as isize).saturating_add(step).clamp(0, last);
         if next as usize != current {
             self.selected = Some(next as usize);
             self.thread = None;
@@ -931,6 +986,10 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn control(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn state() -> State {
@@ -1090,7 +1149,12 @@ mod tests {
             "leaves the pane"
         );
         assert_eq!(state.focus, Focus::List);
-        assert_eq!(state.key(press(KeyCode::Esc)), Action::Quit);
+        assert_eq!(
+            state.key(press(KeyCode::Esc)),
+            Action::None,
+            "at the list there is nothing to back out of; q quits"
+        );
+        assert_eq!(state.focus, Focus::List);
     }
 
     #[test]
@@ -1125,6 +1189,29 @@ mod tests {
         assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
         state.key(press(KeyCode::Char('h')));
         assert_eq!(state.focus, Focus::List);
+        state.key(press(KeyCode::Tab));
+        assert_eq!(state.focus, Focus::List, "Tab is not a key of the screen");
+    }
+
+    #[test]
+    fn o_opens_slack_at_the_highlighted_message_from_the_pane() {
+        let mut state = state();
+        assert_eq!(
+            state.key(press(KeyCode::Char('o'))),
+            Action::Open {
+                item: 0,
+                message: None
+            }
+        );
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.key(press(KeyCode::Char('o'))),
+            Action::Open {
+                item: 0,
+                message: Some(1)
+            }
+        );
     }
 
     #[test]
@@ -1136,13 +1223,9 @@ mod tests {
         state.key(press(KeyCode::Char('R')));
         assert_eq!(state.key(press(KeyCode::Char('y'))), Action::MarkAllRead);
         assert_eq!(state.key(press(KeyCode::Char('r'))), Action::MarkRead(0));
-        assert_eq!(state.key(press(KeyCode::Char('o'))), Action::Open(0));
-        assert_eq!(state.key(press(KeyCode::Char('g'))), Action::Refresh);
+        assert_eq!(state.key(control('r')), Action::Refresh);
         assert_eq!(state.key(press(KeyCode::Char('q'))), Action::Quit);
-        assert_eq!(
-            state.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Action::Quit
-        );
+        assert_eq!(state.key(control('c')), Action::Quit);
     }
 
     #[test]
@@ -1220,7 +1303,7 @@ mod tests {
         );
         assert_eq!(state.mode, Mode::Browse);
 
-        state.mode = Mode::Pick(Picker::new(choices, false));
+        state.mode = Mode::Pick(Picker::new(choices.clone(), false));
         state.key(press(KeyCode::Char('/')));
         for c in "zzz".chars() {
             state.key(press(KeyCode::Char(c)));
@@ -1241,6 +1324,24 @@ mod tests {
         );
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
         assert_eq!(state.mode, Mode::Browse, "then closes the picker");
+
+        state.mode = Mode::Pick(Picker::new(choices, false));
+        state.key(press(KeyCode::Char('G')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.selected == 3),
+            "G: the last"
+        );
+        state.key(press(KeyCode::Char('g')));
+        state.key(press(KeyCode::Char('g')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.selected == 0),
+            "gg: the first"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Char('q'))),
+            Action::Quit,
+            "q quits from anywhere"
+        );
     }
 
     #[test]
@@ -1435,13 +1536,18 @@ mod tests {
         state.key(press(KeyCode::Char('l')));
         assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
         state.key(press(KeyCode::Char('h')));
-        // From the list the pane starts at the new part; K shows what is
-        // above it, down to the top of the pane and no further.
-        state.anchor = 15;
-        state.key(press(KeyCode::Char('K')));
-        state.key(press(KeyCode::Char('K')));
+        // From the list the pane starts at the new part; Ctrl-U shows
+        // what is above it, down to the top of the pane and no further.
+        state.viewport = Viewport {
+            anchor: 15,
+            height: 20,
+            rows: 60,
+            in_view: 5,
+        };
+        state.key(control('u'));
+        state.key(control('u'));
         assert_eq!(state.scroll, -15);
-        state.key(press(KeyCode::Char('J')));
+        state.key(control('d'));
         assert_eq!(state.scroll, -5);
     }
 
@@ -1517,21 +1623,61 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_with_j_and_k_is_for_the_list_focus_only() {
+    fn paging_scrolls_the_pane_from_the_list_and_moves_the_cursor_in_it() {
         let mut state = state();
-        state.anchor = 30;
-        state.key(press(KeyCode::Char('J')));
-        assert_eq!(state.scroll, SCROLL_STEP);
-        state.key(press(KeyCode::Char('l')));
-        state.key(press(KeyCode::Char('J')));
-        state.key(press(KeyCode::Char('K')));
-        state.key(press(KeyCode::Char('K')));
+        state.items[0].messages = (1..=12).map(|n| message(&format!("1.{n:06}"))).collect();
+        state.viewport = Viewport {
+            anchor: 30,
+            height: 20,
+            rows: 100,
+            in_view: 6,
+        };
+        state.key(control('d'));
+        assert_eq!(state.scroll, 10, "half a screen");
+        state.key(control('f'));
+        assert_eq!(state.scroll, 30, "a whole one");
+        state.key(press(KeyCode::PageDown));
+        state.key(press(KeyCode::PageDown));
         assert_eq!(
-            state.scroll, SCROLL_STEP,
-            "the pane follows the highlighted message"
+            state.scroll, 50,
+            "no further than the last screen of the text"
         );
-        state.key(press(KeyCode::Char('h')));
-        assert_eq!(state.scroll, SCROLL_STEP);
+        for _ in 0..9 {
+            state.key(control('b'));
+        }
+        assert_eq!(state.scroll, -30, "no higher than the top of the pane");
+        state.key(press(KeyCode::Char('G')));
+        assert_eq!(state.selected, Some(2), "G: the last item");
+        state.key(press(KeyCode::Char('g')));
+        state.key(press(KeyCode::Char('g')));
+        assert_eq!(state.selected, Some(0), "gg: the first");
+        state.key(press(KeyCode::Char('g')));
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.selected,
+            Some(1),
+            "a lone g is forgotten by the next key"
+        );
+
+        state.key(press(KeyCode::Char('k')));
+        state.key(press(KeyCode::Char('l')));
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 0));
+        state.key(control('d'));
+        assert_eq!(state.cursor, 3, "half of what the screen shows");
+        state.key(control('f'));
+        assert_eq!(state.cursor, 9, "all of it");
+        state.key(press(KeyCode::Char('G')));
+        assert_eq!(state.cursor, 11);
+        state.key(press(KeyCode::Char('g')));
+        state.key(press(KeyCode::Char('g')));
+        assert_eq!(state.cursor, 0);
+        state.key(press(KeyCode::End));
+        state.key(control('u'));
+        assert_eq!(state.cursor, 8);
+        assert_eq!(
+            state.scroll, 0,
+            "the pane follows the highlighted message instead"
+        );
     }
 
     #[test]

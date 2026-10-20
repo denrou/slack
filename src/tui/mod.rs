@@ -23,7 +23,9 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use serde_json::Value;
 
-use self::model::{Action, Choice, ChoiceKind, Item, Mode, Picker, Section, State, ThreadPane};
+use self::model::{
+    Action, Choice, ChoiceKind, Item, Mode, Picker, Section, State, ThreadPane, Viewport,
+};
 use crate::api::{self, Client};
 use crate::counts::Kind;
 use crate::history::Message;
@@ -135,9 +137,9 @@ impl App<'_> {
             self.state.status = Some(format!("Warning: {}", warnings.join("; ")));
         }
         let now = Zoned::now();
-        let mut anchor = 0;
-        terminal.draw(|frame| anchor = ui::draw(frame, &self.state, self.names, &now))?;
-        self.state.anchor = anchor;
+        let mut viewport = Viewport::default();
+        terminal.draw(|frame| viewport = ui::draw(frame, &self.state, self.names, &now))?;
+        self.state.viewport = viewport;
         Ok(())
     }
 
@@ -211,7 +213,7 @@ impl App<'_> {
                     }
                 }
             }
-            Action::Open(index) => match self.open(index) {
+            Action::Open { item, message } => match self.open(item, message) {
                 Ok(()) => {
                     self.state.status = Some("Opened in Slack".to_string());
                     Ok(())
@@ -578,19 +580,36 @@ impl App<'_> {
         Ok(())
     }
 
-    fn open(&self, index: usize) -> Result<()> {
-        let item = &self.state.items[index];
-        let url = match &item.thread_ts {
-            Some(thread_ts) => format!(
-                "{}/archives/{}/p{}",
-                self.workspace_url,
-                item.channel,
-                thread_ts.replace('.', "")
-            ),
-            None => format!("{}/archives/{}", self.workspace_url, item.channel),
+    /// The conversation in Slack: at the highlighted message when there
+    /// is one (a reply links into its thread), else at the thread a
+    /// thread item stands for, else at its end.
+    fn open(&self, item: usize, message: Option<usize>) -> Result<()> {
+        let item = &self.state.items[item];
+        let channel = &item.channel;
+        let base = format!("{}/archives/{channel}", self.workspace_url);
+        let url = match message.and_then(|index| self.state.pane_messages().get(index)) {
+            Some(message) => {
+                let mut url = permalink(&base, &message.ts);
+                if let Some(thread_ts) = message
+                    .thread_ts
+                    .as_deref()
+                    .filter(|thread_ts| *thread_ts != message.ts)
+                {
+                    url.push_str(&format!("?thread_ts={thread_ts}&cid={channel}"));
+                }
+                url
+            }
+            None => match &item.thread_ts {
+                Some(thread_ts) => permalink(&base, thread_ts),
+                None => base,
+            },
         };
         launch(&url)
     }
+}
+
+fn permalink(base: &str, ts: &str) -> String {
+    format!("{base}/p{}", ts.replace('.', ""))
 }
 
 /// Hand a URL to the system opener: the browser, or the mail client for

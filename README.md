@@ -66,24 +66,27 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 `slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over the channels and group messages you are in and every person in the workspace: `j`/`k` move, `/` filters (Enter returns to the narrowed list), Enter loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
 
-| Key                | Action                                                                        |
-| ------------------ | ----------------------------------------------------------------------------- |
-| `j`/`k`, arrows    | Move through the list, or through the messages                                |
-| `l`, Right, Tab    | Deeper: the messages, then the highlighted message's thread                   |
-| `h`, Left, `Esc`   | Back: close the thread, leave the messages; `Esc` from the list quits         |
-| `Enter`            | Reply: to the conversation, to the highlighted message, or in the open thread |
-| `s`                | A message to the conversation, wherever you are in it                         |
-| `n`                | New message: pick a channel or people, then write                             |
-| `c`                | Open a channel or group you are in, or a person (`/` filters, Space marks)    |
-| `x`                | Close an opened conversation                                                  |
-| `u`, `y`           | Open a link of the highlighted message, or copy it                            |
-| `J`/`K`, PgDn/PgUp | Scroll the messages, from the list                                            |
-| `r`                | Mark it as read                                                               |
-| `R`                | Mark everything listed as read (asks first)                                   |
-| `o`                | Open it in Slack                                                              |
-| `g`                | Refresh                                                                       |
-| `?`                | Keys                                                                          |
-| `q`                | Quit                                                                          |
+| Key              | Action                                                                        |
+| ---------------- | ----------------------------------------------------------------------------- |
+| `j`/`k`, arrows  | Move through the list, or through the messages                                |
+| `l`, Right       | Deeper: the messages, then the highlighted message's thread                   |
+| `h`, Left, `Esc` | Back: close the thread, leave the messages                                    |
+| `gg`, `G`        | The first, the last (Home, End too)                                           |
+| Ctrl-D, Ctrl-U   | Half a screen down, up; Ctrl-F, Ctrl-B, PgDn, PgUp a whole one                |
+| `Enter`          | Reply: to the conversation, to the highlighted message, or in the open thread |
+| `s`              | A message to the conversation, wherever you are in it                         |
+| `n`              | New message: pick a channel or people, then write                             |
+| `c`              | Open a channel or group you are in, or a person (`/` filters, Space marks)    |
+| `x`              | Close an opened conversation                                                  |
+| `u`, `y`         | Open a link of the highlighted message, or copy it                            |
+| `r`              | Mark it as read                                                               |
+| `R`              | Mark everything listed as read (asks first)                                   |
+| `o`              | Open it in Slack, at the highlighted message from the pane                    |
+| Ctrl-R           | Refresh                                                                       |
+| `?`              | Keys                                                                          |
+| `q`, Ctrl-C      | Quit                                                                          |
+
+The keys follow three rules: `q` and Ctrl-C quit from anywhere, `Esc` and `h` back out of whatever is open (the picker, a prompt, the reply box, a thread, the pane) and never quit, and moving is vim's, `gg`, `G`, Ctrl-D and friends included. From the list the Ctrl keys scroll the pane; in the pane they move the highlighted message by as many messages as the screen shows.
 
 A reply to a conversation marks it as read up to your message, as in the app, and it leaves the list; a reply inside a thread shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. A reply is typed on one line and Enter sends it; pasted text keeps its line breaks. `slack send` with stdin takes a long message.
 

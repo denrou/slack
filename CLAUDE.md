@@ -55,6 +55,8 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 
 `--workspace`, a `watch` mode, loading older history from the TUI.
 
+**Auto-refresh of the screen** is wanted (Denis, 2026-10-20) but not designed: think it through before building it. A refresh today is one `client.counts` call plus one history call per unread conversation, so a timer multiplies the API load by the number of conversations; `State::replace_items` sends the focus back to the list, which would throw you out of a thread or a reply box mid-typing; and the loop blocks on `event::read`, so it needs a `poll` with a timeout first. The cheap version is to poll `client.counts` alone and reload only when a cursor or a count moved, keeping focus, cursor, thread and the reply box as they are.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.

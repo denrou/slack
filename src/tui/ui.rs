@@ -7,39 +7,39 @@ use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Focus, Mode, Picker, Row, Section, State, row_of, rows};
+use super::model::{Focus, Mode, Picker, Row, Section, State, Viewport, row_of, rows};
 use crate::history::Message;
 use crate::names::Names;
 use crate::{mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  l messages  Enter reply  n new  c open any  r read  R read all  o in Slack  g refresh  ? keys  q quit";
-const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  n new  x close  c open any  r read  o in Slack  g refresh  ? keys  q quit";
-const MESSAGES_HINTS: &str =
-    "j/k move  Enter reply to it  l open the thread  u open link  y copy link  h back  q quit";
+const LIST_HINTS: &str = "j/k move  l messages  Enter reply  n new  c open any  r read  R read all  o in Slack  Ctrl-R refresh  ? keys  q quit";
+const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  n new  x close  c open any  r read  o in Slack  Ctrl-R refresh  ? keys  q quit";
+const MESSAGES_HINTS: &str = "j/k move  Enter reply to it  l open the thread  u open link  y copy link  o in Slack  h back  q quit";
 const THREAD_HINTS: &str =
-    "j/k move  Enter reply in the thread  u open link  y copy link  h back  q quit";
+    "j/k move  Enter reply in the thread  u open link  y copy link  o in Slack  h back  q quit";
 
 const HELP: &[&str] = &[
-    "j, k, arrows   move through the list, or through the messages",
-    "l, Right, Tab  deeper: the messages, then the highlighted message's thread",
-    "h, Left, Esc   back: close the thread, leave the messages; Esc from the list quits",
-    "Enter          reply: to the conversation, to the highlighted message, or in the open thread",
-    "s              a message to the conversation, wherever you are in it",
-    "n              new message: pick a channel or people (Space marks several), then write",
-    "c              open a channel or group you are in, or anyone: j/k move, / filters, Space marks",
-    "x              close an opened conversation",
-    "u, y           open, or copy, a link of the highlighted message",
-    "J, K, PgDn/Up  scroll the messages, from the list",
-    "r              mark the selected one as read",
-    "R              mark everything listed as read (asks first)",
-    "o              open it in Slack",
-    "g              refresh",
-    "q              quit",
+    "j, k, arrows    move through the list, or through the messages",
+    "l, Right        deeper: the messages, then the highlighted message's thread",
+    "h, Left, Esc    back: close the thread, leave the messages",
+    "gg, G           the first, the last (Home, End too)",
+    "Ctrl-D, Ctrl-U  half a screen down, up; Ctrl-F, Ctrl-B, PgDn, PgUp a whole one",
+    "Enter           reply: to the conversation, to the highlighted message, or in the open thread",
+    "s               a message to the conversation, wherever you are in it",
+    "n               new message: pick a channel or people (Space marks several), then write",
+    "c               open a channel or group you are in, or anyone: j/k move, / filters, Space marks",
+    "x               close an opened conversation",
+    "u, y            open, or copy, a link of the highlighted message",
+    "r               mark the selected one as read",
+    "R               mark everything listed as read (asks first)",
+    "o               open it in Slack, at the highlighted message from the pane",
+    "Ctrl-R          refresh",
+    "q, Ctrl-C       quit",
 ];
 
-/// Returns where the messages pane starts on its own in list focus, for
-/// `State::anchor`.
-pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> u16 {
+/// Returns what the keys that move by screens need to know about the
+/// messages pane, for `State::viewport`.
+pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Viewport {
     let bottom_height = match &state.mode {
         Mode::Compose { text, .. } => compose_rows(text, frame.area().width) + 2,
         Mode::Help => HELP.len() as u16 + 2,
@@ -54,9 +54,9 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> u16
         Mode::Pick(picker) => draw_picker(frame, left, picker),
         _ => draw_list(frame, left, state),
     }
-    let anchor = draw_messages(frame, right, state, names, now);
+    let viewport = draw_messages(frame, right, state, names, now);
     draw_bottom(frame, bottom, state, names);
-    anchor
+    viewport
 }
 
 fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
@@ -138,7 +138,13 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, now: &Zoned) -> u16 {
+fn draw_messages(
+    frame: &mut Frame,
+    area: Rect,
+    state: &State,
+    names: &Names,
+    now: &Zoned,
+) -> Viewport {
     let (title, has_more, in_thread, unread_from) = match (&state.thread, state.selected_item()) {
         (Some(thread), _) => {
             let replies = thread.messages.len().saturating_sub(1);
@@ -166,7 +172,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
                 ""
             };
             frame.render_widget(Paragraph::new(text).block(Block::bordered()), area);
-            return 0;
+            return Viewport::default();
         }
     };
     // A conversation's page is a history, read down from its oldest
@@ -269,20 +275,28 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
 
     // Scrolling counts rows of the screen, and a long message wraps over
     // several, so the row a line lands on is what the wrapper says, not
-    // the line's index.
-    let inner_height = area.height.saturating_sub(2) as usize;
+    // the line's index: `first_row[line]`, and `first_row[lines.len()]`
+    // is the end of the text.
+    let height = area.height.saturating_sub(2);
+    let inner_height = usize::from(height);
     let inner_width = area.width.saturating_sub(2);
-    let row_of = |line: usize| -> usize {
-        if inner_width == 0 {
-            return line;
-        }
-        Paragraph::new(lines[..line].to_vec())
-            .wrap(Wrap { trim: false })
-            .line_count(inner_width)
-    };
+    let mut first_row = Vec::with_capacity(lines.len() + 1);
+    let mut total = 0;
+    first_row.push(total);
+    for line in &lines {
+        total += if inner_width == 0 {
+            1
+        } else {
+            Paragraph::new(vec![line.clone()])
+                .wrap(Wrap { trim: false })
+                .line_count(inner_width)
+        };
+        first_row.push(total);
+    }
+    let row_of = |line: usize| first_row[line];
     // From the list, a history starts at its new part with a few rows of
     // what came before above it, or at its end when nothing is new, the
-    // way a chat scrolls; `K` shows the rest.
+    // way a chat scrolls; Ctrl-U shows the rest.
     let anchor = match separator {
         Some(at) => row_of(at).saturating_sub(inner_height / 4),
         None if history => row_of(lines.len()).saturating_sub(inner_height),
@@ -305,6 +319,11 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
         .then(|| starts.get(state.cursor).zip(ends.get(state.cursor)))
         .flatten()
         .map(|(&start, &end)| (row_of(start), row_of(end)));
+    let screen = usize::from(scroll)..usize::from(scroll) + inner_height;
+    let in_view = starts
+        .iter()
+        .filter(|&&start| screen.contains(&row_of(start)))
+        .count();
     let paragraph = Paragraph::new(lines)
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false })
@@ -329,7 +348,12 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &State, names: &Names, no
                 .set_style(block, Style::new().add_modifier(Modifier::REVERSED));
         }
     }
-    anchor
+    Viewport {
+        anchor,
+        height,
+        rows: total,
+        in_view,
+    }
 }
 
 /// The reply box grows with its text, as wrapped at the width of the
@@ -395,14 +419,17 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
             );
         }
         Mode::ConfirmReadAll => {
-            let text = format!("Mark all {} as read? (y/n)", state.items.len());
+            let text = format!(
+                "Mark all {} as read? y, or any other key to cancel",
+                state.items.len()
+            );
             frame.render_widget(Paragraph::new(text).yellow(), area);
         }
         Mode::Links { links, copy } => {
             let title = if *copy {
-                " Copy which link? · a digit picks, Esc cancels "
+                " Copy which link? · a digit picks, any other key cancels "
             } else {
-                " Open which link? · a digit picks, Esc cancels "
+                " Open which link? · a digit picks, any other key cancels "
             };
             let lines: Vec<Line> = links
                 .iter()
@@ -540,13 +567,13 @@ mod tests {
         (1..=50).map(|n| format!("message {n}")).collect()
     }
 
-    fn render(state: &State, width: u16, height: u16) -> (Buffer, u16) {
+    fn render(state: &State, width: u16, height: u16) -> (Buffer, Viewport) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
-        let mut anchor = 0;
+        let mut viewport = Viewport::default();
         terminal
-            .draw(|frame| anchor = draw(frame, state, &Names::default(), &Zoned::now()))
+            .draw(|frame| viewport = draw(frame, state, &Names::default(), &Zoned::now()))
             .expect("a draw");
-        (terminal.backend().buffer().clone(), anchor)
+        (terminal.backend().buffer().clone(), viewport)
     }
 
     fn row(buffer: &Buffer, y: u16) -> String {
@@ -580,11 +607,20 @@ mod tests {
     #[test]
     fn from_the_list_a_history_opens_a_little_above_its_new_line() {
         let mut state = history(&fifty(), Some(41));
-        let (buffer, anchor) = render(&state, 100, 30);
+        let (buffer, viewport) = render(&state, 100, 30);
         // 30 rows, one for the bottom line, two borders: 27 inside the pane.
         let separator = row_with(&buffer, "── new ──").expect("a separator");
         assert_eq!(separator, 1 + 27 / 4, "a quarter down the pane");
-        assert_eq!(anchor, 40 - 27 / 4, "the line of the separator, less that");
+        assert_eq!(
+            viewport.anchor,
+            40 - 27 / 4,
+            "the line of the separator, less that"
+        );
+        assert_eq!(
+            (viewport.height, viewport.rows, viewport.in_view),
+            (27, 51, 16),
+            "fifty messages and the new line; six read messages above it, ten new below"
+        );
         let above = separator - 1;
         let x = column_of(&buffer, above, "message 40").expect("the last read message above");
         assert!(
@@ -597,19 +633,23 @@ mod tests {
 
         state.scroll = -100;
         let (buffer, _) = render(&state, 100, 30);
-        assert!(row(&buffer, 1).contains("message 1 "), "K stops at the top");
+        assert!(
+            row(&buffer, 1).contains("message 1 "),
+            "Ctrl-U stops at the top"
+        );
     }
 
     #[test]
     fn a_read_history_ends_on_its_newest_message() {
         let state = history(&fifty(), None);
-        let (buffer, anchor) = render(&state, 100, 30);
+        let (buffer, viewport) = render(&state, 100, 30);
         assert!(row_with(&buffer, "── new ──").is_none());
         assert!(
             row(&buffer, 27).contains("message 50"),
             "the last row inside the pane"
         );
-        assert_eq!(anchor, 50 - 27);
+        assert_eq!(viewport.anchor, 50 - 27);
+        assert_eq!(viewport.in_view, 27);
     }
 
     #[test]
