@@ -1533,4 +1533,72 @@ mod tests {
         state.key(press(KeyCode::Char('h')));
         assert_eq!(state.scroll, SCROLL_STEP);
     }
+
+    #[test]
+    fn marks_survive_the_filter_and_beat_the_highlighted_choice() {
+        let mut state = state();
+        let mut choices = vec![
+            choice(ChoiceKind::Channel, "C5", "#dev-team", ""),
+            choice(ChoiceKind::Dm, "D9", "@Jane", "jdoe Jane Doe SRE"),
+            choice(ChoiceKind::Person, "U3", "@Bob", "bob Bob Devlin"),
+        ];
+        choices[1].user = Some("U9".to_string());
+        choices[2].user = Some("U3".to_string());
+        state.mode = Mode::Pick(Picker::new(choices, true));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char(' ')));
+        state.key(press(KeyCode::Char('/')));
+        for c in "bob".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char(' ')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.marked == [1, 2]),
+            "a mark is an index into the choices, not into the matches"
+        );
+        state.key(press(KeyCode::Char('/')));
+        state.key(press(KeyCode::Esc));
+        assert!(
+            matches!(
+                &state.mode,
+                Mode::Pick(p) if p.query.is_empty() && p.selected == 0 && p.marked == [1, 2]
+            ),
+            "Esc drops the filter and keeps the marks"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowGroup {
+                users: vec!["U9".to_string(), "U3".to_string()],
+                compose: true
+            },
+            "the highlighted channel yields to the marks"
+        );
+    }
+
+    #[test]
+    fn a_history_lands_on_its_first_new_message_else_its_newest() {
+        let mut it = item(Section::Channels, "C1", None);
+        it.messages = vec![
+            message("1.000100"),
+            message("1.000200"),
+            message("1.000300"),
+        ];
+        it.unread_from = Some("1.000150".to_string());
+        assert_eq!(it.landing(), 1);
+        it.unread_from = Some("1.000900".to_string());
+        assert_eq!(
+            it.landing(),
+            2,
+            "a cursor past everything lands on the newest"
+        );
+        it.unread_from = None;
+        assert_eq!(it.landing(), 0, "the unread part is read from its start");
+        it.section = Section::Opened;
+        assert_eq!(
+            it.landing(),
+            2,
+            "an opened conversation with no cursor, from its end"
+        );
+    }
 }

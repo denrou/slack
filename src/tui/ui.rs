@@ -488,3 +488,154 @@ fn describe(message: &Message, names: &Names) -> String {
     };
     format!("{author}: {}", view::excerpt(&text, 30))
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    use super::super::model::{Item, Section};
+    use super::*;
+
+    fn message(ts: &str, text: &str) -> Message {
+        Message {
+            ts: ts.to_string(),
+            user: None,
+            bot: None,
+            text: text.to_string(),
+            subtype: None,
+            thread_ts: None,
+            reply_count: 0,
+            files: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    fn ts(n: usize) -> String {
+        format!("1700000000.{n:06}")
+    }
+
+    /// One channel with `texts` as its messages, in order; the read cursor
+    /// sits before message number `first_new`, counted from 1.
+    fn history(texts: &[&str], first_new: Option<usize>) -> State {
+        let messages: Vec<Message> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| message(&ts(i + 1), text))
+            .collect();
+        let item = Item {
+            section: Section::Channels,
+            channel: "C1".to_string(),
+            thread_ts: None,
+            title: "#c1".to_string(),
+            detail: String::new(),
+            latest: messages.last().map(|m| m.ts.clone()),
+            messages,
+            has_more: false,
+            unread_from: first_new.map(|n| ts(n - 1)),
+        };
+        State::new(vec![item], None)
+    }
+
+    fn fifty() -> Vec<String> {
+        (1..=50).map(|n| format!("message {n}")).collect()
+    }
+
+    fn render(state: &State, width: u16, height: u16) -> (Buffer, u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
+        let mut anchor = 0;
+        terminal
+            .draw(|frame| anchor = draw(frame, state, &Names::default(), &Zoned::now()))
+            .expect("a draw");
+        (terminal.backend().buffer().clone(), anchor)
+    }
+
+    fn row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    fn row_with(buffer: &Buffer, needle: &str) -> Option<u16> {
+        (0..buffer.area.height).find(|&y| row(buffer, y).contains(needle))
+    }
+
+    fn column_of(buffer: &Buffer, y: u16, needle: &str) -> Option<u16> {
+        let symbols: Vec<&str> = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        (0..symbols.len())
+            .find(|&x| symbols[x..].concat().starts_with(needle))
+            .map(|x| x as u16)
+    }
+
+    fn has(buffer: &Buffer, x: u16, y: u16, modifier: Modifier) -> bool {
+        buffer[(x, y)].style().add_modifier.contains(modifier)
+    }
+
+    /// The pane reaches the right edge: its last inner column is one in.
+    fn reversed(buffer: &Buffer, y: u16) -> bool {
+        has(buffer, buffer.area.width - 2, y, Modifier::REVERSED)
+    }
+
+    #[test]
+    fn from_the_list_a_history_opens_a_little_above_its_new_line() {
+        let texts = fifty();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut state = history(&texts, Some(41));
+        let (buffer, anchor) = render(&state, 100, 30);
+        // 30 rows, one for the bottom line, two borders: 27 inside the pane.
+        let separator = row_with(&buffer, "── new ──").expect("a separator");
+        assert_eq!(separator, 1 + 27 / 4, "a quarter down the pane");
+        assert_eq!(anchor, 40 - 27 / 4, "the line of the separator, less that");
+        let above = separator - 1;
+        let x = column_of(&buffer, above, "message 40").expect("the last read message above");
+        assert!(
+            has(&buffer, x, above, Modifier::DIM),
+            "the read part steps back"
+        );
+        let below = separator + 1;
+        let x = column_of(&buffer, below, "message 41").expect("the first new message below");
+        assert!(!has(&buffer, x, below, Modifier::DIM));
+
+        state.scroll = -100;
+        let (buffer, _) = render(&state, 100, 30);
+        assert!(row(&buffer, 1).contains("message 1 "), "K stops at the top");
+    }
+
+    #[test]
+    fn a_read_history_ends_on_its_newest_message() {
+        let texts = fifty();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let state = history(&texts, None);
+        let (buffer, anchor) = render(&state, 100, 30);
+        assert!(row_with(&buffer, "── new ──").is_none());
+        assert!(
+            row(&buffer, 27).contains("message 50"),
+            "the last row inside the pane"
+        );
+        assert_eq!(anchor, 50 - 27);
+    }
+
+    #[test]
+    fn the_highlight_covers_the_whole_message_and_stops_at_the_new_line() {
+        let long = "xy ".repeat(70);
+        let mut state = history(&["one", "two", &long, "four", "five"], Some(4));
+        state.focus = Focus::Messages;
+        state.cursor = 2;
+        let (buffer, _) = render(&state, 100, 30);
+        let first = row_with(&buffer, "xy xy").expect("the long message");
+        let separator = row_with(&buffer, "── new ──").expect("a separator");
+        assert!(separator > first + 1, "the message wraps over several rows");
+        for y in first..separator {
+            assert!(
+                reversed(&buffer, y),
+                "row {y} of the message is highlighted"
+            );
+        }
+        assert!(!reversed(&buffer, first - 1));
+        assert!(!reversed(&buffer, separator));
+        assert!(!reversed(&buffer, separator + 1));
+    }
+}
