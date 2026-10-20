@@ -5,9 +5,9 @@
 use anyhow::{Result, anyhow, bail};
 
 use crate::api::Client;
-use crate::lastview;
+use crate::history::compare_ts;
 use crate::names::Names;
-use crate::target;
+use crate::{counts, lastview, target};
 
 pub fn run(
     client: &Client,
@@ -50,13 +50,29 @@ pub fn run(
     };
 
     names.resolve_channels(client, selected.iter().map(|(channel, _)| channel.clone()))?;
+    // A cursor only moves forward: when Slack already reads further (the
+    // app, or `slack ui`), marking at an older message would make the newer
+    // ones unread again.
+    let current = counts::fetch(client)?;
+    let cursors: std::collections::BTreeMap<&str, &str> = current
+        .conversations
+        .iter()
+        .filter_map(|c| Some((c.id.as_str(), c.last_read.as_deref()?)))
+        .collect();
     let mut marked = Vec::new();
     for (channel, latest) in &selected {
-        client.call(
-            "conversations.mark",
-            &[("channel", channel), ("ts", latest)],
-        )?;
-        println!("Marked {} as read", names.channel_label(channel));
+        let already_read = cursors
+            .get(channel.as_str())
+            .is_some_and(|cursor| compare_ts(cursor, latest).is_ge());
+        if already_read {
+            println!("{} was already read", names.channel_label(channel));
+        } else {
+            client.call(
+                "conversations.mark",
+                &[("channel", channel), ("ts", latest)],
+            )?;
+            println!("Marked {} as read", names.channel_label(channel));
+        }
         marked.push(channel.clone());
     }
     lastview::forget(team_id, &marked)?;
