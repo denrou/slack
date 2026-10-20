@@ -1,6 +1,6 @@
 # Builds the binaries and publishes a GitHub Release when a v* tag is pushed.
-# Install is the archive or `cargo install --git` (see README); there is no
-# Homebrew tap yet.
+# Install is the Homebrew tap (denrou/homebrew-slack, told about the release
+# by the last job), the archive or `cargo install --git` (see README).
 
 name: Release
 
@@ -96,3 +96,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    # A personal token, as the workflow token cannot reach another repository.
+    # Without the secret the step is skipped: run the command by hand then.
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+    steps:
+      - name: Ask the tap to rewrite its formula
+        if: env.GH_TOKEN != ''
+        run: gh workflow run update-formula.yml --repo denrou/homebrew-slack

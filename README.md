@@ -6,7 +6,13 @@ Early days, but every command below works.
 
 ## Install
 
-Apple Silicon or Linux x86_64: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`.
+With [Homebrew](https://brew.sh/), on macOS (Apple Silicon) or Linux (x86_64):
+
+```bash
+brew install denrou/slack/slack
+```
+
+Without it: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`.
 
 From source, with Rust 1.85+:
 

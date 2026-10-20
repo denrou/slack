@@ -26,7 +26,7 @@ Denis's personal project (`github.com/denrou/slack`), outside the Centreon organ
 
   Do not route around the denial by pushing a branch and opening a pull request.
 
-- **Releases are on request and bundle several changes** (since 2026-10-20). Land each change as its own commit on `main`; never bump the version or create a tag on your own. Denis tries the tip of `main` first (`cargo install --path .` puts it in `~/.cargo/bin`) and asks for a release once he is happy with the batch. A release is then: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
+- **Releases are on request and bundle several changes** (since 2026-10-20). Land each change as its own commit on `main`; never bump the version or create a tag on your own. Denis tries the tip of `main` first (`cargo install --path .` puts it in `~/.cargo/bin`) and asks for a release once he is happy with the batch. A release is then: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
 - **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, `unreads`) can be run from here to check the output. **Never run `send`, `read` or anything in `slack ui` that writes from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
 ## Security rules
@@ -53,7 +53,7 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 
 ## Not planned yet
 
-`--workspace`, Linux browser paths, a `watch` mode, loading older history from the TUI, a Homebrew tap once the tool has settled.
+`--workspace`, Linux browser paths, a `watch` mode, loading older history from the TUI.
 
 ## Reference implementation
 
