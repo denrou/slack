@@ -60,20 +60,20 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 `slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. `c` opens a picker over every channel, group message and person in the workspace: type to narrow it, Enter loads the last 50 messages of the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies.
 
-| Key                | Action                                             |
-| ------------------ | -------------------------------------------------- |
-| `j`/`k`, arrows    | Move through the list, or through the messages     |
-| `l`, Right, Tab    | Focus the messages; `Enter` there opens the thread |
-| `h`, Left, `Esc`   | Back: close the thread, leave the messages, quit   |
-| `Enter`, `s`       | Reply to the conversation, or in the open thread   |
-| `c`                | Open any channel, group or person (type to filter) |
-| `J`/`K`, PgDn/PgUp | Scroll the messages                                |
-| `r`                | Mark it as read                                    |
-| `R`                | Mark everything listed as read (asks first)        |
-| `o`                | Open it in Slack                                   |
-| `g`                | Refresh                                            |
-| `?`                | Keys                                               |
-| `q`                | Quit                                               |
+| Key                | Action                                              |
+| ------------------ | --------------------------------------------------- |
+| `j`/`k`, arrows    | Move through the list, or through the messages      |
+| `l`, Right, Tab    | Deeper: the messages, then the thread (`Enter` too) |
+| `h`, Left, `Esc`   | Back: close the thread, leave the messages, quit    |
+| `Enter`, `s`       | Reply to the conversation, or in the open thread    |
+| `c`                | Open any channel, group or person (type to filter)  |
+| `J`/`K`, PgDn/PgUp | Scroll the messages                                 |
+| `r`                | Mark it as read                                     |
+| `R`                | Mark everything listed as read (asks first)         |
+| `o`                | Open it in Slack                                    |
+| `g`                | Refresh                                             |
+| `?`                | Keys                                                |
+| `q`                | Quit                                                |
 
 A reply from the list marks the conversation as read up to your message, as in the app; a reply inside a thread leaves the list as it is and shows the thread again with your message. Replies are one line; use `slack send` with stdin for a longer message.
 

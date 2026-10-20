@@ -12,12 +12,12 @@ use crate::names::Names;
 use crate::{mrkdwn, view};
 
 const LIST_HINTS: &str = "j/k move  l messages  Enter reply  c open any  r read  R read all  o in Slack  g refresh  ? keys  q quit";
-const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  h back  q quit";
+const MESSAGES_HINTS: &str = "j/k move  l open the thread  h back  q quit";
 const THREAD_HINTS: &str = "j/k move  Enter reply in the thread  h back  q quit";
 
 const HELP: &[&str] = &[
     "j, k, arrows   move through the list, or through the messages",
-    "l, Right, Tab  focus the messages; Enter there opens the thread",
+    "l, Right, Tab  deeper: the messages, then the thread (Enter opens it too)",
     "h, Left, Esc   back: close the thread, leave the messages, quit",
     "Enter, s       reply: to the conversation, or in the open thread",
     "c              open any channel, group or person: type to filter, Enter opens",

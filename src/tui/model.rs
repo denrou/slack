@@ -473,12 +473,7 @@ impl State {
                 self.back();
                 Action::None
             }
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
-                if !self.pane_messages().is_empty() {
-                    self.focus = Focus::Messages;
-                }
-                Action::None
-            }
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => self.deeper(),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.step(1);
                 Action::None
@@ -534,10 +529,28 @@ impl State {
                 };
                 Action::None
             }
-            (Focus::Messages, None) => Action::OpenThread {
-                item,
-                message: self.cursor,
-            },
+            (Focus::Messages, None) => self.deeper(),
+        }
+    }
+
+    /// One level deeper, the way `l` moves in vim: the messages pane from
+    /// the list, then the highlighted message's thread.
+    fn deeper(&mut self) -> Action {
+        match (self.focus, &self.thread) {
+            (Focus::List, _) => {
+                if !self.pane_messages().is_empty() {
+                    self.focus = Focus::Messages;
+                }
+                Action::None
+            }
+            (Focus::Messages, None) => {
+                self.selected
+                    .map_or(Action::None, |item| Action::OpenThread {
+                        item,
+                        message: self.cursor,
+                    })
+            }
+            (Focus::Messages, Some(_)) => Action::None,
         }
     }
 
@@ -835,6 +848,40 @@ mod tests {
         );
         assert_eq!(state.focus, Focus::List);
         assert_eq!(state.key(press(KeyCode::Esc)), Action::Quit);
+    }
+
+    #[test]
+    fn l_goes_one_level_deeper_and_h_comes_back() {
+        let mut state = state();
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.key(press(KeyCode::Char('l'))),
+            Action::OpenThread {
+                item: 0,
+                message: 1
+            },
+            "l on a message opens its thread, like Enter"
+        );
+        state.open_thread(ThreadPane {
+            channel: "D1".into(),
+            thread_ts: "1.000200".into(),
+            title: "@jane › no rush".into(),
+            messages: vec![message("1.000200"), message("1.000300")],
+            has_more: false,
+            from_message: 1,
+        });
+        assert_eq!(
+            state.key(press(KeyCode::Right)),
+            Action::None,
+            "nothing deeper than a thread"
+        );
+        assert!(state.thread.is_some());
+        state.key(press(KeyCode::Char('h')));
+        assert!(state.thread.is_none(), "h closes the thread");
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+        state.key(press(KeyCode::Char('h')));
+        assert_eq!(state.focus, Focus::List);
     }
 
     #[test]
