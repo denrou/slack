@@ -379,18 +379,16 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 last.push_span(Span::styled("▏", Style::new().dim()));
             }
             // The last rows stay in view once the text outgrows the box.
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
             let inner = area.inner(Margin::new(1, 1));
             let rows = if inner.width == 0 {
                 0
             } else {
-                Paragraph::new(lines.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(inner.width)
+                paragraph.line_count(inner.width)
             };
             let scroll = rows.saturating_sub(usize::from(inner.height));
             frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
+                paragraph
                     .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
                     .block(Block::bordered().title(title)),
                 area,
@@ -518,11 +516,11 @@ mod tests {
 
     /// One channel with `texts` as its messages, in order; the read cursor
     /// sits before message number `first_new`, counted from 1.
-    fn history(texts: &[&str], first_new: Option<usize>) -> State {
+    fn history(texts: &[impl AsRef<str>], first_new: Option<usize>) -> State {
         let messages: Vec<Message> = texts
             .iter()
             .enumerate()
-            .map(|(i, text)| message(&ts(i + 1), text))
+            .map(|(i, text)| message(&ts(i + 1), text.as_ref()))
             .collect();
         let item = Item {
             section: Section::Channels,
@@ -581,9 +579,7 @@ mod tests {
 
     #[test]
     fn from_the_list_a_history_opens_a_little_above_its_new_line() {
-        let texts = fifty();
-        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let mut state = history(&texts, Some(41));
+        let mut state = history(&fifty(), Some(41));
         let (buffer, anchor) = render(&state, 100, 30);
         // 30 rows, one for the bottom line, two borders: 27 inside the pane.
         let separator = row_with(&buffer, "── new ──").expect("a separator");
@@ -606,9 +602,7 @@ mod tests {
 
     #[test]
     fn a_read_history_ends_on_its_newest_message() {
-        let texts = fifty();
-        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let state = history(&texts, None);
+        let state = history(&fifty(), None);
         let (buffer, anchor) = render(&state, 100, 30);
         assert!(row_with(&buffer, "── new ──").is_none());
         assert!(
@@ -621,7 +615,7 @@ mod tests {
     #[test]
     fn the_highlight_covers_the_whole_message_and_stops_at_the_new_line() {
         let long = "xy ".repeat(70);
-        let mut state = history(&["one", "two", &long, "four", "five"], Some(4));
+        let mut state = history(&["one", "two", long.as_str(), "four", "five"], Some(4));
         state.focus = Focus::Messages;
         state.cursor = 2;
         let (buffer, _) = render(&state, 100, 30);

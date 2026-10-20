@@ -4,6 +4,8 @@
 //! shape is read defensively: a shape change must surface as an error,
 //! never as "all caught up".
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -130,7 +132,7 @@ impl Counts {
 
 /// The read cursor of every conversation, from `client.counts` alone, for
 /// a mark that must only ever move forward.
-pub fn cursors(client: &Client) -> Result<std::collections::BTreeMap<String, String>, api::Error> {
+pub fn cursors(client: &Client) -> Result<BTreeMap<String, String>, api::Error> {
     let counts = Counts::parse(&client.call(METHOD, &[])?)?;
     Ok(counts
         .conversations
