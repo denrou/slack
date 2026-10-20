@@ -2,7 +2,7 @@
 name = "slack"
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Read and answer Slack from the terminal: what needs you, a count for the status bar, send, mark read"
 license = "MIT"
 repository = "https://github.com/denrou/slack"

@@ -93,6 +93,12 @@ fn is_url(target: &str) -> bool {
     target.contains("://") || target.starts_with("mailto:") || target.starts_with("tel:")
 }
 
+fn is_openable(target: &str) -> bool {
+    ["https://", "http://", "mailto:", "tel:"]
+        .iter()
+        .any(|scheme| target.starts_with(scheme))
+}
+
 /// A mail or phone link reads better without its scheme.
 fn shown_url(target: &str) -> &str {
     target
@@ -110,8 +116,9 @@ pub struct Link {
 }
 
 /// The links of a message, in order, each URL once: Slack writes one as
-/// `<url|label>` or `<url>`. Mail and phone links count, since the
-/// system opener takes them too.
+/// `<url|label>` or `<url>`. Web, mail and phone links only: the system
+/// opener takes those, and would hand any other scheme to whatever
+/// claims it.
 pub fn links(text: &str) -> Vec<Link> {
     let mut links: Vec<Link> = Vec::new();
     let mut rest = text;
@@ -126,11 +133,15 @@ pub fn links(text: &str) -> Vec<Link> {
             Some((target, label)) => (target, Some(label)),
             None => (token, None),
         };
-        if !is_url(target) || links.iter().any(|link| link.url == target) {
+        if !is_openable(target) {
+            continue;
+        }
+        let url = decode_entities(target);
+        if links.iter().any(|link| link.url == url) {
             continue;
         }
         links.push(Link {
-            url: decode_entities(target),
+            url,
             label: label
                 .filter(|label| !label.is_empty() && !repeats_url(label, shown_url(target)))
                 .map(decode_entities),
@@ -217,16 +228,16 @@ fn style_pair(text: &str, marker: char, paint: impl Fn(&str) -> String) -> Strin
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == marker && opens_at(&chars, i) {
-            if let Some(close) =
+        if chars[i] == marker
+            && opens_at(&chars, i)
+            && let Some(close) =
                 (i + 2..chars.len()).find(|&j| chars[j] == marker && closes_at(&chars, j))
-            {
-                let inner: String = chars[i + 1..close].iter().collect();
-                if !inner.contains('\n') {
-                    out.push_str(&paint(&inner));
-                    i = close + 1;
-                    continue;
-                }
+        {
+            let inner: String = chars[i + 1..close].iter().collect();
+            if !inner.contains('\n') {
+                out.push_str(&paint(&inner));
+                i = close + 1;
+                continue;
             }
         }
         out.push(chars[i]);
@@ -349,5 +360,21 @@ mod tests {
         );
         let block = render("see ```\nlet x = 1;\n```", &user, &channel, &style);
         assert_eq!(block, "see \x1b[35mlet x = 1;\x1b[0m");
+    }
+
+    #[test]
+    fn a_link_with_an_entity_is_listed_once_and_decoded() {
+        let found = links("<https://x.test/?a=1&amp;b=2> then <https://x.test/?a=1&amp;b=2|again>");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].url, "https://x.test/?a=1&b=2");
+    }
+
+    #[test]
+    fn only_web_mail_and_phone_links_are_openable() {
+        let found = links(
+            "<smb://host/share> <file:///etc/hosts> <https://x.test> <mailto:a@x.test> <tel:+33123>",
+        );
+        let urls: Vec<&str> = found.iter().map(|link| link.url.as_str()).collect();
+        assert_eq!(urls, ["https://x.test", "mailto:a@x.test", "tel:+33123"]);
     }
 }

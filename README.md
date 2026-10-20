@@ -14,7 +14,7 @@ brew install denrou/slack/slack
 
 Without it: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`.
 
-From source, with Rust 1.85+:
+From source, with Rust 1.88+:
 
 ```bash
 cargo install --git https://github.com/denrou/slack

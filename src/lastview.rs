@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
@@ -59,7 +59,8 @@ fn save(store: &Store) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    paths::write_private(&path, &serde_json::to_vec(store)?)?;
+    paths::write_private(&path, &serde_json::to_vec(store)?)
+        .with_context(|| format!("could not write {}", path.display()))?;
     Ok(())
 }
 

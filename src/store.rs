@@ -68,12 +68,14 @@ impl Workspaces {
         let dir = path
             .parent()
             .context("the workspace store has no parent directory")?;
-        fs::create_dir_all(dir)?;
-        paths::restrict(dir, 0o700)?;
+        fs::create_dir_all(dir)
+            .and_then(|()| paths::restrict(dir, 0o700))
+            .with_context(|| format!("could not prepare {}", dir.display()))?;
         // Write then rename, so a crash never leaves a half-written store.
         let tmp = path.with_extension("json.tmp");
-        paths::write_private(&tmp, &serde_json::to_vec_pretty(self)?)?;
-        fs::rename(&tmp, &path).with_context(|| format!("could not write {}", path.display()))?;
+        paths::write_private(&tmp, &serde_json::to_vec_pretty(self)?)
+            .and_then(|()| fs::rename(&tmp, &path))
+            .with_context(|| format!("could not write {}", path.display()))?;
         Ok(())
     }
 

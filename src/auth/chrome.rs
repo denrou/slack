@@ -313,8 +313,9 @@ fn signal(pid: u32, signal: &str) {
 fn sweep_helpers(profile_dir: &Path) {
     // The pattern drops the flag's leading `--`: pkill reads a pattern that
     // starts with a dash as an option and aborts.
+    // Anchored: a profile at `~/p` must not take `~/p-work` with it.
     let pattern = format!(
-        "user-data-dir={}",
+        "user-data-dir={}( |$)",
         escape_ere(&profile_dir.to_string_lossy())
     );
     let _ = Command::new("pkill")

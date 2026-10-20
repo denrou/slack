@@ -34,7 +34,7 @@ pub fn unreads(json: bool, no_color: bool) -> Result<()> {
         ));
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&view)?);
+        print_json(&view)?;
         return Ok(());
     }
     let style = Style::detect(no_color);
@@ -49,6 +49,14 @@ fn to_stdout(print: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()>
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         other => Ok(other?),
     }
+}
+
+/// Pretty JSON to stdout; a reader that stops early is not an error.
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    to_stdout(|out| {
+        serde_json::to_writer_pretty(&mut *out, value).map_err(io::Error::other)?;
+        writeln!(out)
+    })
 }
 
 pub fn count() -> Result<()> {
@@ -114,7 +122,7 @@ pub fn thread(spec: &str, json: bool, no_color: bool) -> Result<()> {
             "replies": fetched.replies,
             "has_more": fetched.has_more,
         });
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        print_json(&value)?;
         return Ok(());
     }
     let style = Style::detect(no_color);
@@ -195,7 +203,7 @@ pub fn channels(filter: &str, json: bool) -> Result<()> {
         .filter(|c| c.kind != Kind::Im && directory::matches(filter, &c.name))
         .collect();
     if json {
-        println!("{}", serde_json::to_string_pretty(&listed)?);
+        print_json(&listed)?;
         return Ok(());
     }
     if listed.is_empty() {
@@ -247,7 +255,7 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
     names.save();
     let people = people?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&people)?);
+        print_json(&people)?;
         return Ok(());
     }
     if people.is_empty() {
@@ -305,7 +313,7 @@ pub fn show(spec: &str, limit: usize, json: bool, no_color: bool) -> Result<()> 
             "has_more": page.has_more,
             "last_read": last_read,
         });
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        print_json(&value)?;
         return Ok(());
     }
     let refs = Refs::of_messages(&channel, &page.messages);
@@ -431,7 +439,7 @@ pub fn whoami(json: bool) -> Result<()> {
             if json {
                 let mut value = serde_json::to_value(&identity)?;
                 value["status"] = json!("ok");
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                print_json(&value)?;
             } else {
                 println!("{} ({})", identity.team, identity.team_id);
                 println!("  User: {} ({})", identity.user, identity.user_id);
@@ -450,7 +458,7 @@ pub fn whoami(json: bool) -> Result<()> {
                     "status": "auth_failed",
                     "error": code,
                 });
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                print_json(&value)?;
             } else {
                 println!("{} ({})", workspace.name, team_id);
                 if let Some(user_id) = &workspace.user_id {

@@ -16,6 +16,7 @@
 //! `localConfig_v2` payload.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -66,13 +67,25 @@ impl From<cdp::Error> for Error {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CapturedWorkspace {
     /// The workspace origin, `https://team.slack.com`.
     pub url: String,
     pub xoxc: String,
     pub team_id: Option<String>,
     pub team_name: Option<String>,
+}
+
+/// By hand, so that the token never reaches a `{:?}`.
+impl fmt::Debug for CapturedWorkspace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapturedWorkspace")
+            .field("url", &self.url)
+            .field("xoxc", &"<redacted>")
+            .field("team_id", &self.team_id)
+            .field("team_name", &self.team_name)
+            .finish()
+    }
 }
 
 pub struct Capture {

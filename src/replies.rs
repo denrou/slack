@@ -48,6 +48,8 @@ pub fn fetch(client: &Client, channel: &str, thread_ts: &str) -> Result<Replies,
         }
     }
     messages.sort_by(|a, b| compare_ts(&a.ts, &b.ts));
+    // A page may repeat the root; a message is listed once.
+    messages.dedup_by(|a, b| a.ts == b.ts);
     let root_at = messages
         .iter()
         .position(|message| message.ts == thread_ts)
