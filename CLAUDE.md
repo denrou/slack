@@ -80,6 +80,8 @@ Deferred on purpose by the review of 2026-10-21 (`v0.9.0..main`):
 - A pref that is present but not JSON is read as absent without a warning (from before this batch).
 - `slack react --remove` says "Took back" when there was nothing to take back.
 
+Deferred on purpose by the review of 2026-10-21 (`v0.10.0..main`): with people marked, Enter on a typed name whose highlighted match is a channel or a group does nothing and says nothing (the picker has no status line of its own). Rare, since a group is people; a typo that matches nothing goes to the list instead.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.

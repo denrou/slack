@@ -363,6 +363,18 @@ impl Picker {
         }
     }
 
+    /// What was typed, blanks aside: blanks alone match everything.
+    fn typed(&self) -> &str {
+        self.query.trim()
+    }
+
+    /// Enter in the filter hands the keys to the list rather than opening:
+    /// with nothing typed nor marked, or when nothing matches, since `m`
+    /// shows the muted ones only there.
+    pub fn enter_lists(&self) -> bool {
+        (self.typed().is_empty() && self.marked.is_empty()) || self.matches().is_empty()
+    }
+
     /// Enter on a name typed after marking others: the highlighted person
     /// joins them, never toggled out. False for a channel or a group, or
     /// when nothing matches.
@@ -1184,13 +1196,9 @@ impl State {
             KeyCode::Tab => {
                 picker.mark();
             }
+            KeyCode::Enter if picker.filtering && picker.enter_lists() => picker.filtering = false,
             KeyCode::Enter
-                if picker.filtering && picker.query.is_empty() && picker.marked.is_empty() =>
-            {
-                picker.filtering = false
-            }
-            KeyCode::Enter
-                if picker.filtering && !picker.query.is_empty() && !picker.marked.is_empty() =>
+                if picker.filtering && !picker.typed().is_empty() && !picker.marked.is_empty() =>
             {
                 if picker.join()
                     && let Some(action) = picker.chosen()
@@ -1203,7 +1211,7 @@ impl State {
                 picker.query.clear();
                 picker.selected = 0;
             }
-            KeyCode::Left if picker.filtering => {}
+            KeyCode::Left | KeyCode::Right if picker.filtering => {}
             KeyCode::Backspace if picker.filtering => {
                 picker.query.pop();
                 picker.selected = 0;
@@ -1858,6 +1866,11 @@ mod tests {
             Action::None,
             "nothing matches, nothing opens"
         );
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if !p.filtering && p.query == "zzz"),
+            "the keys go to the list, where m can show the muted ones"
+        );
+        state.key(press(KeyCode::Char('/')));
         state.key(press(KeyCode::Backspace));
         assert!(matches!(&state.mode, Mode::Pick(p) if p.query == "zz"));
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
@@ -1941,6 +1954,17 @@ mod tests {
         assert_eq!(
             picker.selected, 1,
             "the selection stays on the shorter list"
+        );
+
+        state.key(press(KeyCode::Char('/')));
+        for c in "noise".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('m')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.query == "noise" && p.matches() == [1]),
+            "a muted name typed matches nothing: Enter to the list, then m"
         );
     }
 
@@ -2112,6 +2136,26 @@ mod tests {
                 compose: true
             },
             "typed again, a marked person stays marked"
+        );
+
+        state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        for c in "bob".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(press(KeyCode::Tab));
+        state.key(press(KeyCode::Char(' ')));
+        state.key(press(KeyCode::Right));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.filtering),
+            "Right opens nothing from the filter"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowGroup {
+                users: vec!["U3".to_string()],
+                compose: true
+            },
+            "a stray blank matches everything but joins no one"
         );
 
         state.mode = Mode::Pick(Picker::new(choices.clone(), true));
