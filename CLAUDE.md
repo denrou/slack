@@ -17,16 +17,18 @@ prettier --write "**/*.md"                    # Markdown
 
 Denis's personal project (`github.com/denrou/slack`), outside the Centreon organisation. The Centreon conventions (feature branch, pull request, `/create-pr`, `/check-pr`, Jira references) do not apply, and `/create-pr` must not be used.
 
-- **Commit straight on `main`**, conventional-commit messages (`feat:`, `fix:`, `docs:`, `chore: release X.Y.Z`). Format, lint and test before committing; run Prettier on any Markdown touched.
-- **Pushing is the user's move.** `git push origin main` is denied by the global permission settings, so hand them the exact line to run:
+Denis leads the project as product owner; Claude is the developer and owns the code, its architecture and its quality.
 
-  ```
-  ! git push origin main
-  ```
+- **Commit straight on the local `main`**, one conventional commit per change (`feat:`, `fix:`, `docs:`, `chore: release X.Y.Z`). Format, lint and test before committing; run Prettier on any Markdown touched. `ARCHITECTURE.md` and the decisions below change in the same commit as the code they describe. From a worktree (background sessions), commit on its branch, then fast-forward the main checkout (`git merge --ff-only <branch>` there) when that checkout is clean.
+- **A push is a release (since 2026-10-20).** Nothing is pushed between releases: commits pile up on the local `main`, and Denis's one push sends `main` and the new tag together. Never ask him to push anything else, never push a branch or open a pull request to get around it, and never bump the version or create a tag on your own. He tries the batch from the local checkout (`cargo install --path ~/code/denrou/slack` puts it in `~/.cargo/bin`) and says when it is ready.
+- **A release, when Denis asks for it**:
+  1. Review the batch: `/code-review` over everything since the last tag (`git log v<previous>..main`), plus the pr-review-toolkit agents when the batch is large. Fix what matters in their own commits; what is deferred on purpose goes to "Not planned yet" below with its reason.
+  2. `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo build --release`: CI only sees the code at release time, so it has to pass here first.
+  3. Bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand Denis the one line: `! git push origin main vX.Y.Z` (`git push origin main` is denied by the global permission settings).
+  4. Once he has pushed, watch the release with `gh run watch` and the tap with `gh run watch --repo denrou/homebrew-slack`, then report what shipped.
 
-  Do not route around the denial by pushing a branch and opening a pull request.
+  The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
 
-- **Releases are on request and bundle several changes** (since 2026-10-20). Land each change as its own commit on `main`; never bump the version or create a tag on your own. Denis tries the tip of `main` first (`cargo install --path .` puts it in `~/.cargo/bin`) and asks for a release once he is happy with the batch. A release is then: bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z` on `main`, create the annotated tag (`git tag -a vX.Y.Z -m vX.Y.Z`), and hand the user `! git push origin main vX.Y.Z`. The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with generated notes, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
 - **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, `unreads`) can be run from here to check the output. **Never run `send`, `read` or anything in the screen (`slack` alone) that writes from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
 ## Ideas
@@ -63,6 +65,8 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 ## Not planned yet
 
 `--workspace`, a `watch` mode, loading older history from the TUI.
+
+Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the list with its error instead of dropping it, an `ItemKind` enum in place of `Item`'s parallel fields, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
 
 **Auto-refresh of the screen** is wanted (Denis, 2026-10-20) but not designed: think it through before building it. A refresh today is one `client.counts` call plus one history call per unread conversation, so a timer multiplies the API load by the number of conversations; `State::replace_items` sends the focus back to the list, which would throw you out of a thread or a reply box mid-typing; and the loop blocks on `event::read`, so it needs a `poll` with a timeout first. The cheap version is to poll `client.counts` alone and reload only when a cursor or a count moved, keeping focus, cursor, thread and the reply box as they are.
 
