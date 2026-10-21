@@ -363,6 +363,16 @@ impl Picker {
         }
     }
 
+    /// Enter on a name typed after marking others: the highlighted person
+    /// joins them, never toggled out. False for a channel or a group, or
+    /// when nothing matches.
+    fn join(&mut self) -> bool {
+        let Some(&index) = self.matches().get(self.selected) else {
+            return false;
+        };
+        self.marked.contains(&index) || self.mark()
+    }
+
     /// What Enter opens: the marked people as one group message, else
     /// the highlighted choice.
     fn chosen(&self) -> Option<Action> {
@@ -1152,15 +1162,16 @@ impl State {
         }
     }
 
-    /// The picker opens in its filter, where typing narrows the list,
-    /// until Enter hands the keys to the narrowed list (Esc clears what
-    /// was typed, and with nothing typed closes the picker). Tab marks a
-    /// person for a group message and clears the filter for the next one;
-    /// Enter with nothing typed then opens the group. In the list
-    /// `j`/`k`, `gg` and `G` move, `/` goes back to the filter, Space or
-    /// Tab marks, `m` shows the muted ones, Enter or `l` opens, Esc or
-    /// `h` gives up, `q` quits as everywhere. The arrows and Ctrl-n/p
-    /// move in both.
+    /// The picker opens in its filter, where typing narrows the list and
+    /// Enter opens the highlighted match (Esc clears what was typed, and
+    /// with nothing typed closes the picker). Tab marks a person for a
+    /// group message and clears the filter for the next one; Enter then
+    /// opens the group, with the person typed last when there is one.
+    /// Enter with nothing typed nor marked hands the keys to the list,
+    /// where `j`/`k`, `gg` and `G` move, `/` goes back to the filter,
+    /// Space or Tab marks, `m` shows the muted ones, Enter or `l` opens,
+    /// Esc or `h` gives up, `q` quits as everywhere. The arrows and
+    /// Ctrl-n/p move in both.
     fn pick(&mut self, mut picker: Picker, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let after_g = std::mem::take(&mut self.pending_g);
@@ -1174,9 +1185,18 @@ impl State {
                 picker.mark();
             }
             KeyCode::Enter
-                if picker.filtering && !(picker.query.is_empty() && !picker.marked.is_empty()) =>
+                if picker.filtering && picker.query.is_empty() && picker.marked.is_empty() =>
             {
                 picker.filtering = false
+            }
+            KeyCode::Enter
+                if picker.filtering && !picker.query.is_empty() && !picker.marked.is_empty() =>
+            {
+                if picker.join()
+                    && let Some(action) = picker.chosen()
+                {
+                    return action;
+                }
             }
             KeyCode::Esc if picker.filtering && picker.query.is_empty() => return Action::None,
             KeyCode::Esc if picker.filtering => {
@@ -1756,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_opens_in_its_filter_and_enter_hands_the_keys_to_the_list() {
+    fn the_picker_opens_in_its_filter_and_enter_opens_the_highlighted_match() {
         let mut state = state();
         assert_eq!(
             state.key(press(KeyCode::Char('c'))),
@@ -1780,22 +1800,42 @@ mod tests {
         assert_eq!(picker.selected, 0);
         assert_eq!(
             state.key(press(KeyCode::Enter)),
+            Action::Show {
+                choice: choices[0].clone(),
+                compose: false
+            },
+            "Enter opens the first match, no move needed"
+        );
+        assert_eq!(state.mode, Mode::Browse);
+
+        state.mode = Mode::Pick(Picker::new(choices.clone(), false));
+        for c in "dev".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(press(KeyCode::Down));
+        state.key(press(KeyCode::Down));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Show {
+                choice: choices[3].clone(),
+                compose: false
+            },
+            "Down moves in the filter and stops at the last match"
+        );
+
+        state.mode = Mode::Pick(Picker::new(choices.clone(), false));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
             Action::None,
-            "Enter hands the keys to the list"
+            "with nothing typed, Enter hands the keys to the list"
         );
         state.key(press(KeyCode::Char('j')));
-        state.key(press(KeyCode::Char('j')));
-        let Mode::Pick(picker) = &state.mode else {
-            panic!("still picking");
-        };
-        assert!(!picker.filtering);
-        assert_eq!(picker.query, "dev", "the filter stays");
-        assert_eq!(picker.selected, 1, "j moves and stops at the last match");
+        assert!(matches!(&state.mode, Mode::Pick(p) if !p.filtering && p.selected == 1));
         state.key(press(KeyCode::Char('/')));
-        state.key(press(KeyCode::Char('-')));
+        state.key(press(KeyCode::Char('j')));
         assert!(
-            matches!(&state.mode, Mode::Pick(p) if p.filtering && p.query == "dev-" && p.selected == 0),
-            "/ goes back to the filter, where typing goes on"
+            matches!(&state.mode, Mode::Pick(p) if p.filtering && p.query == "j" && p.selected == 0),
+            "/ goes back to the filter, where j types"
         );
         state.key(press(KeyCode::Backspace));
         state.key(press(KeyCode::Enter));
@@ -1803,23 +1843,21 @@ mod tests {
         assert_eq!(
             state.key(press(KeyCode::Char('l'))),
             Action::Show {
-                choice: choices[3].clone(),
+                choice: choices[1].clone(),
                 compose: false
-            }
+            },
+            "l opens from the list"
         );
-        assert_eq!(state.mode, Mode::Browse);
 
         state.mode = Mode::Pick(Picker::new(choices.clone(), false));
         for c in "zzz".chars() {
             state.key(press(KeyCode::Char(c)));
         }
-        state.key(press(KeyCode::Enter));
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::None,
             "nothing matches, nothing opens"
         );
-        state.key(press(KeyCode::Char('/')));
         state.key(press(KeyCode::Backspace));
         assert!(matches!(&state.mode, Mode::Pick(p) if p.query == "zz"));
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
@@ -1856,6 +1894,7 @@ mod tests {
             Action::None,
             "q types in the filter"
         );
+        state.key(press(KeyCode::Backspace));
         state.key(press(KeyCode::Enter));
         assert_eq!(
             state.key(press(KeyCode::Char('q'))),
@@ -2037,23 +2076,53 @@ mod tests {
             matches!(&state.mode, Mode::Pick(p) if p.marked == [2] && p.query.is_empty() && p.filtering),
             "Tab marks Bob and clears the filter for the next name"
         );
-        for c in "jane".chars() {
+        for c in "dev".chars() {
             state.key(press(KeyCode::Char(c)));
         }
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::None,
-            "with something typed, Enter still goes to the list"
+            "a channel typed after the marks cannot join them"
         );
-        state.key(press(KeyCode::Tab));
-        state.key(press(KeyCode::Char('/')));
-        for _ in 0..4 {
-            state.key(press(KeyCode::Backspace));
+        state.key(press(KeyCode::Esc));
+        for c in "jane".chars() {
+            state.key(press(KeyCode::Char(c)));
         }
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::ShowGroup {
                 users: vec!["U3".to_string(), "U9".to_string()],
+                compose: true
+            },
+            "the person typed last joins the marks"
+        );
+
+        state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        for c in "bob".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(press(KeyCode::Tab));
+        for c in "bob".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowGroup {
+                users: vec!["U3".to_string()],
+                compose: true
+            },
+            "typed again, a marked person stays marked"
+        );
+
+        state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Tab));
+        state.key(press(KeyCode::Char('/')));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowGroup {
+                users: vec!["U9".to_string()],
                 compose: true
             },
             "Tab marks from the list too, and Enter on an empty filter opens the group"
@@ -2627,13 +2696,14 @@ mod tests {
         for c in "bob".chars() {
             state.key(press(KeyCode::Char(c)));
         }
-        state.key(press(KeyCode::Enter));
-        state.key(press(KeyCode::Char(' ')));
+        state.key(press(KeyCode::Tab));
         assert!(
             matches!(&state.mode, Mode::Pick(p) if p.marked == [1, 2]),
             "a mark is an index into the choices, not into the matches"
         );
-        state.key(press(KeyCode::Char('/')));
+        for c in "de".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
         state.key(press(KeyCode::Esc));
         assert!(
             matches!(

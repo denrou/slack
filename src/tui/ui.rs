@@ -29,7 +29,7 @@ const HELP: &[&str] = &[
     "Enter           reply: to the conversation, to the highlighted message, or in the open thread",
     "s               a message to the conversation, wherever you are in it",
     "n               new message: pick a channel or people (Tab marks several as you type), then write",
-    "c               open a channel or group you are in, or anyone: type to filter, Enter to the list, m shows the muted",
+    "c               open a channel or group you are in, or anyone: type to filter, Enter opens, m shows the muted",
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "Ctrl-J          a new line in the reply box (Ctrl-Enter, Shift-Enter too where the terminal reports them)",
     "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
@@ -601,8 +601,8 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
             );
         }
         Mode::Pick(picker) => {
-            let ready = picker.query.is_empty() && !picker.marked.is_empty();
-            let keys = match (picker.filtering, ready, picker.compose) {
+            let opens = !picker.query.is_empty() || !picker.marked.is_empty();
+            let keys = match (picker.filtering, opens, picker.compose) {
                 (true, true, false) => "type to filter  Tab mark a person  Enter open  Esc clear",
                 (true, true, true) => "type to filter  Tab mark a person  Enter write  Esc clear",
                 (true, false, _) => {
