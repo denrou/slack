@@ -70,7 +70,15 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 
 Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the list with its error instead of dropping it, an `ItemKind` enum in place of `Item`'s parallel fields, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
 
-Deferred by the review of 2026-10-21 (`v0.9.0..main`): the `+` list follows Slack's `emoji_use`, so an emoji just used from here moves up only once Slack counts it (whether `reactions.add` does is unverified). A local bump would be undone by the next reload unless the CLI wrote the pref back with `users.prefs.set`, a write for a cosmetic gain.
+Deferred on purpose by the review of 2026-10-21 (`v0.9.0..main`):
+
+- The `+` list follows Slack's `emoji_use`, so an emoji just used from here moves up only once Slack counts it (whether `reactions.add` does is unverified). A local bump would be undone by the next reload unless the CLI wrote the pref back with `users.prefs.set`, a write for a cosmetic gain.
+- Slack lists only the first users of a popular reaction, so yours may be missing: `+` then adds, `already_reacted` is taken as done and the count shows one too many until a reload. Rare, and the fix needs `react::set` to tell a change from a no-op.
+- After a mark or a reply, the next poll still differs from the list's counts and reloads to confirm what the screen already shows. Correct, one history call per conversation; updating the pulse locally would need the new cursors.
+- The picker's Tab is silent on a channel and when it unmarks someone, and BackTab no longer moves up since Tab stopped moving down.
+- A poll thread that panics leaves the screen without auto-refresh and without a word; a panic there is a bug, not a condition.
+- A pref that is present but not JSON is read as absent without a warning (from before this batch).
+- `slack react --remove` says "Took back" when there was nothing to take back.
 
 ## Reference implementation
 
