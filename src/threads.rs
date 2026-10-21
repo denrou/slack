@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::api::{self, Client};
 use crate::history::{Message, compare_ts, is_usable_cursor, message_from};
+use crate::replies::Replies;
 
 const METHOD: &str = "subscriptions.thread.getView";
 /// Five pages bound the cost of a long backlog; past that the list is
@@ -35,6 +36,10 @@ pub struct Thread {
     /// The cap dropped replies.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more: bool,
+    /// The whole thread, when the screen reads it with context; None
+    /// otherwise, or when it could not be read.
+    #[serde(skip)]
+    pub history: Option<Replies>,
 }
 
 pub struct ThreadList {
@@ -215,6 +220,7 @@ fn normalise(raw: &Value, limit: usize) -> Entry {
         root,
         unread_replies: replies,
         has_more,
+        history: None,
     }))
 }
 

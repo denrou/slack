@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::history::{self, Message};
+use crate::history::{self, Message, compare_ts};
 use crate::mrkdwn::{self, Link};
 use crate::names::Names;
 use crate::style::Style;
@@ -113,9 +113,35 @@ impl Item {
         let user = |id: &str| names.user_name(id);
         let channel = |id: &str| names.channel_name(id);
         let root = mrkdwn::render(&thread.root.text, &user, &channel, &Style::plain());
-        let detail = match thread.unread_replies.len() {
-            1 => "1 new reply".to_string(),
-            n => format!("{n}{} new replies", if thread.has_more { "+" } else { "" }),
+        let latest = thread.unread_replies.last().map(|reply| reply.ts.clone());
+        let (messages, has_more, unread_from) = match thread.history {
+            Some(history) => {
+                // Slack's cursor when it gives one, else just before the
+                // first reply the thread view calls unread.
+                let cursor = history.last_read.clone().or_else(|| {
+                    let first_new = &thread.unread_replies.first()?.ts;
+                    std::iter::once(&history.root)
+                        .chain(&history.replies)
+                        .rev()
+                        .find(|message| compare_ts(&message.ts, first_new).is_lt())
+                        .map(|message| message.ts.clone())
+                });
+                let mut messages = vec![history.root];
+                messages.extend(history.replies);
+                (messages, history.has_more, cursor)
+            }
+            None => (thread.unread_replies, thread.has_more, None),
+        };
+        let new = match &unread_from {
+            Some(cursor) => messages
+                .iter()
+                .filter(|message| view::is_new(message, Some(cursor)))
+                .count(),
+            None => messages.len(),
+        };
+        let detail = match new {
+            1 if !has_more => "1 new reply".to_string(),
+            n => format!("{n}{} new replies", if has_more { "+" } else { "" }),
         };
         Item {
             section: Section::Threads,
@@ -125,12 +151,12 @@ impl Item {
                 view::excerpt(&root, 40)
             ),
             detail,
-            latest: thread.unread_replies.last().map(|reply| reply.ts.clone()),
+            latest,
             channel: thread.channel,
             thread_ts: Some(thread.thread_ts),
-            messages: thread.unread_replies,
-            has_more: thread.has_more,
-            unread_from: None,
+            messages,
+            has_more,
+            unread_from,
         }
     }
 
@@ -1530,6 +1556,56 @@ fn link_action(url: String, copy: bool) -> Action {
 mod tests {
     use super::*;
     use crate::counts::Kind;
+
+    #[test]
+    fn a_thread_is_read_whole_from_its_first_new_reply() {
+        let thread = |history: Option<crate::replies::Replies>| crate::threads::Thread {
+            channel: "C1".into(),
+            thread_ts: "1.000100".into(),
+            root: message("1.000100"),
+            unread_replies: vec![message("1.000300"), message("1.000400")],
+            has_more: false,
+            history,
+        };
+        let whole = |last_read: Option<&str>| crate::replies::Replies {
+            root: message("1.000100"),
+            replies: ["1.000200", "1.000300", "1.000400", "1.000500"]
+                .map(message)
+                .to_vec(),
+            has_more: false,
+            last_read: last_read.map(str::to_string),
+        };
+        let names = Names::default();
+
+        let item = Item::thread(thread(Some(whole(None))), &names);
+        assert_eq!(item.messages.len(), 5, "the root, then every reply");
+        assert_eq!(item.unread_from.as_deref(), Some("1.000200"));
+        assert_eq!(
+            item.detail, "3 new replies",
+            "one came in after the thread view"
+        );
+        assert_eq!(item.landing(), 2);
+        assert_eq!(
+            item.latest.as_deref(),
+            Some("1.000400"),
+            "a mark goes no further than the thread view saw"
+        );
+
+        let item = Item::thread(thread(Some(whole(Some("1.000300")))), &names);
+        assert_eq!(
+            item.unread_from.as_deref(),
+            Some("1.000300"),
+            "Slack's own cursor"
+        );
+        assert_eq!((item.detail.as_str(), item.landing()), ("2 new replies", 3));
+
+        let item = Item::thread(thread(None), &names);
+        assert_eq!(item.messages.len(), 2, "unreadable: the new replies alone");
+        assert_eq!(
+            (item.unread_from, item.detail.as_str()),
+            (None, "2 new replies")
+        );
+    }
 
     fn message(ts: &str) -> Message {
         Message {

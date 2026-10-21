@@ -197,6 +197,10 @@ fn draw_messages(
         && state
             .selected_item()
             .is_some_and(|item| item.thread_ts.is_none());
+    let root_ts = match (&state.thread, state.selected_item()) {
+        (Some(thread), _) => Some(thread.thread_ts.as_str()),
+        (None, item) => item.and_then(|item| item.thread_ts.as_deref()),
+    };
     let messages = state.pane_messages();
     let user = |id: &str| names.user_name(id);
     let channel = |id: &str| names.channel_name(id);
@@ -248,7 +252,7 @@ fn draw_messages(
         let mut text_lines = text.lines();
         spans.push(Span::raw(text_lines.next().unwrap_or("").to_string()));
         let mut notes = Vec::new();
-        if in_thread && index == 0 {
+        if index == 0 && root_ts == Some(message.ts.as_str()) {
             notes.push("root".to_string());
         }
         match message.reply_count {

@@ -16,7 +16,7 @@ use crate::lastview::ThreadRef;
 use crate::names::Names;
 use crate::style::Style;
 use crate::threads::{self, Thread, ThreadList};
-use crate::{emoji, mrkdwn, par};
+use crate::{emoji, mrkdwn, par, replies};
 
 /// How much of each unread conversation the view reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +215,7 @@ pub fn build(
         }
     }
 
-    let threads = match counts.threads {
+    let mut threads = match counts.threads {
         None => None,
         Some(summary) => {
             let list = if counts.threads_unread() {
@@ -237,11 +237,15 @@ pub fn build(
 
     // Everyone the view will name: the people behind the DMs, every
     // author, everyone mentioned, and the channels the threads live in.
-    let thread_items: &[Thread] = threads
-        .as_ref()
-        .and_then(|threads| threads.items.as_deref())
-        .unwrap_or(&[]);
+    let thread_items: &mut [Thread] = threads
+        .as_mut()
+        .and_then(|threads| threads.items.as_deref_mut())
+        .unwrap_or(&mut []);
     names.resolve_channels(client, thread_items.iter().map(|t| t.channel.clone()))?;
+    if reach == Reach::Recent {
+        read_whole(client, names, thread_items)?;
+    }
+    let thread_items: &[Thread] = thread_items;
     let mut people = BTreeSet::new();
     people.extend(
         unread
@@ -253,7 +257,8 @@ pub fn build(
     }
     for thread in thread_items {
         collect_people(&mut people, &thread.root);
-        for reply in &thread.unread_replies {
+        let whole = thread.history.iter().flat_map(|history| &history.replies);
+        for reply in thread.unread_replies.iter().chain(whole) {
             collect_people(&mut people, reply);
         }
     }
@@ -291,6 +296,30 @@ pub fn build(
         threads,
         muted: counts.muted_unread_count(),
     })
+}
+
+/// Each thread whole, as a channel's recent history is read: a reply is
+/// understood with the ones before it. One that cannot be read keeps its
+/// new replies alone.
+fn read_whole(client: &Client, names: &Names, threads: &mut [Thread]) -> Result<(), api::Error> {
+    let wanted = threads
+        .iter()
+        .map(|thread| (thread.channel.clone(), thread.thread_ts.clone()))
+        .collect();
+    let fetched = par::map(wanted, |(channel, ts)| {
+        replies::fetch(client, &channel, &ts)
+    });
+    for (thread, fetched) in threads.iter_mut().zip(fetched) {
+        match fetched {
+            Ok(history) => thread.history = Some(history),
+            Err(err @ api::Error::Auth { .. }) => return Err(err),
+            Err(err) => crate::warn::warn(format!(
+                "could not read a thread in {}: {err}",
+                names.channel_label(&thread.channel)
+            )),
+        }
+    }
+    Ok(())
 }
 
 struct Sections<'a> {
@@ -912,6 +941,7 @@ mod tests {
                 "added the Q4 numbers",
             )],
             has_more: false,
+            history: None,
         };
         let mut view = View {
             threads: Some(ThreadsView {
