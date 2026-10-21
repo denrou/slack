@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use jiff::Zoned;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
@@ -485,13 +485,17 @@ impl App<'_> {
         }
     }
 
-    /// The list from these counts, and the open thread with it.
+    /// The list from these counts, and the open thread with it. The list
+    /// is loaded once the thread fails: the next poll must not redo it.
     fn reload(&mut self, counts: &Counts) -> Result<()> {
         let items = load(self.client, self.names, counts)?;
         self.state.replace_items(items);
         self.state.frequent_emoji.clone_from(&counts.frequent_emoji);
+        self.pulse = Pulse::of(counts);
         if let Some(pane) = self.state.thread.take() {
-            let reloaded = self.reload_thread(&pane);
+            let reloaded = self
+                .reload_thread(&pane)
+                .context("could not reload the open thread");
             // A failed reload keeps the thread as it was on the screen.
             let (pane, failed) = match reloaded {
                 Ok(reloaded) => (reloaded, None),
@@ -502,7 +506,6 @@ impl App<'_> {
                 return Err(err);
             }
         }
-        self.pulse = Pulse::of(counts);
         Ok(())
     }
 
