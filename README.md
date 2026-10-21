@@ -118,6 +118,14 @@ Security notes, the short version:
 
 `slack --count --json` prints `{"unread": 3, "me": 2}` from the same two calls, laid out over lines like every `--json` output, so read it with `jq` rather than line by line: `unread` is that number, `me` the messages aimed at you (the unread messages of DMs and group messages, the mentions in channels and in followed threads), for a bar that shows the urgent part apart.
 
+## For an agent
+
+`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`send`, `read`), how the numbers and the JSON work. For Claude Code, link it from a clone of the repository and `/slack` becomes a skill:
+
+```bash
+ln -s "$PWD/skills/slack" ~/.claude/skills/slack
+```
+
 ## Files
 
 `$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
