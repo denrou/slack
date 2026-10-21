@@ -67,6 +67,9 @@ pub struct Counts {
     /// From the preferences read beside the counts, for the screen's `+`.
     #[serde(skip)]
     pub frequent_emoji: Vec<String>,
+    /// The preferences could not be read, so nothing reads as muted.
+    #[serde(skip)]
+    pub prefs_missing: bool,
 }
 
 impl Counts {
@@ -98,6 +101,7 @@ impl Counts {
             conversations,
             threads: body.get("threads").and_then(threads),
             frequent_emoji: Vec::new(),
+            prefs_missing: false,
         })
     }
 
@@ -170,7 +174,10 @@ pub fn fetch(client: &Client) -> Result<Counts, api::Error> {
         (body, prefs.join().expect("the prefs thread panicked"))
     });
     let mut counts = Counts::parse(&body?)?;
-    counts.apply_prefs(&prefs?);
+    match prefs? {
+        Some(prefs) => counts.apply_prefs(&prefs),
+        None => counts.prefs_missing = true,
+    }
     Ok(counts)
 }
 

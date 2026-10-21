@@ -76,6 +76,7 @@ fn screen(
         pulse: Pulse::of(&counts),
         polls: poll(client.clone()),
         written: Instant::now(),
+        poll_error: None,
     };
     app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
@@ -215,6 +216,8 @@ struct App<'a> {
     /// When the last mark or reply finished: a poll begun before it shows
     /// what was just read as unread, and is dropped.
     written: Instant,
+    /// The status line a failed poll put up, for the next good one to clear.
+    poll_error: Option<String>,
 }
 
 impl App<'_> {
@@ -467,9 +470,21 @@ impl App<'_> {
             Ok(counts) => counts,
             Err(err) => {
                 let err = anyhow::Error::from(err).context("could not check for new messages");
-                return self.fail(err);
+                let failed = self.fail(err);
+                self.poll_error.clone_from(&self.state.status);
+                return failed;
             }
         };
+        if let Some(error) = self.poll_error.take()
+            && self.state.status.as_ref() == Some(&error)
+        {
+            self.state.status = None;
+        }
+        // Without the preferences every muted conversation would show for
+        // one poll; the next one tries again.
+        if counts.prefs_missing {
+            return Ok(());
+        }
         if Pulse::of(&counts) == self.pulse {
             return Ok(());
         }
@@ -478,7 +493,10 @@ impl App<'_> {
         self.busy(terminal, "Refreshing…")?;
         match self.reload(&counts) {
             Ok(()) => {
-                self.state.status = status;
+                // Unless a warning took the line during the reload.
+                if self.state.status.as_deref() == Some("Refreshing…") {
+                    self.state.status = status;
+                }
                 Ok(())
             }
             Err(err) => self.fail(err),

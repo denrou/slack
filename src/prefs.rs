@@ -19,17 +19,17 @@ pub struct Prefs {
     pub frequent_emoji: Vec<String>,
 }
 
-/// The preferences that shape the view. Only a dead session is an error;
-/// any other failure is reported and reads as the defaults.
-pub fn fetch(client: &Client) -> Result<Prefs, api::Error> {
+/// The preferences that shape the view, None when they could not be read.
+/// Only a dead session is an error; any other failure is reported.
+pub fn fetch(client: &Client) -> Result<Option<Prefs>, api::Error> {
     match client.call("users.prefs.get", &[]) {
-        Ok(body) => Ok(parse(&body)),
+        Ok(body) => Ok(Some(parse(&body))),
         Err(err @ api::Error::Auth { .. }) => Err(err),
         Err(err) => {
             crate::warn::warn(format!(
                 "could not read the notification preferences: {err}"
             ));
-            Ok(Prefs::default())
+            Ok(None)
         }
     }
 }
