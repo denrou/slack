@@ -336,20 +336,30 @@ impl Picker {
         self.selected = (self.selected as isize).saturating_add(step).clamp(0, last) as usize;
     }
 
-    /// Space: mark the highlighted person for a group message, or unmark
-    /// them. A channel or a group cannot be put in one.
-    fn mark(&mut self) {
+    /// Space or Tab: mark the highlighted person for a group message, or
+    /// unmark them. A channel or a group cannot be put in one; false then.
+    fn mark(&mut self) -> bool {
         let Some(&index) = self.matches().get(self.selected) else {
-            return;
+            return false;
         };
         if self.choices[index].user.is_none() {
-            return;
+            return false;
         }
         match self.marked.iter().position(|&marked| marked == index) {
             Some(at) => {
                 self.marked.remove(at);
             }
             None => self.marked.push(index),
+        }
+        true
+    }
+
+    /// Tab in the filter: mark, then clear what was typed for the next
+    /// name, since Space is a character of the filter there.
+    fn mark_and_clear(&mut self) {
+        if self.mark() {
+            self.query.clear();
+            self.selected = 0;
         }
     }
 
@@ -1142,20 +1152,30 @@ impl State {
 
     /// The picker opens in its filter, where typing narrows the list,
     /// until Enter hands the keys to the narrowed list (Esc clears what
-    /// was typed, and with nothing typed closes the picker). In the list
-    /// `j`/`k`, `gg` and `G` move, `/` goes back to the filter, Space
-    /// marks a person for a group message, `m` shows the muted ones,
-    /// Enter or `l` opens, Esc or `h` gives up, `q` quits as everywhere.
-    /// The arrows, Tab and Ctrl-n/p move in both.
+    /// was typed, and with nothing typed closes the picker). Tab marks a
+    /// person for a group message and clears the filter for the next one;
+    /// Enter with nothing typed then opens the group. In the list
+    /// `j`/`k`, `gg` and `G` move, `/` goes back to the filter, Space or
+    /// Tab marks, `m` shows the muted ones, Enter or `l` opens, Esc or
+    /// `h` gives up, `q` quits as everywhere. The arrows and Ctrl-n/p
+    /// move in both.
     fn pick(&mut self, mut picker: Picker, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let after_g = std::mem::take(&mut self.pending_g);
         match key.code {
-            KeyCode::Down | KeyCode::Tab => picker.step(1),
-            KeyCode::Up | KeyCode::BackTab => picker.step(-1),
+            KeyCode::Down => picker.step(1),
+            KeyCode::Up => picker.step(-1),
             KeyCode::Char('n') if control => picker.step(1),
             KeyCode::Char('p') if control => picker.step(-1),
-            KeyCode::Enter if picker.filtering => picker.filtering = false,
+            KeyCode::Tab if picker.filtering => picker.mark_and_clear(),
+            KeyCode::Tab => {
+                picker.mark();
+            }
+            KeyCode::Enter
+                if picker.filtering && !(picker.query.is_empty() && !picker.marked.is_empty()) =>
+            {
+                picker.filtering = false
+            }
             KeyCode::Esc if picker.filtering && picker.query.is_empty() => return Action::None,
             KeyCode::Esc if picker.filtering => {
                 picker.query.clear();
@@ -1178,7 +1198,9 @@ impl State {
             KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => return Action::None,
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('/') => picker.filtering = true,
-            KeyCode::Char(' ') => picker.mark(),
+            KeyCode::Char(' ') => {
+                picker.mark();
+            }
             KeyCode::Char('m') => {
                 picker.show_muted = !picker.show_muted;
                 picker.step(0);
@@ -1983,6 +2005,54 @@ mod tests {
     }
 
     #[test]
+    fn tab_marks_people_while_typing_and_enter_opens_the_group() {
+        let mut state = state();
+        let mut choices = vec![
+            choice(ChoiceKind::Channel, "C5", "#dev-team", ""),
+            choice(ChoiceKind::Dm, "D9", "@Jane", "jdoe Jane Doe SRE"),
+            choice(ChoiceKind::Person, "U3", "@Bob", "bob Bob Devlin"),
+        ];
+        choices[1].user = Some("U9".to_string());
+        choices[2].user = Some("U3".to_string());
+        state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        for c in "dev".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(press(KeyCode::Tab));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.marked.is_empty() && p.query == "dev"),
+            "a channel cannot be grouped, and what was typed stays"
+        );
+        state.key(press(KeyCode::Down));
+        state.key(press(KeyCode::Tab));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.marked == [2] && p.query.is_empty() && p.filtering),
+            "Tab marks Bob and clears the filter for the next name"
+        );
+        for c in "jane".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::None,
+            "with something typed, Enter still goes to the list"
+        );
+        state.key(press(KeyCode::Tab));
+        state.key(press(KeyCode::Char('/')));
+        for _ in 0..4 {
+            state.key(press(KeyCode::Backspace));
+        }
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowGroup {
+                users: vec!["U3".to_string(), "U9".to_string()],
+                compose: true
+            },
+            "Tab marks from the list too, and Enter on an empty filter opens the group"
+        );
+    }
+
+    #[test]
     fn n_picks_people_for_a_new_message_and_space_marks_several() {
         let mut state = state();
         assert_eq!(
@@ -2533,7 +2603,6 @@ mod tests {
             ),
             "Esc clears the filter and keeps the marks"
         );
-        state.key(press(KeyCode::Enter));
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::ShowGroup {
