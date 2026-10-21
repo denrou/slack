@@ -448,6 +448,59 @@ fn breaks_line(key: KeyEvent) -> bool {
     }
 }
 
+/// What a deleting key takes off the end of the text: Backspace a
+/// character; Ctrl-W, or Backspace with Option (Alt) or Ctrl, the word
+/// before it; Ctrl-U, or Backspace with Command (Super), the line. The
+/// modified Backspaces are a Mac's and reach the box only where the
+/// terminal reports them; the Ctrl keys are readline's and work
+/// everywhere.
+#[derive(Clone, Copy)]
+enum Cut {
+    Char,
+    Word,
+    Line,
+}
+
+impl Cut {
+    fn of(key: KeyEvent) -> Option<Cut> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let word = key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+        let line = key.modifiers.contains(KeyModifiers::SUPER);
+        match key.code {
+            KeyCode::Backspace if line => Some(Cut::Line),
+            KeyCode::Backspace if word => Some(Cut::Word),
+            KeyCode::Backspace => Some(Cut::Char),
+            KeyCode::Char('w') if control => Some(Cut::Word),
+            KeyCode::Char('u') if control => Some(Cut::Line),
+            _ => None,
+        }
+    }
+
+    /// A word is the run before the end and the blanks after it, as on a
+    /// Mac. A line break goes alone, for a word or a line as for a
+    /// character: the line above is never eaten by accident.
+    fn apply(self, text: &mut String) {
+        let keep = match self {
+            _ if text.ends_with('\n') => text.len() - 1,
+            Cut::Char => text.len() - text.chars().next_back().map_or(0, char::len_utf8),
+            Cut::Word => {
+                let end = text
+                    .trim_end_matches(|c: char| c != '\n' && c.is_whitespace())
+                    .len();
+                text[..end]
+                    .char_indices()
+                    .rev()
+                    .find(|(_, c)| c.is_whitespace())
+                    .map_or(0, |(at, c)| at + c.len_utf8())
+            }
+            Cut::Line => text.rfind('\n').map_or(0, |at| at + 1),
+        };
+        text.truncate(keep);
+    }
+}
+
 /// The word being completed: where it starts, its sigil and what follows,
 /// when the text ends in a word that starts with `@` or `#`.
 fn completing(text: &str) -> Option<(usize, char, &str)> {
@@ -887,8 +940,13 @@ impl State {
     }
 
     /// A key into the text of the reply box: Enter sends it, a line break
-    /// goes into it, Esc drops it.
+    /// goes into it, a deleting key (`Cut`) takes from its end, Esc drops
+    /// it.
     fn edit(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
+        if let Some(cut) = Cut::of(key) {
+            cut.apply(&mut draft.text);
+            return self.typed(draft);
+        }
         match key.code {
             KeyCode::Esc => Action::None,
             _ if breaks_line(key) => {
@@ -909,10 +967,6 @@ impl State {
                     }
                     None => Action::None,
                 }
-            }
-            KeyCode::Backspace => {
-                draft.text.pop();
-                self.typed(draft)
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 draft.text.push(c);
@@ -1926,9 +1980,64 @@ mod tests {
         let mut state = state();
         state.key(press(KeyCode::Enter));
         state.key(press(KeyCode::Char('h')));
-        state.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        state.key(control('d'));
         state.key(press(KeyCode::Char('i')));
         assert!(matches!(&state.mode, Mode::Compose(draft) if draft.text == "hi"));
+    }
+
+    #[test]
+    fn deleting_keys_take_a_character_a_word_or_the_line_back() {
+        let text = |state: &State| match &state.mode {
+            Mode::Compose(draft) => draft.text.clone(),
+            other => panic!("still writing, not {other:?}"),
+        };
+        let mut state = state();
+        state.key(press(KeyCode::Enter));
+        for c in "one two".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(control('j'));
+        for c in "three four".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(text(&state), "one two\nthree ", "Option-Backspace: a word");
+        state.key(control('w'));
+        assert_eq!(
+            text(&state),
+            "one two\n",
+            "Ctrl-W: the same, blanks included"
+        );
+        state.key(control('w'));
+        assert_eq!(text(&state), "one two", "a line break goes alone");
+        state.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER));
+        assert_eq!(text(&state), "", "Command-Backspace: the line");
+        for c in "a".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(control('j'));
+        for c in "bc".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(control('u'));
+        assert_eq!(text(&state), "a\n", "Ctrl-U: the line, not the one above");
+        state.key(press(KeyCode::Backspace));
+        assert_eq!(text(&state), "a");
+    }
+
+    #[test]
+    fn a_word_cut_takes_the_blanks_after_it() {
+        let cut = |text: &str, cut: Cut| {
+            let mut text = text.to_string();
+            cut.apply(&mut text);
+            text
+        };
+        assert_eq!(cut("hello world  ", Cut::Word), "hello ");
+        assert_eq!(cut("hello", Cut::Word), "");
+        assert_eq!(cut("one\n  ", Cut::Word), "one\n");
+        assert_eq!(cut("one\ntwo", Cut::Line), "one\n");
+        assert_eq!(cut("", Cut::Char), "");
+        assert_eq!(cut("é", Cut::Char), "");
     }
 
     #[test]
