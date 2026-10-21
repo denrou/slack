@@ -7,7 +7,9 @@ use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Focus, Mode, Picker, Row, Section, State, Viewport, row_of, rows};
+use super::model::{
+    Completion, Draft, Focus, Mode, Picker, Row, Section, State, Viewport, row_of, rows,
+};
 use crate::history::Message;
 use crate::names::Names;
 use crate::{mrkdwn, view};
@@ -27,7 +29,8 @@ const HELP: &[&str] = &[
     "Enter           reply: to the conversation, to the highlighted message, or in the open thread",
     "s               a message to the conversation, wherever you are in it",
     "n               new message: pick a channel or people (Space marks several), then write",
-    "c               open a channel or group you are in, or anyone: j/k move, / filters, Space marks",
+    "c               open a channel or group you are in, or anyone: type to filter, Enter to the list, m shows the muted",
+    "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "x               close an opened conversation",
     "u, y            open, or copy, a link of the highlighted message",
     "r               mark the selected one as read",
@@ -41,7 +44,11 @@ const HELP: &[&str] = &[
 /// messages pane, for `State::viewport`.
 pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Viewport {
     let bottom_height = match &state.mode {
-        Mode::Compose { text, .. } => compose_rows(text, frame.area().width) + 2,
+        Mode::Compose(draft) => {
+            compose_rows(&draft.text, frame.area().width)
+                + 2
+                + state.completion(draft).as_ref().map_or(0, list_rows)
+        }
         Mode::Help => HELP.len() as u16 + 2,
         Mode::Links { links, .. } => links.len() as u16 + 2,
         Mode::Browse | Mode::ConfirmReadAll | Mode::Pick(_) => 1,
@@ -360,6 +367,57 @@ fn draw_messages(
 /// screen, up to this many rows; a paste can bring several lines.
 const COMPOSE_ROWS: u16 = 6;
 
+/// The completion list shows this many entries at most.
+const COMPLETION_ROWS: u16 = 6;
+
+/// The rows the completion list takes above the reply box, border
+/// included.
+fn list_rows(completion: &Completion) -> u16 {
+    u16::try_from(completion.matches.len())
+        .unwrap_or(u16::MAX)
+        .min(COMPLETION_ROWS)
+        + 2
+}
+
+/// The completion list, right above the reply box: what the typed word
+/// begins, the highlighted entry reversed.
+fn draw_completion(frame: &mut Frame, area: Rect, state: &State, completion: &Completion) {
+    let candidates = state.candidates.as_deref().unwrap_or_default();
+    let lines: Vec<ListItem> = completion
+        .matches
+        .iter()
+        .filter_map(|&index| candidates.get(index))
+        .map(|candidate| {
+            ListItem::new(Line::from(vec![
+                Span::raw(" "),
+                Span::raw(candidate.insert.as_str()),
+                Span::raw("  "),
+                Span::styled(candidate.detail.as_str(), Style::new().dim()),
+            ]))
+        })
+        .collect();
+    let channels = completion
+        .matches
+        .first()
+        .and_then(|&index| candidates.get(index))
+        .is_some_and(|candidate| candidate.insert.starts_with('#'));
+    let kind = match (channels, completion.matches.len()) {
+        (true, 1) => "channel",
+        (true, _) => "channels",
+        (false, 1) => "person",
+        (false, _) => "people",
+    };
+    let title = format!(
+        " {} {kind} · Up/Down move, Tab or Enter picks, Esc closes ",
+        completion.matches.len()
+    );
+    let list = List::new(lines)
+        .block(Block::bordered().title(title))
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    let mut list_state = ListState::default().with_selected(Some(completion.pick));
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
 fn compose_rows(text: &str, width: u16) -> u16 {
     let inner = width.saturating_sub(2);
     if inner == 0 {
@@ -375,7 +433,19 @@ fn compose_rows(text: &str, width: u16) -> u16 {
 
 fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
     match &state.mode {
-        Mode::Compose { text, thread_ts } => {
+        Mode::Compose(draft) => {
+            let completion = state.completion(draft);
+            let [above, area] = Layout::vertical([
+                Constraint::Length(completion.as_ref().map_or(0, list_rows)),
+                Constraint::Fill(1),
+            ])
+            .areas(area);
+            if let Some(completion) = &completion {
+                draw_completion(frame, above, state, completion);
+            }
+            let Draft {
+                text, thread_ts, ..
+            } = draft;
             let to = state
                 .selected_item()
                 .map_or_else(String::new, |item| item.title.clone());
@@ -397,7 +467,14 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 Some(_) => format!(" Reply to {to}"),
                 None => format!(" Message to {to}"),
             };
-            let title = format!("{title} · Enter sends, Esc cancels ");
+            // An error from a send, or a load under way, takes the hint's place.
+            let title = match &state.status {
+                Some(status) => format!("{title} · {status} "),
+                None if completion.is_some() => {
+                    format!("{title} · Tab picks, Esc closes the list ")
+                }
+                None => format!("{title} · Enter sends, Esc cancels "),
+            };
             let mut lines: Vec<Line> = text.split('\n').map(Line::from).collect();
             if let Some(last) = lines.last_mut() {
                 last.push_span(Span::styled("▏", Style::new().dim()));
@@ -459,9 +536,13 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
         }
         Mode::Pick(picker) => {
             let keys = match (picker.filtering, picker.compose) {
-                (true, _) => "type to filter  Enter back to the list  Esc clear",
-                (false, false) => "j/k move  / filter  Space mark people  Enter open  Esc cancel",
-                (false, true) => "j/k move  / filter  Space mark people  Enter write  Esc cancel",
+                (true, _) => "type to filter  Enter to the list  Esc clear",
+                (false, false) => {
+                    "j/k move  / filter  Space mark people  m muted  Enter open  Esc cancel"
+                }
+                (false, true) => {
+                    "j/k move  / filter  Space mark people  m muted  Enter write  Esc cancel"
+                }
             };
             let marked: Vec<&str> = picker
                 .marked
@@ -473,8 +554,12 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
             } else {
                 format!(" · to {}", marked.join(", "))
             };
+            let hidden = match picker.hidden_muted() {
+                0 => String::new(),
+                n => format!(" · {n} muted hidden"),
+            };
             let text = format!(
-                "{} of {}{to}  {keys}",
+                "{} of {}{hidden}{to}  {keys}",
                 picker.matches().len(),
                 picker.choices.len()
             );
@@ -520,7 +605,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
-    use super::super::model::{Item, Section};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::model::{Candidate, Item, Section};
     use super::*;
 
     fn message(ts: &str, text: &str) -> Message {
@@ -650,6 +737,49 @@ mod tests {
         );
         assert_eq!(viewport.anchor, 50 - 27);
         assert_eq!(viewport.in_view, 27);
+    }
+
+    #[test]
+    fn the_completion_list_sits_above_the_reply_box() {
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let candidate = |insert: &str, detail: &str, search: &str| Candidate {
+            insert: insert.to_string(),
+            detail: detail.to_string(),
+            search: search.to_string(),
+        };
+        let mut state = history(&["hello"], None);
+        state.candidates = Some(vec![
+            candidate("@jdoe", "Jane Doe", "jdoe jane doe"),
+            candidate("@jsmith", "John Smith · SRE", "jsmith john smith"),
+        ]);
+        state.key(press(KeyCode::Enter));
+        for c in "hi @j".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        let (buffer, _) = render(&state, 100, 30);
+        let list = row_with(&buffer, "@jdoe").expect("the list");
+        let reply = row_with(&buffer, "hi @j").expect("the box");
+        assert!(list < reply, "the list sits above the box");
+        assert!(row(&buffer, list).contains("Jane Doe"));
+        assert!(row_with(&buffer, " 2 people · ").is_some());
+        assert!(row_with(&buffer, "Tab picks, Esc closes the list").is_some());
+        let x = column_of(&buffer, list, "@jdoe").expect("the entry");
+        assert!(
+            has(&buffer, x, list, Modifier::REVERSED),
+            "the first is highlighted"
+        );
+        assert!(!has(&buffer, x, list + 1, Modifier::REVERSED));
+
+        state.key(press(KeyCode::Esc));
+        let (buffer, _) = render(&state, 100, 30);
+        assert!(row_with(&buffer, "@jdoe").is_none(), "Esc closes the list");
+        assert!(row_with(&buffer, "Enter sends, Esc cancels").is_some());
+        state.status = Some("Error: channel_not_found".to_string());
+        let (buffer, _) = render(&state, 100, 30);
+        assert!(
+            row_with(&buffer, "· Error: channel_not_found ").is_some(),
+            "a status takes the hint's place in the title"
+        );
     }
 
     #[test]

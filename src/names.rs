@@ -95,6 +95,23 @@ impl Names {
         self.users.get(id)
     }
 
+    /// A cache with these entries, for the tests of other modules.
+    #[cfg(test)]
+    pub fn with(users: Vec<(&str, User)>, channels: Vec<(&str, Channel)>) -> Names {
+        Names {
+            users: users
+                .into_iter()
+                .map(|(id, user)| (id.to_string(), user))
+                .collect(),
+            channels: channels
+                .into_iter()
+                .map(|(id, channel)| (id.to_string(), channel))
+                .collect(),
+            dirty: false,
+            path: None,
+        }
+    }
+
     /// Everyone in the cache, by id.
     pub fn users(&self) -> impl Iterator<Item = (&str, &User)> {
         self.users.iter().map(|(id, user)| (id.as_str(), user))
@@ -243,14 +260,17 @@ impl Names {
         self.walk(client, "users.list", &[], Names::add_users_page)
     }
 
-    fn find_channel(&self, name: &str) -> Option<String> {
+    /// The id of channel `name` (no sigil) in the cache, without a call.
+    pub fn find_channel(&self, name: &str) -> Option<String> {
         self.channels
             .iter()
             .find(|(_, c)| !c.is_im && !c.is_mpim && c.name.eq_ignore_ascii_case(name))
             .map(|(id, _)| id.clone())
     }
 
-    fn find_user(&self, name: &str) -> Option<String> {
+    /// The id of the person whose handle or display name is `name` (no
+    /// sigil) in the cache, without a call.
+    pub fn find_user(&self, name: &str) -> Option<String> {
         let exact = |field: &str| field.eq_ignore_ascii_case(name);
         self.users
             .iter()

@@ -1,5 +1,6 @@
 //! `slack send`: post a message, in a thread when asked, and print where
-//! it landed. The one command besides `read` that writes to Slack.
+//! it landed. The one command besides `read` that writes to Slack. The
+//! `@handle` and `#channel` words the name cache knows become mentions.
 
 use std::io::{self, IsTerminal, Read};
 
@@ -8,6 +9,7 @@ use serde_json::Value;
 
 use crate::api::Client;
 use crate::history::is_ts;
+use crate::mention;
 use crate::names::Names;
 use crate::target::{self, parse_permalink};
 
@@ -41,8 +43,12 @@ pub fn run(
     if text.trim().is_empty() {
         bail!("nothing to send: the message is empty");
     }
+    let text = mention::link(text, names);
 
-    let mut params = vec![("channel", target.channel.as_str()), ("text", text)];
+    let mut params = vec![
+        ("channel", target.channel.as_str()),
+        ("text", text.as_str()),
+    ];
     if let Some(ts) = &thread_ts {
         params.push(("thread_ts", ts));
     }

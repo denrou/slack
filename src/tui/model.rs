@@ -259,6 +259,8 @@ pub struct Choice {
     /// What the filter may match besides the label: a handle, a title.
     pub search: String,
     pub note: String,
+    /// Muted in Slack: out of the list until `m` shows them.
+    pub muted: bool,
     /// The read cursor, when the conversation has unreads.
     pub unread_from: Option<String>,
     /// The person behind a direct message, or the person: what a group
@@ -273,8 +275,11 @@ pub struct Picker {
     pub query: String,
     /// Index into `matches()`.
     pub selected: usize,
-    /// The keys go to the filter (after `/`) rather than to the list.
+    /// The keys go to the filter (where the picker opens, and after
+    /// `/`) rather than to the list.
     pub filtering: bool,
+    /// `m`: the muted conversations are listed too.
+    pub show_muted: bool,
     /// People marked with Space, as indexes into `choices`: Enter opens
     /// their group message instead of the highlighted choice.
     pub marked: Vec<usize>,
@@ -289,22 +294,34 @@ impl Picker {
             choices,
             query: String::new(),
             selected: 0,
-            filtering: false,
+            filtering: true,
+            show_muted: false,
             marked: Vec::new(),
             compose,
         }
     }
 
-    /// The choices the query keeps, as indexes into `choices`.
+    /// The choices the query keeps, as indexes into `choices`; the muted
+    /// ones only once `m` asked for them.
     pub fn matches(&self) -> Vec<usize> {
         self.choices
             .iter()
             .enumerate()
+            .filter(|(_, choice)| self.show_muted || !choice.muted)
             .filter(|(_, choice)| {
                 directory::matches(&self.query, &format!("{} {}", choice.label, choice.search))
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// The muted conversations kept out of the list.
+    pub fn hidden_muted(&self) -> usize {
+        if self.show_muted {
+            0
+        } else {
+            self.choices.iter().filter(|choice| choice.muted).count()
+        }
     }
 
     fn picked(&self) -> Option<Choice> {
@@ -357,14 +374,83 @@ impl Picker {
     }
 }
 
+/// A message being written in the reply box, to the selected item.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Draft {
+    pub text: String,
+    /// The thread it goes in, if any.
+    pub thread_ts: Option<String>,
+    /// The highlighted entry of the completion list, None once Esc closed
+    /// the list; typing opens it again.
+    pub pick: Option<usize>,
+}
+
+impl Draft {
+    pub fn new(thread_ts: Option<String>) -> Draft {
+        Draft {
+            text: String::new(),
+            thread_ts,
+            pick: Some(0),
+        }
+    }
+
+    /// The chosen entry takes the place of the word being completed, a
+    /// space after it.
+    fn accept(&mut self, start: usize, insert: &str) {
+        self.text.truncate(start);
+        self.text.push_str(insert);
+        self.text.push(' ');
+        self.pick = Some(0);
+    }
+}
+
+/// What the reply box completes: `@handle` for a person, `#name` for a
+/// channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// What lands in the text.
+    pub insert: String,
+    /// Shown dimmed next to it: the person's name and title, a channel's
+    /// notes.
+    pub detail: String,
+    /// Lowercase words the typed part may begin: the handle, the names.
+    pub search: String,
+}
+
+impl Candidate {
+    fn begins(&self, word: &str) -> bool {
+        word.is_empty() || self.search.split_whitespace().any(|w| w.starts_with(word))
+    }
+}
+
+/// The completion list under the reply box.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Completion {
+    /// Where the word being completed starts in the text.
+    pub start: usize,
+    /// The candidates it begins, as indexes into `State::candidates`.
+    pub matches: Vec<usize>,
+    /// Index into `matches`.
+    pub pick: usize,
+}
+
+/// The word being completed: where it starts, its sigil and what follows,
+/// when the text ends in a word that starts with `@` or `#`.
+fn completing(text: &str) -> Option<(usize, char, &str)> {
+    let start = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(at, c)| at + c.len_utf8());
+    let word = &text[start..];
+    let sigil = word.chars().next().filter(|c| matches!(c, '@' | '#'))?;
+    Some((start, sigil, &word[sigil.len_utf8()..]))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Browse,
-    /// Writing a reply: to the selected item, or in `thread_ts`.
-    Compose {
-        text: String,
-        thread_ts: Option<String>,
-    },
+    Compose(Draft),
     ConfirmReadAll,
     Help,
     Pick(Picker),
@@ -404,6 +490,9 @@ pub enum Action {
     OpenPicker {
         compose: bool,
     },
+    /// Load the directory for the reply box's completion, the first time
+    /// a `@` or `#` word is typed.
+    LoadCandidates,
     /// Open a conversation from the picker with its recent history.
     Show {
         choice: Choice,
@@ -450,6 +539,9 @@ pub struct State {
     pub mode: Mode,
     /// Shown in the bottom line until the next key.
     pub status: Option<String>,
+    /// What the reply box completes, once loaded (empty after a failed
+    /// load, so the box works without a list).
+    pub candidates: Option<Vec<Candidate>>,
     pub me: Option<String>,
     pub focus: Focus,
     /// The highlighted message of the pane, when the pane has the focus.
@@ -472,7 +564,31 @@ impl State {
             thread: None,
             viewport: Viewport::default(),
             pending_g: false,
+            candidates: None,
         }
+    }
+
+    /// The completion list for the reply box: the candidates that the
+    /// `@word` or `#word` ending the text begins. None once Esc closed the
+    /// list, before the names are loaded, or when nothing matches.
+    pub fn completion(&self, draft: &Draft) -> Option<Completion> {
+        let pick = draft.pick?;
+        let (start, sigil, word) = completing(&draft.text)?;
+        let word = word.to_lowercase();
+        let matches: Vec<usize> = self
+            .candidates
+            .as_ref()?
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.insert.starts_with(sigil) && candidate.begins(&word))
+            .map(|(index, _)| index)
+            .collect();
+        let last = matches.len().checked_sub(1)?;
+        Some(Completion {
+            start,
+            matches,
+            pick: pick.min(last),
+        })
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -576,7 +692,7 @@ impl State {
         }
         match std::mem::replace(&mut self.mode, Mode::Browse) {
             Mode::Browse => self.browse(key),
-            Mode::Compose { text, thread_ts } => self.compose(text, thread_ts, key),
+            Mode::Compose(draft) => self.compose(draft, key),
             Mode::ConfirmReadAll => match key.code {
                 KeyCode::Char('y' | 'Y') => Action::MarkAllRead,
                 _ => Action::None,
@@ -592,12 +708,11 @@ impl State {
     /// rather than read as keys.
     pub fn paste(&mut self, pasted: &str) -> Action {
         match std::mem::replace(&mut self.mode, Mode::Browse) {
-            Mode::Compose {
-                mut text,
-                thread_ts,
-            } => {
-                text.push_str(&pasted.replace("\r\n", "\n").replace('\r', "\n"));
-                self.mode = Mode::Compose { text, thread_ts };
+            Mode::Compose(mut draft) => {
+                draft
+                    .text
+                    .push_str(&pasted.replace("\r\n", "\n").replace('\r', "\n"));
+                return self.typed(draft);
             }
             Mode::Pick(mut picker) if picker.filtering => {
                 picker
@@ -691,10 +806,7 @@ impl State {
                 None => return Action::None,
             },
         };
-        self.mode = Mode::Compose {
-            text: String::new(),
-            thread_ts,
-        };
+        self.mode = Mode::Compose(Draft::new(thread_ts));
         Action::None
     }
 
@@ -703,10 +815,7 @@ impl State {
     /// the thread, since that is the conversation it stands for).
     pub fn compose_to_conversation(&mut self) {
         if let Some(item) = self.selected {
-            self.mode = Mode::Compose {
-                text: String::new(),
-                thread_ts: self.items[item].thread_ts.clone(),
-            };
+            self.mode = Mode::Compose(Draft::new(self.items[item].thread_ts.clone()));
         }
     }
 
@@ -729,47 +838,93 @@ impl State {
         }
     }
 
-    fn compose(&mut self, mut text: String, thread_ts: Option<String>, key: KeyEvent) -> Action {
+    /// The reply box. Enter sends and Esc gives up, unless a completion
+    /// list is open above the box: then Tab or Enter take the highlighted
+    /// entry, Up and Down (Ctrl-p, Ctrl-n too) move in it, Esc closes it.
+    fn compose(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(completion) = self.completion(&draft) {
+            let last = completion.matches.len() - 1;
+            let down = Some((completion.pick + 1).min(last));
+            let up = Some(completion.pick.saturating_sub(1));
+            match key.code {
+                KeyCode::Tab | KeyCode::Enter => {
+                    let insert = self
+                        .candidates
+                        .as_ref()
+                        .and_then(|candidates| candidates.get(completion.matches[completion.pick]))
+                        .map(|candidate| candidate.insert.clone());
+                    if let Some(insert) = insert {
+                        draft.accept(completion.start, &insert);
+                    }
+                }
+                KeyCode::Down => draft.pick = down,
+                KeyCode::Char('n') if control => draft.pick = down,
+                KeyCode::Up | KeyCode::BackTab => draft.pick = up,
+                KeyCode::Char('p') if control => draft.pick = up,
+                KeyCode::Esc => draft.pick = None,
+                _ => return self.edit(draft, key),
+            }
+            self.mode = Mode::Compose(draft);
+            return Action::None;
+        }
+        self.edit(draft, key)
+    }
+
+    /// A key into the text of the reply box: Enter sends it, Esc drops it.
+    fn edit(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => Action::None,
             KeyCode::Enter => {
-                let trimmed = text.trim().to_string();
+                let trimmed = draft.text.trim().to_string();
                 match self.selected {
                     Some(item) if !trimmed.is_empty() => Action::Send {
                         item,
                         text: trimmed,
-                        thread_ts,
+                        thread_ts: draft.thread_ts,
                     },
                     Some(_) => {
-                        self.mode = Mode::Compose { text, thread_ts };
+                        self.mode = Mode::Compose(draft);
                         Action::None
                     }
                     None => Action::None,
                 }
             }
             KeyCode::Backspace => {
-                text.pop();
-                self.mode = Mode::Compose { text, thread_ts };
-                Action::None
+                draft.text.pop();
+                self.typed(draft)
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                text.push(c);
-                self.mode = Mode::Compose { text, thread_ts };
-                Action::None
+                draft.text.push(c);
+                self.typed(draft)
             }
             _ => {
-                self.mode = Mode::Compose { text, thread_ts };
+                self.mode = Mode::Compose(draft);
                 Action::None
             }
         }
     }
 
-    /// The picker: `j`/`k`, `gg` and `G` move through the choices, Space
-    /// marks a person for a group message, Enter or `l` opens, Esc or
-    /// `h` gives up, `q` quits as everywhere. `/` takes the keys to the
-    /// filter, where typing narrows, until Enter brings them back to the
-    /// narrowed list (Esc drops the filter instead). The arrows, Tab and
-    /// Ctrl-n/p move in both.
+    /// The text changed: the completion list opens again, and the names
+    /// it needs are loaded the first time a `@` or `#` word appears.
+    fn typed(&mut self, mut draft: Draft) -> Action {
+        draft.pick = Some(0);
+        let load = self.candidates.is_none() && completing(&draft.text).is_some();
+        self.mode = Mode::Compose(draft);
+        if load {
+            Action::LoadCandidates
+        } else {
+            Action::None
+        }
+    }
+
+    /// The picker opens in its filter, where typing narrows the list,
+    /// until Enter hands the keys to the narrowed list (Esc clears what
+    /// was typed, and with nothing typed closes the picker). In the list
+    /// `j`/`k`, `gg` and `G` move, `/` goes back to the filter, Space
+    /// marks a person for a group message, `m` shows the muted ones,
+    /// Enter or `l` opens, Esc or `h` gives up, `q` quits as everywhere.
+    /// The arrows, Tab and Ctrl-n/p move in both.
     fn pick(&mut self, mut picker: Picker, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let after_g = std::mem::take(&mut self.pending_g);
@@ -779,11 +934,12 @@ impl State {
             KeyCode::Char('n') if control => picker.step(1),
             KeyCode::Char('p') if control => picker.step(-1),
             KeyCode::Enter if picker.filtering => picker.filtering = false,
+            KeyCode::Esc if picker.filtering && picker.query.is_empty() => return Action::None,
             KeyCode::Esc if picker.filtering => {
                 picker.query.clear();
                 picker.selected = 0;
-                picker.filtering = false;
             }
+            KeyCode::Left if picker.filtering => {}
             KeyCode::Backspace if picker.filtering => {
                 picker.query.pop();
                 picker.selected = 0;
@@ -801,6 +957,10 @@ impl State {
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('/') => picker.filtering = true,
             KeyCode::Char(' ') => picker.mark(),
+            KeyCode::Char('m') => {
+                picker.show_muted = !picker.show_muted;
+                picker.step(0);
+            }
             KeyCode::Char('j') => picker.step(1),
             KeyCode::Char('k') => picker.step(-1),
             KeyCode::Char('g') if after_g => picker.step(isize::MIN),
@@ -1010,8 +1170,17 @@ mod tests {
             label: label.to_string(),
             search: search.to_string(),
             note: String::new(),
+            muted: false,
             unread_from: None,
             user: None,
+        }
+    }
+
+    fn candidate(insert: &str, detail: &str, search: &str) -> Candidate {
+        Candidate {
+            insert: insert.to_string(),
+            detail: detail.to_string(),
+            search: search.to_string(),
         }
     }
 
@@ -1045,13 +1214,7 @@ mod tests {
     fn replying_from_the_list_goes_through_the_compose_mode() {
         let mut state = state();
         assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
-        assert_eq!(
-            state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: None
-            }
-        );
+        assert_eq!(state.mode, Mode::Compose(Draft::new(None)));
         for c in "ok!".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -1073,7 +1236,7 @@ mod tests {
             Action::None,
             "blank text is not sent"
         );
-        assert!(matches!(state.mode, Mode::Compose { .. }));
+        assert!(matches!(state.mode, Mode::Compose(_)));
         state.key(press(KeyCode::Esc));
         assert_eq!(state.mode, Mode::Browse);
 
@@ -1083,10 +1246,7 @@ mod tests {
         state.key(press(KeyCode::Enter));
         assert_eq!(
             state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: Some("2.000100".to_string())
-            }
+            Mode::Compose(Draft::new(Some("2.000100".to_string())))
         );
     }
 
@@ -1102,10 +1262,7 @@ mod tests {
         assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
         assert_eq!(
             state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: Some("1.000200".to_string())
-            },
+            Mode::Compose(Draft::new(Some("1.000200".to_string()))),
             "Enter on a message replies in its thread"
         );
         state.key(press(KeyCode::Esc));
@@ -1129,10 +1286,7 @@ mod tests {
         state.key(press(KeyCode::Enter));
         assert_eq!(
             state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: Some("1.000200".to_string())
-            }
+            Mode::Compose(Draft::new(Some("1.000200".to_string())))
         );
         state.key(press(KeyCode::Esc));
 
@@ -1251,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_moves_with_j_and_k_and_filters_after_a_slash() {
+    fn the_picker_opens_in_its_filter_and_enter_hands_the_keys_to_the_list() {
         let mut state = state();
         assert_eq!(
             state.key(press(KeyCode::Char('c'))),
@@ -1264,27 +1418,19 @@ mod tests {
             choice(ChoiceKind::Person, "U3", "@Bob", "bob Bob Devlin"),
         ];
         state.mode = Mode::Pick(Picker::new(choices.clone(), false));
-        state.key(press(KeyCode::Char('j')));
-        state.key(press(KeyCode::Char('j')));
-        assert!(
-            matches!(&state.mode, Mode::Pick(p) if p.selected == 2 && p.query.is_empty()),
-            "j moves, it does not type"
-        );
-
-        state.key(press(KeyCode::Char('/')));
         for c in "dev".chars() {
             state.key(press(KeyCode::Char(c)));
         }
         let Mode::Pick(picker) = &state.mode else {
             panic!("still picking");
         };
-        assert!(picker.filtering);
+        assert!(picker.filtering, "the keys type straight away");
         assert_eq!(picker.matches(), [0, 3], "label or search text");
-        assert_eq!(picker.selected, 0, "typing starts the list over");
+        assert_eq!(picker.selected, 0);
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::None,
-            "Enter brings the keys back to the list"
+            "Enter hands the keys to the list"
         );
         state.key(press(KeyCode::Char('j')));
         state.key(press(KeyCode::Char('j')));
@@ -1293,7 +1439,16 @@ mod tests {
         };
         assert!(!picker.filtering);
         assert_eq!(picker.query, "dev", "the filter stays");
-        assert_eq!(picker.selected, 1, "stops at the last match");
+        assert_eq!(picker.selected, 1, "j moves and stops at the last match");
+        state.key(press(KeyCode::Char('/')));
+        state.key(press(KeyCode::Char('-')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.filtering && p.query == "dev-" && p.selected == 0),
+            "/ goes back to the filter, where typing goes on"
+        );
+        state.key(press(KeyCode::Backspace));
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('j')));
         assert_eq!(
             state.key(press(KeyCode::Char('l'))),
             Action::Show {
@@ -1304,7 +1459,6 @@ mod tests {
         assert_eq!(state.mode, Mode::Browse);
 
         state.mode = Mode::Pick(Picker::new(choices.clone(), false));
-        state.key(press(KeyCode::Char('/')));
         for c in "zzz".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -1319,13 +1473,18 @@ mod tests {
         assert!(matches!(&state.mode, Mode::Pick(p) if p.query == "zz"));
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
         assert!(
-            matches!(&state.mode, Mode::Pick(p) if p.query.is_empty() && !p.filtering),
-            "Esc drops the filter first"
+            matches!(&state.mode, Mode::Pick(p) if p.query.is_empty() && p.filtering),
+            "Esc clears what was typed"
         );
         assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
-        assert_eq!(state.mode, Mode::Browse, "then closes the picker");
+        assert_eq!(
+            state.mode,
+            Mode::Browse,
+            "with nothing typed, it closes the picker"
+        );
 
         state.mode = Mode::Pick(Picker::new(choices, false));
+        state.key(press(KeyCode::Enter));
         state.key(press(KeyCode::Char('G')));
         assert!(
             matches!(&state.mode, Mode::Pick(p) if p.selected == 3),
@@ -1337,10 +1496,168 @@ mod tests {
             matches!(&state.mode, Mode::Pick(p) if p.selected == 0),
             "gg: the first"
         );
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
+        assert_eq!(state.mode, Mode::Browse, "Esc closes from the list");
+
+        state.mode = Mode::Pick(Picker::new(Vec::new(), false));
+        assert_eq!(
+            state.key(press(KeyCode::Char('q'))),
+            Action::None,
+            "q types in the filter"
+        );
+        state.key(press(KeyCode::Enter));
         assert_eq!(
             state.key(press(KeyCode::Char('q'))),
             Action::Quit,
-            "q quits from anywhere"
+            "and quits from the list, as everywhere"
+        );
+    }
+
+    #[test]
+    fn muted_conversations_stay_out_of_the_picker_until_m() {
+        let mut state = state();
+        let mut choices = vec![
+            choice(ChoiceKind::Channel, "C5", "#dev-team", ""),
+            choice(ChoiceKind::Channel, "C7", "#noise", ""),
+            choice(ChoiceKind::Dm, "D9", "@Jane", "jdoe Jane Doe SRE"),
+        ];
+        choices[1].muted = true;
+        state.mode = Mode::Pick(Picker::new(choices, false));
+        let Mode::Pick(picker) = &state.mode else {
+            panic!("still picking");
+        };
+        assert_eq!(picker.matches(), [0, 2]);
+        assert_eq!(picker.hidden_muted(), 1);
+        state.key(press(KeyCode::Char('m')));
+        assert!(
+            matches!(&state.mode, Mode::Pick(p) if p.query == "m"),
+            "in the filter, m types"
+        );
+        state.key(press(KeyCode::Backspace));
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('G')));
+        state.key(press(KeyCode::Char('m')));
+        let Mode::Pick(picker) = &state.mode else {
+            panic!("still picking");
+        };
+        assert_eq!(picker.matches(), [0, 1, 2], "m shows the muted ones");
+        assert_eq!(picker.hidden_muted(), 0);
+        state.key(press(KeyCode::Char('G')));
+        state.key(press(KeyCode::Char('m')));
+        let Mode::Pick(picker) = &state.mode else {
+            panic!("still picking");
+        };
+        assert_eq!(picker.matches(), [0, 2], "m again hides them");
+        assert_eq!(
+            picker.selected, 1,
+            "the selection stays on the shorter list"
+        );
+    }
+
+    #[test]
+    fn the_reply_box_completes_people_and_channels() {
+        let mut state = state();
+        state.key(press(KeyCode::Enter));
+        for c in "hi ".chars() {
+            assert_eq!(state.key(press(KeyCode::Char(c))), Action::None);
+        }
+        assert_eq!(
+            state.key(press(KeyCode::Char('@'))),
+            Action::LoadCandidates,
+            "the first @ loads the names"
+        );
+        state.candidates = Some(vec![
+            candidate("@fvallon", "Fabien Vallon", "fvallon fabien vallon"),
+            candidate("@jdoe", "Jane Doe · SRE", "jdoe jane doe"),
+            candidate("#dev-team", "", "dev-team dev team"),
+        ]);
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert_eq!(
+            state.completion(draft).map(|c| c.matches),
+            Some(vec![0, 1]),
+            "@ alone lists everyone"
+        );
+        state.key(press(KeyCode::Down));
+        state.key(press(KeyCode::Down));
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert_eq!(
+            state.completion(draft).map(|c| c.pick),
+            Some(1),
+            "Down stops at the last"
+        );
+        state.key(press(KeyCode::Char('v')));
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert_eq!(
+            state.completion(draft).map(|c| (c.matches, c.pick)),
+            Some((vec![0], 0)),
+            "a typed letter narrows by handle or name and starts over"
+        );
+        assert_eq!(state.key(press(KeyCode::Tab)), Action::None);
+        assert!(
+            matches!(&state.mode, Mode::Compose(d) if d.text == "hi @fvallon "),
+            "Tab takes the highlighted one, a space after it"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Send {
+                item: 0,
+                text: "hi @fvallon".to_string(),
+                thread_ts: None
+            },
+            "with the list closed, Enter sends"
+        );
+
+        state.key(press(KeyCode::Enter));
+        for c in "#te".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert_eq!(
+            state.completion(draft).map(|c| c.matches),
+            Some(vec![2]),
+            "# completes channels, on any part of the name"
+        );
+        state.key(press(KeyCode::Enter));
+        assert!(
+            matches!(&state.mode, Mode::Compose(d) if d.text == "#dev-team "),
+            "Enter takes it too"
+        );
+        for c in "@j".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
+        assert!(
+            matches!(&state.mode, Mode::Compose(d) if d.pick.is_none()),
+            "Esc closes the list and keeps the text"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Send {
+                item: 0,
+                text: "#dev-team @j".to_string(),
+                thread_ts: None
+            }
+        );
+        state.key(press(KeyCode::Enter));
+        for c in "@zz".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Send {
+                item: 0,
+                text: "@zz".to_string(),
+                thread_ts: None
+            },
+            "no match, no list: Enter sends as typed"
         );
     }
 
@@ -1359,6 +1676,7 @@ mod tests {
         choices[1].user = Some("U9".to_string());
         choices[2].user = Some("U3".to_string());
         state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        state.key(press(KeyCode::Enter));
         state.key(press(KeyCode::Char(' ')));
         assert!(
             matches!(&state.mode, Mode::Pick(p) if p.marked.is_empty()),
@@ -1378,6 +1696,7 @@ mod tests {
         );
 
         state.mode = Mode::Pick(Picker::new(choices.clone(), true));
+        state.key(press(KeyCode::Enter));
         state.key(press(KeyCode::Char('j')));
         state.key(press(KeyCode::Char(' ')));
         state.key(press(KeyCode::Char(' ')));
@@ -1400,13 +1719,7 @@ mod tests {
         };
         state.open_item(Item::opened("D3".into(), "@Bob".into(), page, None));
         state.compose_to_conversation();
-        assert_eq!(
-            state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: None
-            }
-        );
+        assert_eq!(state.mode, Mode::Compose(Draft::new(None)));
     }
 
     #[test]
@@ -1417,10 +1730,7 @@ mod tests {
         state.key(press(KeyCode::Char('s')));
         assert_eq!(
             state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: None
-            },
+            Mode::Compose(Draft::new(None)),
             "not the highlighted message's thread"
         );
         state.key(press(KeyCode::Esc));
@@ -1435,10 +1745,7 @@ mod tests {
         state.key(press(KeyCode::Char('s')));
         assert_eq!(
             state.mode,
-            Mode::Compose {
-                text: String::new(),
-                thread_ts: None
-            },
+            Mode::Compose(Draft::new(None)),
             "not the open thread either"
         );
     }
@@ -1601,7 +1908,7 @@ mod tests {
         state.key(press(KeyCode::Char('h')));
         state.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         state.key(press(KeyCode::Char('i')));
-        assert!(matches!(&state.mode, Mode::Compose { text, .. } if text == "hi"));
+        assert!(matches!(&state.mode, Mode::Compose(draft) if draft.text == "hi"));
     }
 
     #[test]
@@ -1613,7 +1920,7 @@ mod tests {
         state.paste("Thanks!\r\nWill look tomorrow");
         assert!(matches!(
             &state.mode,
-            Mode::Compose { text, .. } if text == "Thanks!\nWill look tomorrow"
+            Mode::Compose(draft) if draft.text == "Thanks!\nWill look tomorrow"
         ));
         let sent = state.key(press(KeyCode::Enter));
         assert!(matches!(
@@ -1691,6 +1998,7 @@ mod tests {
         choices[1].user = Some("U9".to_string());
         choices[2].user = Some("U3".to_string());
         state.mode = Mode::Pick(Picker::new(choices, true));
+        state.key(press(KeyCode::Enter));
         state.key(press(KeyCode::Char('j')));
         state.key(press(KeyCode::Char(' ')));
         state.key(press(KeyCode::Char('/')));
@@ -1710,8 +2018,9 @@ mod tests {
                 &state.mode,
                 Mode::Pick(p) if p.query.is_empty() && p.selected == 0 && p.marked == [1, 2]
             ),
-            "Esc drops the filter and keeps the marks"
+            "Esc clears the filter and keeps the marks"
         );
+        state.key(press(KeyCode::Enter));
         assert_eq!(
             state.key(press(KeyCode::Enter)),
             Action::ShowGroup {

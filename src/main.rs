@@ -8,6 +8,7 @@ mod counts;
 mod directory;
 mod history;
 mod lastview;
+mod mention;
 mod mrkdwn;
 mod names;
 mod par;

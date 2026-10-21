@@ -24,14 +24,16 @@ use ratatui::crossterm::execute;
 use serde_json::Value;
 
 use self::model::{
-    Action, Choice, ChoiceKind, Item, Mode, Picker, Section, State, ThreadPane, Viewport,
+    Action, Candidate, Choice, ChoiceKind, Draft, Item, Mode, Picker, Section, State, ThreadPane,
+    Viewport,
 };
 use crate::api::{self, Client};
 use crate::counts::Kind;
+use crate::directory::{self, Listed};
 use crate::history::Message;
 use crate::names::Names;
 use crate::style::Style;
-use crate::{counts, directory, history, lastview, mrkdwn, read, replies, target, view, warn};
+use crate::{counts, history, lastview, mention, mrkdwn, read, replies, target, view, warn};
 
 pub fn run(
     client: &Client,
@@ -208,7 +210,11 @@ impl App<'_> {
                     Ok(title) => self.after_send(item, &title, thread_ts.as_deref()),
                     Err(err) => {
                         // The text stays in the box: a timeout must not cost it.
-                        self.state.mode = Mode::Compose { text, thread_ts };
+                        self.state.mode = Mode::Compose(Draft {
+                            text,
+                            thread_ts,
+                            pick: None,
+                        });
                         self.fail(err)
                     }
                 }
@@ -247,13 +253,29 @@ impl App<'_> {
             }
             Action::OpenPicker { compose } => {
                 self.busy(terminal, "Loading the directory…")?;
-                match self.choices() {
-                    Ok(choices) => {
-                        self.state.mode = Mode::Pick(Picker::new(choices, compose));
+                match self.directory() {
+                    Ok(listed) => {
+                        self.state.candidates = Some(self.candidates(&listed));
+                        self.state.mode = Mode::Pick(Picker::new(self.choices(&listed), compose));
                         self.state.status = None;
                         Ok(())
                     }
                     Err(err) => self.fail(err),
+                }
+            }
+            Action::LoadCandidates => {
+                self.busy(terminal, "Loading the names…")?;
+                match self.directory() {
+                    Ok(listed) => {
+                        self.state.candidates = Some(self.candidates(&listed));
+                        self.state.status = None;
+                        Ok(())
+                    }
+                    Err(err) => {
+                        // Not again at every key: the box works without a list.
+                        self.state.candidates = Some(Vec::new());
+                        self.fail(err)
+                    }
                 }
             }
             Action::Show { choice, compose } => {
@@ -351,7 +373,8 @@ impl App<'_> {
     /// answer.
     fn send(&mut self, index: usize, text: &str, thread_ts: Option<&str>) -> Result<String> {
         let item = &self.state.items[index];
-        let mut params = vec![("channel", item.channel.as_str()), ("text", text)];
+        let text = mention::link(text, self.names);
+        let mut params = vec![("channel", item.channel.as_str()), ("text", text.as_str())];
         if let Some(thread_ts) = thread_ts {
             params.push(("thread_ts", thread_ts));
         }
@@ -478,17 +501,73 @@ impl App<'_> {
         })
     }
 
-    /// Every conversation you are in, then everyone else in the
-    /// workspace, for the picker.
-    fn choices(&mut self) -> Result<Vec<Choice>> {
+    /// Every conversation you are in, with the directory walked once per
+    /// run so the people are current: what the picker and the reply
+    /// box's completion are built from.
+    fn directory(&mut self) -> Result<Vec<Listed>> {
         let listed = directory::conversations(self.client, self.names)?;
         if !self.directory_walked {
             self.names.walk_users(self.client)?;
             self.directory_walked = true;
         }
+        Ok(listed)
+    }
+
+    /// What the reply box completes: the people, those you have a direct
+    /// message with first, then the channels you are in.
+    fn candidates(&self, listed: &[Listed]) -> Vec<Candidate> {
+        let with_dm: BTreeSet<&str> = listed
+            .iter()
+            .filter_map(|conversation| conversation.user.as_deref())
+            .collect();
+        let mut people: Vec<(bool, Candidate)> = directory::everyone(self.names)
+            .into_iter()
+            .map(|person| {
+                let name = if person.display == person.handle {
+                    &person.real
+                } else {
+                    &person.display
+                };
+                let detail = [name.as_str(), person.title.as_str()]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let candidate = Candidate {
+                    insert: format!("@{}", person.handle),
+                    detail,
+                    search: format!("{} {} {}", person.handle, person.display, person.real)
+                        .to_lowercase(),
+                };
+                (!with_dm.contains(person.id.as_str()), candidate)
+            })
+            .collect();
+        // A stable sort: the people you talk to come first, in name order.
+        people.sort_by_key(|(no_dm, _)| *no_dm);
+        let channels = listed
+            .iter()
+            .filter(|conversation| conversation.kind == Kind::Channel)
+            .map(|conversation| {
+                let name = conversation.name.trim_start_matches('#');
+                Candidate {
+                    insert: conversation.name.clone(),
+                    detail: conversation.notes().join(", "),
+                    search: format!("{name} {}", name.replace(['-', '_', '.'], " ")).to_lowercase(),
+                }
+            });
+        people
+            .into_iter()
+            .map(|(_, candidate)| candidate)
+            .chain(channels)
+            .collect()
+    }
+
+    /// Every conversation you are in, then everyone else in the
+    /// workspace, for the picker.
+    fn choices(&self, listed: &[Listed]) -> Vec<Choice> {
         let mut choices = Vec::new();
         let mut with_dm = BTreeSet::new();
-        for conversation in &listed {
+        for conversation in listed {
             let kind = match conversation.kind {
                 Kind::Channel => ChoiceKind::Channel,
                 Kind::Mpim => ChoiceKind::Group,
@@ -509,6 +588,7 @@ impl App<'_> {
                     .map(|p| format!("{} {} {}", p.name, p.real, p.title))
                     .unwrap_or_default(),
                 note: conversation.notes().join(", "),
+                muted: conversation.muted,
                 unread_from: conversation.unread_from().map(str::to_string),
                 user: conversation.user.clone(),
             });
@@ -528,12 +608,13 @@ impl App<'_> {
                 label: format!("@{}", person.display),
                 search: person.search(),
                 note,
+                muted: false,
                 user: Some(person.id.clone()),
                 id: person.id,
                 unread_from: None,
             });
         }
-        Ok(choices)
+        choices
     }
 
     fn show(&mut self, choice: &Choice) -> Result<Item> {
