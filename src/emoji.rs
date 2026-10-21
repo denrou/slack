@@ -58,11 +58,56 @@ pub fn normalize(typed: &str) -> String {
 }
 
 /// The Slack name of what was typed: a name, or the character itself
-/// when it has one.
+/// when it has one, `👍🏻` as `+1::skin-tone-2`.
 pub fn name_of(typed: &str) -> String {
-    emojis::get(typed.trim())
-        .and_then(Emoji::shortcode)
-        .map_or_else(|| normalize(typed), str::to_string)
+    let Some(emoji) = emojis::get(typed.trim()) else {
+        return normalize(typed);
+    };
+    let tone = emoji.skin_tone().and_then(tone_number);
+    let plain = emoji.with_skin_tone(SkinTone::Default).unwrap_or(emoji);
+    match (plain.shortcode(), tone) {
+        (Some(code), Some(tone)) => format!("{code}::skin-tone-{tone}"),
+        (Some(code), None) => code.to_string(),
+        (None, _) => normalize(typed),
+    }
+}
+
+/// Whether two names are one emoji, as `thumbsup` is Slack's `+1`.
+pub fn same(a: &str, b: &str) -> bool {
+    a == b || glyph(a).is_some_and(|drawn| glyph(b) == Some(drawn))
+}
+
+/// The other names to try when Slack refuses one: the names come from
+/// gemoji, and Slack calls a few otherwise (`thinking` is
+/// `thinking_face`), its alias first, then the Unicode name.
+pub fn other_names(name: &str) -> Vec<String> {
+    let (base, tone) = match name.split_once("::skin-tone-") {
+        Some((base, tone)) => (base, Some(tone)),
+        None => (name, None),
+    };
+    let Some(emoji) = lookup(base) else {
+        return Vec::new();
+    };
+    let aliases = ALIASES
+        .iter()
+        .filter(|(_, code)| emoji.shortcodes().any(|known| known == *code))
+        .map(|(alias, _)| (*alias).to_string());
+    let mut names: Vec<String> = Vec::new();
+    for other in aliases
+        .chain(std::iter::once(emoji.name().replace(' ', "_")))
+        .chain(emoji.shortcodes().map(str::to_string))
+    {
+        if other != base && !names.contains(&other) {
+            names.push(other);
+        }
+    }
+    match tone {
+        Some(tone) => names
+            .into_iter()
+            .map(|other| format!("{other}::skin-tone-{tone}"))
+            .collect(),
+        None => names,
+    }
 }
 
 fn lookup(name: &str) -> Option<&'static Emoji> {
@@ -93,6 +138,17 @@ fn by_unicode_name() -> &'static HashMap<String, &'static Emoji> {
             .map(|emoji| (emoji.name().replace(' ', "_"), emoji))
             .collect()
     })
+}
+
+fn tone_number(tone: SkinTone) -> Option<u8> {
+    match tone {
+        SkinTone::Light => Some(2),
+        SkinTone::MediumLight => Some(3),
+        SkinTone::Medium => Some(4),
+        SkinTone::MediumDark => Some(5),
+        SkinTone::Dark => Some(6),
+        _ => None,
+    }
 }
 
 fn skin_tone(tone: &str) -> Option<SkinTone> {
@@ -141,5 +197,24 @@ mod tests {
         assert_eq!(normalize(" :Tada: "), "tada");
         assert_eq!(name_of("👍"), "+1");
         assert_eq!(name_of(":yolo:"), "yolo");
+        assert_eq!(name_of("👍🏻"), "+1::skin-tone-2");
+    }
+
+    #[test]
+    fn one_emoji_under_several_names() {
+        assert!(same("+1", "thumbsup"));
+        assert!(same("hugging_face", "hugs"));
+        assert!(same("yolo", "yolo"));
+        assert!(!same("+1", "+1::skin-tone-2"));
+        assert!(!same("yolo", "party_parrot"), "two custom emoji");
+    }
+
+    #[test]
+    fn a_refused_name_has_slack_names_to_try() {
+        assert_eq!(other_names("hugs")[0], "hugging_face");
+        assert!(other_names("thinking").contains(&"thinking_face".to_string()));
+        assert!(other_names("+1::skin-tone-3").contains(&"thumbsup::skin-tone-3".to_string()));
+        assert!(!other_names("+1").contains(&"+1".to_string()));
+        assert!(other_names("yolo").is_empty());
     }
 }

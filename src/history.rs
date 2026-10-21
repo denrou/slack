@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::api::{self, Client};
+use crate::emoji;
 
 pub const DEFAULT_LIMIT: usize = 20;
 const METHOD: &str = "conversations.history";
@@ -68,7 +69,10 @@ impl Message {
     /// Put or take back one person's reaction, as Slack now has it: the
     /// screen updates the message instead of reading it again.
     pub fn react(&mut self, name: &str, user_id: &str, add: bool) {
-        let at = self.reactions.iter().position(|r| r.name == name);
+        let at = self
+            .reactions
+            .iter()
+            .position(|r| emoji::same(&r.name, name));
         match (at, add) {
             (Some(at), true) => {
                 let reaction = &mut self.reactions[at];

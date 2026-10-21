@@ -714,7 +714,9 @@ impl State {
             if choices.len() == REACT_ROWS {
                 break;
             }
-            if emoji::begins(name, &query) && !choices.iter().any(|choice| choice == name) {
+            if emoji::begins(name, &query)
+                && !choices.iter().any(|choice| emoji::same(choice, name))
+            {
                 choices.push(name.to_string());
             }
         }
@@ -740,7 +742,7 @@ impl State {
             message
                 .reactions
                 .iter()
-                .any(|reaction| reaction.name == name && reaction.by(me))
+                .any(|reaction| emoji::same(&reaction.name, name) && reaction.by(me))
         })
     }
 
@@ -1301,7 +1303,13 @@ impl State {
             (Some(message), Some(channel)) => Action::React {
                 channel,
                 ts: message.ts.clone(),
-                name: name.to_string(),
+                // The message's name for it is one Slack takes.
+                name: message
+                    .reactions
+                    .iter()
+                    .find(|reaction| emoji::same(&reaction.name, name))
+                    .map_or(name, |reaction| reaction.name.as_str())
+                    .to_string(),
                 add: !self.reacted_with(name),
             },
             _ => Action::None,
@@ -2155,6 +2163,37 @@ mod tests {
         assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
         assert_eq!(state.items.len(), 3);
         assert_eq!((state.selected, state.focus), (Some(2), Focus::List));
+    }
+
+    #[test]
+    fn another_name_of_your_reaction_takes_it_back() {
+        let mut state = state();
+        state.me = Some("U7".into());
+        state.frequent_emoji = vec!["thumbsup".into()];
+        state.items[0].messages[0].reactions = vec![history::Reaction {
+            name: "+1".into(),
+            count: 1,
+            users: vec!["U7".into()],
+        }];
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('+')));
+        assert_eq!(state.emoji_choices(""), ["+1"], "one emoji, one row");
+        for c in "thumbsu".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        let ts = state.items[0].messages[0].ts.clone();
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::React {
+                channel: "D1".into(),
+                ts: ts.clone(),
+                name: "+1".into(),
+                add: false,
+            },
+            "under the name the message has it"
+        );
+        state.apply_reaction("D1", &ts, "thumbsup", false);
+        assert!(state.items[0].messages[0].reactions.is_empty());
     }
 
     #[test]

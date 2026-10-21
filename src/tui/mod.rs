@@ -360,7 +360,7 @@ impl App<'_> {
                     },
                 )?;
                 match react::set(self.client, &channel, &ts, &name, add) {
-                    Ok(()) => {
+                    Ok(name) => {
                         self.state.apply_reaction(&channel, &ts, &name, add);
                         let done = if add { "Reacted" } else { "Took back" };
                         self.state.status = Some(format!("{done} {}", emoji::label(&name)));

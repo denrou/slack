@@ -46,7 +46,7 @@ slack read '#channel' @handle                # mark these as read, and only thes
 - The text is Slack markup, not Markdown: `*bold*`, `_italic_`, `` `code` ``, `> quote`; `**bold**`, `#` headings and `- ` lists show as typed (`• ` is the list Slack users write).
 - `@handle` and `#channel` in the text become mentions when the name is known; `@here` and `@channel` stay plain text, deliberately.
 - The message goes out in the user's name: write it as they would (the writing-voice rule, Slack section, when it is loaded), in the language of the conversation, and show the final text before sending. `send` prints where the message landed and its permalink; give the permalink back.
-- `react` takes Slack's emoji name (`+1`, `white_check_mark`, `eyes`, with or without colons) or the character itself; a name Slack does not know fails with `invalid_name`. Asking for a reaction that is already there, or taking back one that is not, succeeds and changes nothing.
+- `react` takes Slack's emoji name (`+1`, `white_check_mark`, `eyes`, with or without colons) or the character itself (`👍🏻` is `+1::skin-tone-2`); a name Slack refuses is tried again under the emoji's other names (`thinking` as `thinking_face`), and the confirmation line shows the one it took. An emoji Slack knows under none of its names fails with `invalid_name`. Asking for a reaction that is already there, or taking back one that is not, succeeds and changes nothing.
 - `send` and `react` never move the read cursor: a conversation answered from here stays unread until the user reads it in Slack or asks for `slack read`.
 
 ## Typical runs

@@ -1,7 +1,8 @@
 //! `slack react`, and the screen's `+`: put an emoji on a message, or take
 //! yours back (`reactions.add`, `reactions.remove`). Asking for what is
 //! already so (`already_reacted`, `no_reaction`) is not an error: the
-//! message ends up as asked either way.
+//! message ends up as asked either way. A name Slack refuses is tried
+//! again under its other names (`emoji::other_names`).
 
 use anyhow::{Result, bail};
 
@@ -11,19 +12,20 @@ use crate::history::is_ts;
 use crate::names::Names;
 use crate::target::{self, parse_permalink};
 
+/// The name Slack took, which may be another than the one given.
 pub fn set(
     client: &Client,
     channel: &str,
     ts: &str,
     name: &str,
     add: bool,
-) -> Result<(), api::Error> {
+) -> Result<String, api::Error> {
     let method = if add {
         "reactions.add"
     } else {
         "reactions.remove"
     };
-    match client.call(
+    let call = |name: &str| match client.call(
         method,
         &[("channel", channel), ("timestamp", ts), ("name", name)],
     ) {
@@ -33,7 +35,22 @@ pub fn set(
             Ok(())
         }
         result => result.map(drop),
+    };
+    let refused = match call(name) {
+        Err(err) if is_invalid_name(&err) => err,
+        result => return result.map(|()| name.to_string()),
+    };
+    for other in emoji::other_names(name) {
+        match call(&other) {
+            Err(err) if is_invalid_name(&err) => {}
+            result => return result.map(|()| other),
+        }
     }
+    Err(refused)
+}
+
+fn is_invalid_name(err: &api::Error) -> bool {
+    matches!(err, api::Error::Slack { code, .. } if code == "invalid_name")
 }
 
 pub fn run(
@@ -50,7 +67,7 @@ pub fn run(
         bail!("which emoji? give its name, like +1 or white_check_mark");
     }
     let (channel, ts) = message(client, names, team_id, message_spec, ts)?;
-    set(client, &channel, &ts, &name, !remove)?;
+    let name = set(client, &channel, &ts, &name, !remove)?;
     names.resolve_channels(client, [channel.clone()])?;
     if let Some(user) = names.channel(&channel).and_then(|c| c.user.clone()) {
         names.resolve_users(client, [user])?;
