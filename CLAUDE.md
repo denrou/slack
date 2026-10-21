@@ -81,6 +81,8 @@ Deferred on purpose by the review of 2026-10-21 (`v0.9.0..main`):
 - A pref that is present but not JSON is read as absent without a warning (from before this batch).
 - `slack react --remove` says "Took back" when there was nothing to take back.
 
+Deferred on purpose by the review of 2026-10-21 (`v0.11.0..main`): a conversation `e` marked but kept, because a message came in after `x` selected it, shows its old unread count and `── new ──` line until the next refresh, up to about 15 seconds. Showing it read up to the mark would need a third way to word the detail line, beside the listed and the opened ones.
+
 Deferred on purpose by the review of 2026-10-21 (`v0.10.0..main`): with people marked, Enter on a typed name whose highlighted match is a channel or a group does nothing and says nothing (the picker has no status line of its own). Rare, since a group is people; a typo that matches nothing goes to the list instead.
 
 ## Reference implementation
