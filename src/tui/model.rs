@@ -1027,6 +1027,12 @@ impl State {
             KeyCode::Char('b') if control => self.page(false, false),
             KeyCode::PageDown => self.page(true, false),
             KeyCode::PageUp => self.page(false, false),
+            // Esc alone unselects: `h` and Left are pressed out of vim
+            // habit, and a selection is built one `x` at a time.
+            KeyCode::Esc if self.focus == Focus::List && !self.checked.is_empty() => {
+                self.checked.clear();
+                Action::None
+            }
             // Esc backs out of whatever is open, as everywhere else on
             // the screen; at the list there is nothing to back out of.
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => {
@@ -1438,8 +1444,6 @@ impl State {
         } else if self.focus == Focus::Messages {
             self.focus = Focus::List;
             self.cursor = 0;
-        } else {
-            self.checked.clear();
         }
     }
 
@@ -1817,6 +1821,9 @@ mod tests {
         assert_eq!(state.selected, Some(1));
         state.key(press(KeyCode::Char('x')));
         assert_eq!(state.checked.len(), 1, "x again unselects");
+        state.key(press(KeyCode::Char('h')));
+        state.key(press(KeyCode::Left));
+        assert_eq!(state.checked.len(), 1, "h and Left leave it alone");
         state.key(press(KeyCode::Esc));
         assert!(state.checked.is_empty(), "Esc unselects everything");
         state.key(press(KeyCode::Char('x')));

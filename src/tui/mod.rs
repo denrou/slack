@@ -471,9 +471,8 @@ impl App<'_> {
     }
 
     /// The latest poll, between keys and only while nothing is open over
-    /// the list: a reload under the reply box would move the conversation
-    /// it sends to, and one under the read-all prompt would add to what
-    /// `y` marks. It waits in the channel until then.
+    /// the list: a reload under the reply box or a prompt would move what
+    /// it acts on. It waits in the channel until then.
     fn polled(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         if !matches!(self.state.mode, Mode::Browse | Mode::Help) {
             return Ok(());

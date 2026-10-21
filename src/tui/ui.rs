@@ -24,7 +24,7 @@ const CHECKED_HINTS: &str =
 const HELP: &[&str] = &[
     "j, k, arrows    move through the list, or through the messages",
     "l, Enter, Right deeper: the messages, then the highlighted message's thread",
-    "h, Left, Esc    back: close the thread, leave the messages, unselect",
+    "h, Left, Esc    back: close the thread, leave the messages; Esc at the list unselects",
     "gg, G           the first, the last (Home, End too)",
     "Ctrl-D, Ctrl-U  half a screen down, up; Ctrl-F, Ctrl-B, PgDn, PgUp a whole one",
     "r               reply: to the conversation, to the highlighted message, or in the open thread",
@@ -645,7 +645,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 .selected_item()
                 .is_some_and(|item| item.section == Section::Opened);
             let hints = match (state.focus, &state.thread) {
-                _ if !state.checked.is_empty() => CHECKED_HINTS,
+                (Focus::List, _) if !state.checked.is_empty() => CHECKED_HINTS,
                 (Focus::List, _) if opened => OPENED_HINTS,
                 (Focus::List, _) => LIST_HINTS,
                 (Focus::Messages, None) => MESSAGES_HINTS,
