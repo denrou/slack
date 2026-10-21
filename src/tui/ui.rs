@@ -239,12 +239,7 @@ fn draw_messages(
             Span::styled(format!("{time:>width$}"), time_style),
             Span::raw("  "),
         ];
-        let author = match (&message.user, &message.bot) {
-            (Some(user), _) => Some(names.user_label(user)),
-            (None, Some(bot)) => Some(format!("{bot} (bot)")),
-            (None, None) => None,
-        };
-        if let Some(author) = author {
+        if let Some(author) = author_of(message, names) {
             spans.push(Span::styled(author, Style::new().cyan()));
             spans.push(Span::raw(": "));
         }
@@ -351,6 +346,30 @@ fn draw_messages(
     } else {
         (i32::from(anchor) + state.scroll).max(0) as u16
     };
+    // A thread is read from its new replies, which can put the root, what
+    // the thread is about, above the pane: its first line stays on top.
+    let pinned = messages
+        .first()
+        .filter(|root| root_ts == Some(root.ts.as_str()))
+        .filter(|_| {
+            starts
+                .first()
+                .is_some_and(|&at| row_of(at) < usize::from(scroll))
+        })
+        .map(|root| {
+            let text = mrkdwn::render(&root.text, &user, &channel, &plain);
+            let mut spans = vec![Span::raw(indent.clone())];
+            if let Some(author) = author_of(root, names) {
+                spans.push(Span::styled(author, Style::new().cyan()));
+                spans.push(Span::raw(": "));
+            }
+            spans.push(Span::raw(text.lines().next().unwrap_or("").to_string()));
+            spans.push(Span::raw(" [root]"));
+            Line::from(spans).dim()
+        });
+    let top = u16::from(pinned.is_some());
+    let height = height.saturating_sub(top);
+    let inner_height = usize::from(height);
     // The highlighted message as rows of the pane, every row it wraps to.
     let highlight = (state.focus == Focus::Messages)
         .then(|| starts.get(state.cursor).zip(ends.get(state.cursor)))
@@ -361,15 +380,21 @@ fn draw_messages(
         .iter()
         .filter(|&&start| screen.contains(&row_of(start)))
         .count();
+    let block = Block::bordered().title(title);
+    let mut inner = block.inner(area);
+    frame.render_widget(block, area);
+    if let Some(pinned) = pinned {
+        frame.render_widget(Paragraph::new(pinned), Rect { height: 1, ..inner });
+        inner.y += 1;
+        inner.height = inner.height.saturating_sub(1);
+    }
     let paragraph = Paragraph::new(lines)
-        .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, inner);
     // A full-width block over the highlighted message, painted after the
     // text: a line's own style stops where its text does.
     if let Some((from, to)) = highlight {
-        let inner = area.inner(Margin::new(1, 1));
         let scroll = usize::from(scroll);
         let top = from.max(scroll);
         let bottom = to.min(scroll + usize::from(inner.height));
@@ -390,6 +415,14 @@ fn draw_messages(
         height,
         rows: total,
         in_view,
+    }
+}
+
+fn author_of(message: &Message, names: &Names) -> Option<String> {
+    match (&message.user, &message.bot) {
+        (Some(user), _) => Some(names.user_label(user)),
+        (None, Some(bot)) => Some(format!("{bot} (bot)")),
+        (None, None) => None,
     }
 }
 
@@ -790,6 +823,37 @@ mod tests {
                 .any(|r| r.contains("👍   +1  yours, Enter takes it back"))
         );
         assert!(rows.iter().any(|r| r.contains("│     yolo  1 on it")));
+    }
+
+    #[test]
+    fn a_thread_read_from_its_new_replies_keeps_its_root_on_top() {
+        let mut texts = fifty();
+        texts[0] = "why did the build break".to_string();
+        let mut state = history(&texts, Some(45));
+        state.items[0].section = Section::Threads;
+        state.items[0].thread_ts = Some(ts(1));
+        let roots = |buffer: &Buffer| {
+            (0..20)
+                .filter(|&y| row(buffer, y).contains("[root]"))
+                .count()
+        };
+
+        let (buffer, _) = render(&state, 100, 20);
+        let pinned = row_with(&buffer, "why did the build break [root]").expect("the root");
+        assert_eq!(pinned, 1, "right under the border");
+        assert!(row_with(&buffer, "── new ──").is_some_and(|new| new > pinned));
+        assert_eq!(roots(&buffer), 1);
+
+        state.focus = Focus::Messages;
+        state.cursor = 0;
+        let (buffer, _) = render(&state, 100, 20);
+        assert_eq!(roots(&buffer), 1, "the root in view is not pinned again");
+
+        state.items[0].section = Section::Channels;
+        state.items[0].thread_ts = None;
+        state.focus = Focus::List;
+        let (buffer, _) = render(&state, 100, 20);
+        assert_eq!(roots(&buffer), 0, "a channel pins nothing");
     }
 
     fn row_with(buffer: &Buffer, needle: &str) -> Option<u16> {
