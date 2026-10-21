@@ -19,8 +19,9 @@ use jiff::Zoned;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use ratatui::crossterm::execute;
+use ratatui::crossterm::{execute, terminal};
 use serde_json::Value;
 
 use self::model::{
@@ -73,7 +74,24 @@ fn screen(
     // as keystrokes that would send the first line and act on the rest. A
     // terminal without the feature ignores the sequence.
     let _ = execute!(io::stdout(), EnableBracketedPaste);
+    // Ctrl-Enter and Shift-Enter are plain Enter to a terminal unless it
+    // speaks the kitty keyboard protocol. Where it does, the disambiguation
+    // alone is asked for (no key releases, no alternate keys), and a
+    // modified Enter reaches the reply box as a line break; Ctrl-J is a
+    // byte of its own everywhere. A terminal answers the query at once
+    // through its device attributes; one that answers nothing costs two
+    // seconds here.
+    let enhanced = matches!(terminal::supports_keyboard_enhancement(), Ok(true));
+    if enhanced {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     let result = app.run(&mut terminal);
+    if enhanced {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result

@@ -434,6 +434,20 @@ pub struct Completion {
     pub pick: usize,
 }
 
+/// Ctrl-J, Ctrl-Enter and Shift-Enter: a line break in the reply box.
+/// Ctrl-J is a byte of its own in any terminal; the other two reach the
+/// box apart from Enter only where the terminal reports them so (see
+/// the keyboard enhancement in `mod.rs`), and are plain Enter elsewhere.
+fn breaks_line(key: KeyEvent) -> bool {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Enter => control || shift,
+        KeyCode::Char('j') => control,
+        _ => false,
+    }
+}
+
 /// The word being completed: where it starts, its sigil and what follows,
 /// when the text ends in a word that starts with `@` or `#`.
 fn completing(text: &str) -> Option<(usize, char, &str)> {
@@ -841,6 +855,7 @@ impl State {
     /// The reply box. Enter sends and Esc gives up, unless a completion
     /// list is open above the box: then Tab or Enter take the highlighted
     /// entry, Up and Down (Ctrl-p, Ctrl-n too) move in it, Esc closes it.
+    /// A line break (`breaks_line`) is one whatever is open.
     fn compose(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(completion) = self.completion(&draft) {
@@ -848,7 +863,7 @@ impl State {
             let down = Some((completion.pick + 1).min(last));
             let up = Some(completion.pick.saturating_sub(1));
             match key.code {
-                KeyCode::Tab | KeyCode::Enter => {
+                KeyCode::Tab | KeyCode::Enter if !breaks_line(key) => {
                     let insert = self
                         .candidates
                         .as_ref()
@@ -871,10 +886,15 @@ impl State {
         self.edit(draft, key)
     }
 
-    /// A key into the text of the reply box: Enter sends it, Esc drops it.
+    /// A key into the text of the reply box: Enter sends it, a line break
+    /// goes into it, Esc drops it.
     fn edit(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => Action::None,
+            _ if breaks_line(key) => {
+                draft.text.push('\n');
+                self.typed(draft)
+            }
             KeyCode::Enter => {
                 let trimmed = draft.text.trim().to_string();
                 match self.selected {
@@ -1927,6 +1947,50 @@ mod tests {
             &sent,
             Action::Send { text, .. } if text == "Thanks!\nWill look tomorrow"
         ));
+    }
+
+    #[test]
+    fn a_line_break_is_ctrl_j_or_a_modified_enter_and_enter_still_sends() {
+        let mut state = state();
+        state.key(press(KeyCode::Enter));
+        for c in "one".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        state.key(control('j'));
+        state.key(press(KeyCode::Char('2')));
+        state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        state.key(press(KeyCode::Char('3')));
+        state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(matches!(&state.mode, Mode::Compose(draft) if draft.text == "one\n2\n3\n"));
+        state.key(press(KeyCode::Backspace));
+        assert!(
+            matches!(&state.mode, Mode::Compose(draft) if draft.text == "one\n2\n3"),
+            "Backspace takes a break back like any character"
+        );
+        assert!(matches!(
+            state.key(press(KeyCode::Enter)),
+            Action::Send { text, .. } if text == "one\n2\n3"
+        ));
+    }
+
+    #[test]
+    fn a_line_break_closes_the_completion_list_instead_of_picking() {
+        let mut state = state();
+        state.candidates = Some(vec![candidate("@jdoe", "Jane Doe", "jdoe jane doe")]);
+        state.key(press(KeyCode::Enter));
+        for c in "cc @j".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert!(state.completion(draft).is_some(), "the list is open");
+        state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert_eq!(draft.text, "cc @j\n", "the word stays as typed");
+        assert!(state.completion(draft).is_none(), "and the list is gone");
     }
 
     #[test]

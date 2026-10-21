@@ -31,6 +31,7 @@ const HELP: &[&str] = &[
     "n               new message: pick a channel or people (Space marks several), then write",
     "c               open a channel or group you are in, or anyone: type to filter, Enter to the list, m shows the muted",
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
+    "Ctrl-J          a new line in the reply box; Ctrl-Enter and Shift-Enter too, where the terminal tells them from Enter",
     "x               close an opened conversation",
     "u, y            open, or copy, a link of the highlighted message",
     "r               mark the selected one as read",
@@ -364,7 +365,7 @@ fn draw_messages(
 }
 
 /// The reply box grows with its text, as wrapped at the width of the
-/// screen, up to this many rows; a paste can bring several lines.
+/// screen, up to this many rows: Ctrl-J or a paste brings several lines.
 const COMPOSE_ROWS: u16 = 6;
 
 /// The completion list shows this many entries at most.
@@ -473,7 +474,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 None if completion.is_some() => {
                     format!("{title} · Tab picks, Esc closes the list ")
                 }
-                None => format!("{title} · Enter sends, Esc cancels "),
+                None => format!("{title} · Enter sends, Ctrl-J a new line, Esc cancels "),
             };
             let mut lines: Vec<Line> = text.split('\n').map(Line::from).collect();
             if let Some(last) = lines.last_mut() {
@@ -773,7 +774,7 @@ mod tests {
         state.key(press(KeyCode::Esc));
         let (buffer, _) = render(&state, 100, 30);
         assert!(row_with(&buffer, "@jdoe").is_none(), "Esc closes the list");
-        assert!(row_with(&buffer, "Enter sends, Esc cancels").is_some());
+        assert!(row_with(&buffer, "Enter sends, Ctrl-J a new line, Esc cancels").is_some());
         state.status = Some("Error: channel_not_found".to_string());
         let (buffer, _) = render(&state, 100, 30);
         assert!(
