@@ -70,31 +70,49 @@ fn screen(
         directory_walked: false,
     };
     let mut terminal = ratatui::init();
-    // A paste then arrives as one event, line breaks included, instead of
-    // as keystrokes that would send the first line and act on the rest. A
-    // terminal without the feature ignores the sequence.
-    let _ = execute!(io::stdout(), EnableBracketedPaste);
-    // Ctrl-Enter and Shift-Enter are plain Enter to a terminal unless it
-    // speaks the kitty keyboard protocol. Where it does, the disambiguation
-    // alone is asked for (no key releases, no alternate keys), and a
-    // modified Enter reaches the reply box as a line break; Ctrl-J is a
-    // byte of its own everywhere. A terminal answers the query at once
-    // through its device attributes; one that answers nothing costs two
-    // seconds here.
-    let enhanced = matches!(terminal::supports_keyboard_enhancement(), Ok(true));
-    if enhanced {
-        let _ = execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-    }
+    let modes = Modes::ask();
     let result = app.run(&mut terminal);
-    if enhanced {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-    }
-    let _ = execute!(io::stdout(), DisableBracketedPaste);
+    drop(modes);
     ratatui::restore();
     result
+}
+
+/// What the screen asks of the terminal beyond ratatui's raw mode and
+/// alternate screen, undone on drop: on a panic too, since ratatui's hook
+/// restores its own only, and some terminals keep the keyboard flags
+/// across screens.
+struct Modes {
+    enhanced: bool,
+}
+
+impl Modes {
+    fn ask() -> Modes {
+        // A paste then arrives as one event, line breaks included, instead
+        // of as keystrokes that would send the first line and act on the
+        // rest. A terminal without the feature ignores the sequence.
+        let _ = execute!(io::stdout(), EnableBracketedPaste);
+        // Ctrl-Enter and Shift-Enter are plain Enter to a terminal that
+        // does not speak the kitty keyboard protocol, so it is asked for
+        // where spoken; a terminal that answers the query with nothing
+        // costs two seconds here.
+        let enhanced = matches!(terminal::supports_keyboard_enhancement(), Ok(true));
+        if enhanced {
+            let _ = execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            );
+        }
+        Modes { enhanced }
+    }
+}
+
+impl Drop for Modes {
+    fn drop(&mut self) {
+        if self.enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
+    }
 }
 
 fn is_dead_session(err: &anyhow::Error) -> bool {
