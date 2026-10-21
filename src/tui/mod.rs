@@ -887,7 +887,7 @@ impl App<'_> {
 
     /// The recent history of a conversation, as an item of the list.
     fn load_opened(&mut self, channel: String, unread_from: Option<String>) -> Result<Item> {
-        let page = view::recent(self.client, &channel)?;
+        let page = view::recent(self.client, &channel, unread_from.as_deref())?;
         self.names
             .resolve_channels(self.client, [channel.clone()])?;
         self.resolve_people(page.messages.iter())?;

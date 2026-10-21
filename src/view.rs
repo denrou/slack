@@ -28,20 +28,27 @@ pub enum Reach {
     Recent,
 }
 
-/// A history on the screen holds today's messages, never fewer than the
-/// last `RECENT_MIN` (a quiet channel keeps its context) nor more than one
-/// page of `RECENT_MAX` (a busy one is read again on every reload).
+/// A history on the screen holds today's messages and the unread ones,
+/// never fewer than the last `RECENT_MIN` (a quiet channel keeps its
+/// context) nor more than one page of `RECENT_MAX` (a busy one is read
+/// again on every reload).
 pub const RECENT_MIN: usize = 50;
 pub const RECENT_MAX: usize = 200;
 
 /// A conversation's recent history, as the screen shows it.
-pub fn recent(client: &Client, channel: &str) -> Result<history::Unread, api::Error> {
+pub fn recent(
+    client: &Client,
+    channel: &str,
+    last_read: Option<&str>,
+) -> Result<history::Unread, api::Error> {
     let page = history::fetch(client, channel, None, RECENT_MAX)?;
-    Ok(keep_recent(page, &Zoned::now()))
+    Ok(keep_recent(page, last_read, &Zoned::now()))
 }
 
-/// Today's messages, or the last `RECENT_MIN` when today holds fewer.
-fn keep_recent(mut page: history::Unread, now: &Zoned) -> history::Unread {
+/// Today's messages and the unread ones, or the last `RECENT_MIN` when
+/// they are fewer: a backlog from before midnight is never trimmed, since
+/// `e` marks it read.
+fn keep_recent(mut page: history::Unread, last_read: Option<&str>, now: &Zoned) -> history::Unread {
     let today = match now.start_of_day() {
         Ok(midnight) => {
             let midnight = format!("{}.000000", midnight.timestamp().as_second());
@@ -52,7 +59,12 @@ fn keep_recent(mut page: history::Unread, now: &Zoned) -> history::Unread {
         }
         Err(_) => 0,
     };
-    let keep = today.max(RECENT_MIN);
+    let unread = page
+        .messages
+        .iter()
+        .filter(|message| is_new(message, last_read.filter(|c| history::is_usable_cursor(c))))
+        .count();
+    let keep = today.max(unread).max(RECENT_MIN);
     if page.messages.len() > keep {
         page.messages.drain(..page.messages.len() - keep);
         page.has_more = true;
@@ -225,7 +237,7 @@ pub fn build(
             Reach::Unread => {
                 history::fetch(client, &id, last_read.as_deref(), history::DEFAULT_LIMIT)
             }
-            Reach::Recent => recent(client, &id),
+            Reach::Recent => recent(client, &id, last_read.as_deref()),
         };
         (id, page)
     });
@@ -826,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_keeps_today_and_never_fewer_than_the_minimum() {
+    fn the_screen_keeps_today_the_unread_and_at_least_the_minimum() {
         // Midnight of `now()` is 1760832000.
         let page = |older: usize, today: usize| history::Unread {
             messages: (0..older)
@@ -836,25 +848,36 @@ mod tests {
                 .collect(),
             has_more: false,
         };
-        let kept = keep_recent(page(10, 3), &now());
+        let kept = keep_recent(page(10, 3), None, &now());
         assert_eq!(
             (kept.messages.len(), kept.has_more),
             (13, false),
             "a quiet channel"
         );
-        let kept = keep_recent(page(100, 3), &now());
+        let kept = keep_recent(page(100, 3), None, &now());
         assert_eq!((kept.messages.len(), kept.has_more), (RECENT_MIN, true));
         assert_eq!(
             kept.messages[0].ts, "1760800053.000100",
             "the newest of the older ones"
         );
-        let kept = keep_recent(page(100, 80), &now());
+        let kept = keep_recent(page(100, 80), None, &now());
         assert_eq!(
             (kept.messages.len(), kept.has_more),
             (80, true),
             "a busy day"
         );
         assert!(kept.messages[0].ts.starts_with("1760832000."));
+        // Read up to the 21st older message: 79 older ones and 3 of today
+        // are unread, and none of them is trimmed.
+        let kept = keep_recent(page(100, 3), Some("1760800020.000100"), &now());
+        assert_eq!(kept.messages.len(), 82, "a backlog from before midnight");
+        let never = Some("0000000000.000000");
+        let kept = keep_recent(page(100, 3), never, &now());
+        assert_eq!(
+            kept.messages.len(),
+            RECENT_MIN,
+            "never read: no cursor to keep from"
+        );
     }
 
     fn rendered(view: &View) -> String {
