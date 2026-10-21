@@ -6,6 +6,7 @@ mod auth;
 mod commands;
 mod counts;
 mod directory;
+mod emoji;
 mod history;
 mod lastview;
 mod mention;
@@ -14,6 +15,7 @@ mod names;
 mod par;
 mod paths;
 mod prefs;
+mod react;
 mod read;
 mod replies;
 mod send;
@@ -65,6 +67,20 @@ enum Command {
         /// Reply in this thread (its ts or permalink)
         #[arg(long)]
         thread: Option<String>,
+    },
+    /// Put an emoji on a message, or take yours back
+    React {
+        /// A permalink, a thread number from the last output (its first message), or `#channel`, `@person`, a conversation id with --ts
+        message: String,
+        /// The emoji: its name (`+1`, `:white_check_mark:`) or the character
+        #[arg(allow_hyphen_values = true)]
+        emoji: String,
+        /// The message's ts, in the conversation given
+        #[arg(long)]
+        ts: Option<String>,
+        /// Take your reaction back instead
+        #[arg(long)]
+        remove: bool,
     },
     /// Mark as read what the last view showed
     Read {
@@ -147,6 +163,12 @@ fn main() -> ExitCode {
             text,
             thread,
         }) => commands::send(&target, text.as_deref(), thread.as_deref()),
+        Some(Command::React {
+            message,
+            emoji,
+            ts,
+            remove,
+        }) => commands::react(&message, &emoji, ts.as_deref(), remove),
         Some(Command::Read { targets }) => commands::read(&targets),
         Some(Command::Login { headless, timeout }) => commands::login(headless, timeout),
         Some(Command::Logout {
@@ -198,5 +220,14 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["slack", "ui"]).is_err());
         assert!(Cli::try_parse_from(["slack", "--json"]).is_err());
+    }
+
+    #[test]
+    fn react_takes_a_thumbs_down_as_an_emoji() {
+        let cli = Cli::parse_from(["slack", "react", "2", "-1", "--remove"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::React { emoji, remove: true, .. }) if emoji == "-1"
+        ));
     }
 }

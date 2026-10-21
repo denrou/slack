@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` opens what needs you in an interactive view, `slack unreads` prints it, `slack --count` gives a status bar one number, `slack send` answers, `slack read` marks as read, `slack show` reads any conversation. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` opens what needs you in an interactive view, `slack unreads` prints it, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack show` reads any conversation. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -47,13 +47,15 @@ slack send '#sre-alerts' "on it"                    # post to a channel
 slack send @jane "merci !"                          # ...or a DM
 slack send <permalink> "answering here"             # ...or a thread
 slack send @jane < note.md                          # text from stdin
+slack react <permalink> +1                          # react to a message
+slack react <permalink> +1 --remove                 # ...or take your reaction back
 slack read                                          # mark as read what the last view showed
 slack read '#sre-alerts' @jane                      # ...only these, or a conversation `slack show` printed
 ```
 
 ## Unreads
 
-`slack unreads` prints what is unread, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Channels** (every other channel with new messages), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments and replies. Messages with replies are numbered, as in `[thread 2: 5 replies]`: `slack thread 2` prints the whole thread, and `slack send 2 "text"` answers in it (a permalink works in both places). Conversations you muted in Slack are left out, as the app does, and a line on stderr says how many; a mention in a muted channel still counts. There is no local list: muting a channel in Slack is how to keep it out of the view.
+`slack unreads` prints what is unread, in the order a person answers it: **Direct messages** (DMs and group DMs with unreads), **Mentions** (channels where you were named), **Channels** (every other channel with new messages), **Threads** (followed threads with new replies). Under each conversation come the unread messages themselves, oldest first, with the author, the local time, and notes for files, attachments, replies and reactions (`[2 replies, 👍 3  👀 1]`). Messages with replies are numbered, as in `[thread 2: 5 replies]`: `slack thread 2` prints the whole thread, and `slack send 2 "text"` answers in it (a permalink works in both places). Conversations you muted in Slack are left out, as the app does, and a line on stderr says how many; a mention in a muted channel still counts. There is no local list: muting a channel in Slack is how to keep it out of the view.
 
 Reading in the terminal never moves Slack's read cursor: the view is read-only, and `slack read` marks as read what the last view showed (no more: a message that arrived since stays unread). A conversation `slack show` printed is marked by its name only. Names are cached in `~/.cache/slack/names.json`, safe to delete.
 
@@ -65,7 +67,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## The interactive view
 
-`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over the channels and group messages you are in and every person in the workspace: type to filter, Enter hands the keys to the narrowed list (`j`/`k` move, `/` goes back to the filter), and Enter again loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. Conversations you muted in Slack stay out of the picker until `m` shows them. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
+`slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. Reactions sit on a line under their message, yours in blue. `+` reacts to the highlighted message: a box lists the emoji already on it, then the ones you use most in Slack; typing filters (`check` finds ✅), Enter puts the highlighted one on, or takes it back when it is yours, the way a click on a reaction works in the app. Someone else's reaction moves none of the counts the screen watches, so it shows on Ctrl-R or the next refresh. `c` opens a picker over the channels and group messages you are in and every person in the workspace: type to filter, Enter hands the keys to the narrowed list (`j`/`k` move, `/` goes back to the filter), and Enter again loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. Conversations you muted in Slack stay out of the picker until `m` shows them. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
 
 The screen keeps itself current: every 15 seconds it asks Slack whether anything moved and reloads when something did, leaving you where you were (the selection, the highlighted message, the open thread). It waits while the reply box, the picker or a prompt is open, so nothing moves under what you are typing. A new reply in a thread already unread does not show on its own; Ctrl-R picks it up.
 
@@ -84,6 +86,7 @@ The screen keeps itself current: every 15 seconds it asks Slack whether anything
 | `c`              | Open a channel or group you are in, or a person (type to filter, `m` shows the muted)                                             |
 | `x`              | Close an opened conversation                                                                                                      |
 | `u`, `y`         | Open a link of the highlighted message, or copy it                                                                                |
+| `+`              | React to the highlighted message, or take your reaction back                                                                      |
 | `r`              | Mark it as read                                                                                                                   |
 | `R`              | Mark everything listed as read (asks first)                                                                                       |
 | `o`              | Open it in Slack, at the highlighted message from the pane                                                                        |
@@ -100,6 +103,8 @@ Without a terminal on both ends, as in a pipe or a script, `slack` prints what `
 ## Sending
 
 A target is `#channel`, `@person` (handle or display name), a conversation id, or a Slack permalink; a permalink means "answer in that message's thread", and `--thread <ts|permalink>` does the same for a channel target. The text is the argument, or stdin when there is none, and is sent as Slack markup (`*bold*`, `<@U123>`). The command prints where the message landed and its permalink. Quote `#channel` in zsh, or the shell reads it as a comment.
+
+`slack react <message> <emoji>` puts an emoji on a message, and `--remove` takes yours back. The message is a permalink, a thread number (its first message), or a conversation with `--ts <ts>`; the emoji is its Slack name, with or without the colons (`+1`, `:white_check_mark:`, a custom one), or the character itself. Reacting never marks anything as read.
 
 ## How login works
 

@@ -33,6 +33,24 @@ pub struct Message {
     pub files: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+}
+
+/// One emoji on a message, with who put it there.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Reaction {
+    /// Slack's emoji name, `+1` or `+1::skin-tone-2`.
+    pub name: String,
+    pub count: u64,
+    /// Slack lists the first of them only when there are many.
+    pub users: Vec<String>,
+}
+
+impl Reaction {
+    pub fn by(&self, user_id: &str) -> bool {
+        self.users.iter().any(|user| user == user_id)
+    }
 }
 
 impl Message {
@@ -45,6 +63,37 @@ impl Message {
 
     pub fn mentions(&self, user_id: &str) -> bool {
         self.text.contains(&format!("<@{user_id}>")) || self.text.contains(&format!("<@{user_id}|"))
+    }
+
+    /// Put or take back one person's reaction, as Slack now has it: the
+    /// screen updates the message instead of reading it again.
+    pub fn react(&mut self, name: &str, user_id: &str, add: bool) {
+        let at = self.reactions.iter().position(|r| r.name == name);
+        match (at, add) {
+            (Some(at), true) => {
+                let reaction = &mut self.reactions[at];
+                if !reaction.by(user_id) {
+                    reaction.count += 1;
+                    reaction.users.push(user_id.to_string());
+                }
+            }
+            (None, true) => self.reactions.push(Reaction {
+                name: name.to_string(),
+                count: 1,
+                users: vec![user_id.to_string()],
+            }),
+            (Some(at), false) => {
+                let reaction = &mut self.reactions[at];
+                if reaction.by(user_id) {
+                    reaction.users.retain(|user| user != user_id);
+                    reaction.count = reaction.count.saturating_sub(1);
+                }
+                if reaction.count == 0 {
+                    self.reactions.remove(at);
+                }
+            }
+            (None, false) => {}
+        }
     }
 }
 
@@ -160,6 +209,33 @@ pub fn message_from(raw: &Value) -> Option<Message> {
         reply_count: raw.get("reply_count").and_then(Value::as_u64).unwrap_or(0),
         files: titles("files", &["title", "name"]),
         attachments,
+        reactions: raw
+            .get("reactions")
+            .and_then(Value::as_array)
+            .map(|reactions| reactions.iter().filter_map(reaction_from).collect())
+            .unwrap_or_default(),
+    })
+}
+
+fn reaction_from(raw: &Value) -> Option<Reaction> {
+    let users: Vec<String> = raw
+        .get("users")
+        .and_then(Value::as_array)
+        .map(|users| {
+            users
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Reaction {
+        name: raw.get("name").and_then(Value::as_str)?.to_string(),
+        count: raw
+            .get("count")
+            .and_then(Value::as_u64)
+            .unwrap_or(users.len() as u64),
+        users,
     })
 }
 
@@ -178,7 +254,8 @@ mod tests {
             "ok": true,
             "has_more": true,
             "messages": [
-                {"ts": "1700000030.000100", "user": "U1", "text": "third", "thread_ts": "1700000030.000100", "reply_count": 2},
+                {"ts": "1700000030.000100", "user": "U1", "text": "third", "thread_ts": "1700000030.000100", "reply_count": 2,
+                 "reactions": [{"name": "+1", "users": ["U2", "U7"], "count": 2}, {"name": "eyes", "users": ["U2"]}, {"users": ["U3"]}]},
                 {"ts": "1700000020.000100", "subtype": "channel_join", "user": "U2", "text": "joined"},
                 {"ts": "1700000010.000100", "bot_id": "B1", "bot_profile": {"name": "deploybot"}, "text": "first",
                  "files": [{"name": "log.txt", "title": "Deploy log"}],
@@ -201,6 +278,32 @@ mod tests {
         assert_eq!(bot.attachments, ["preview"]);
         assert_eq!(unread.messages[1].reply_count, 2);
         assert!(!unread.messages[1].is_reply());
+        let reactions = &unread.messages[1].reactions;
+        assert_eq!(reactions.len(), 2, "a reaction without a name is dropped");
+        assert_eq!((reactions[0].name.as_str(), reactions[0].count), ("+1", 2));
+        assert!(reactions[0].by("U7"));
+        assert_eq!(reactions[1].count, 1, "the count falls back to the users");
+    }
+
+    #[test]
+    fn a_reaction_is_put_and_taken_back() {
+        let mut message = body()["messages"][0].clone();
+        message["reactions"] = json!([{"name": "+1", "users": ["U2"], "count": 1}]);
+        let mut message = message_from(&message).unwrap();
+        message.react("+1", "U7", true);
+        message.react("+1", "U7", true);
+        assert_eq!(
+            message.reactions[0].count, 2,
+            "a second add changes nothing"
+        );
+        message.react("tada", "U7", true);
+        assert_eq!(message.reactions[1].name, "tada");
+        message.react("tada", "U7", false);
+        message.react("+1", "U2", false);
+        assert_eq!(message.reactions.len(), 1);
+        assert_eq!(message.reactions[0].users, ["U7"]);
+        message.react("eyes", "U7", false);
+        assert_eq!(message.reactions.len(), 1);
     }
 
     #[test]

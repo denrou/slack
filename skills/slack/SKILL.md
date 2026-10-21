@@ -1,6 +1,6 @@
 ---
 name: slack
-description: Read, summarise and answer Slack from the terminal with the `slack` CLI (denrou/slack, which acts as the user through their browser session; not Slack's platform CLI). Use when the user asks what is new on Slack, to read or catch up on messages, DMs, channels or threads, to find a channel or a person, to draft, send or reply to a Slack message, or to mark conversations as read, and when a task needs something that was said on Slack.
+description: Read, summarise and answer Slack from the terminal with the `slack` CLI (denrou/slack, which acts as the user through their browser session; not Slack's platform CLI). Use when the user asks what is new on Slack, to read or catch up on messages, DMs, channels or threads, to find a channel or a person, to draft, send or reply to a Slack message, to react to one, or to mark conversations as read, and when a task needs something that was said on Slack.
 argument-hint: "[what to read or do, e.g. 'what is new', 'summarise #dev-team', 'reply to Jane']"
 ---
 
@@ -8,7 +8,7 @@ The `slack` binary is [denrou/slack](https://github.com/denrou/slack). It reuses
 
 ## Rules
 
-1. **Reading is free, writing is not.** `unreads`, `show`, `thread`, `channels`, `people`, `whoami` and `--count` change nothing in Slack (they refresh local caches, nothing else). `send` posts under the user's name and cannot be unsent; `read` moves Slack's read cursor, which every Slack client of theirs shows. Before either, show the exact target and text, or the list of conversations, and get an explicit yes. One yes covers one write.
+1. **Reading is free, writing is not.** `unreads`, `show`, `thread`, `channels`, `people`, `whoami` and `--count` change nothing in Slack (they refresh local caches, nothing else). `send` posts under the user's name and cannot be unsent; `react` puts an emoji on a message in their name; `read` moves Slack's read cursor, which every Slack client of theirs shows. Before any of them, show the exact target and text (the message and the emoji for `react`), or the list of conversations, and get an explicit yes. One yes covers one write.
 2. **Never mark as read as a side effect.** Not after a summary, not after a reply sent from here: only when the user asks for it, and then with the targets named, `slack read '#channel' @handle`. Bare `slack read` marks everything the last view showed, whoever ran it: on 2026-10-19 a run meant to print an error marked eight channels as read.
 3. **Numbers belong to the last output.** `slack thread 2` and `slack send 2 "…"` refer to the numbering of the last `unreads` or `show` run on this machine, the user's own included. Use a number only right after the command that printed it; otherwise build the permalink, `<url>/archives/<channel>/p<ts without the dot>`, from the `url` of `whoami` and the ids in the JSON.
 4. **Session problems are the user's to fix.** "not logged in" or "Slack refused the saved session" on stderr, with exit code 1, means the browser session is missing or expired: say so and let the user run `slack login`, which needs them in a Chrome window. Never run `login` or `logout` yourself.
@@ -27,7 +27,7 @@ The `slack` binary is [denrou/slack](https://github.com/denrou/slack). It reuses
 
 The text output is made for reading: names resolved, local times, the threads numbered, `[3 replies]` and file notes, and no colour in a pipe. Summarise from it, or pass it on. `--json` is for anything parsed with `jq`: it carries ids (`user`, `channel`) and timestamps (`ts`, `thread_ts`) but no names, and `text` is raw Slack markup with `<@U123>` mentions; `slack people` or the text output maps the ids. Every `--json` is laid out over lines, so read it whole, never line by line.
 
-`slack unreads --json` is `direct_messages`, `mentions`, `channels` (entries: `id`, `kind`, `name`, `mention_count`, `messages` oldest first, `has_more`) and `threads` (`items`: `channel`, `thread_ts`, `root`, `unread_replies`). A message is `ts`, `user` or `bot`, `text`, `thread_ts`, `reply_count`, `files`, `attachments`. `show --json` is one conversation: `channel`, `name`, `messages`, `last_read` (where the unread part starts). `thread --json` is `channel`, `thread_ts`, `root`, `replies`. Conversations muted in Slack are left out of the view, and a line on stderr says how many; `slack show` reads them all the same.
+`slack unreads --json` is `direct_messages`, `mentions`, `channels` (entries: `id`, `kind`, `name`, `mention_count`, `messages` oldest first, `has_more`) and `threads` (`items`: `channel`, `thread_ts`, `root`, `unread_replies`). A message is `ts`, `user` or `bot`, `text`, `thread_ts`, `reply_count`, `files`, `attachments`, `reactions` (`name`, `count`, `users`; Slack may list fewer users than the count). The text output draws a reaction as its character and count, `👍 3`, or `:name: 3` for a workspace's own emoji. `show --json` is one conversation: `channel`, `name`, `messages`, `last_read` (where the unread part starts). `thread --json` is `channel`, `thread_ts`, `root`, `replies`. Conversations muted in Slack are left out of the view, and a line on stderr says how many; `slack show` reads them all the same.
 
 ## Writing
 
@@ -37,13 +37,17 @@ slack send @handle "text"                    # a direct message
 slack send <permalink> "text"                # in that message's thread
 slack send '#channel' --thread <ts> "text"   # the same, from a thread_ts in the JSON
 slack send @handle < draft.md                # long text from stdin, line breaks kept
+slack react <permalink> white_check_mark     # an emoji on that message
+slack react '#channel' --ts <ts> +1          # the same, from a ts in the JSON
+slack react <permalink> eyes --remove        # take the user's reaction back
 slack read '#channel' @handle                # mark these as read, and only these
 ```
 
 - The text is Slack markup, not Markdown: `*bold*`, `_italic_`, `` `code` ``, `> quote`; `**bold**`, `#` headings and `- ` lists show as typed (`• ` is the list Slack users write).
 - `@handle` and `#channel` in the text become mentions when the name is known; `@here` and `@channel` stay plain text, deliberately.
 - The message goes out in the user's name: write it as they would (the writing-voice rule, Slack section, when it is loaded), in the language of the conversation, and show the final text before sending. `send` prints where the message landed and its permalink; give the permalink back.
-- `send` never moves the read cursor: a conversation answered from here stays unread until the user reads it in Slack or asks for `slack read`.
+- `react` takes Slack's emoji name (`+1`, `white_check_mark`, `eyes`, with or without colons) or the character itself; a name Slack does not know fails with `invalid_name`. Asking for a reaction that is already there, or taking back one that is not, succeeds and changes nothing.
+- `send` and `react` never move the read cursor: a conversation answered from here stays unread until the user reads it in Slack or asks for `slack read`.
 
 ## Typical runs
 

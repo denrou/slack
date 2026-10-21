@@ -11,12 +11,12 @@ use serde::Serialize;
 
 use crate::api::{self, Client};
 use crate::counts::{Conversation, Counts, Kind};
-use crate::history::{self, Message, compare_ts};
+use crate::history::{self, Message, Reaction, compare_ts};
 use crate::lastview::ThreadRef;
 use crate::names::Names;
 use crate::style::Style;
 use crate::threads::{self, Thread, ThreadList};
-use crate::{mrkdwn, par};
+use crate::{emoji, mrkdwn, par};
 
 /// How much of each unread conversation the view reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -609,6 +609,10 @@ pub(crate) fn render_messages(
         for attachment in &message.attachments {
             notes.push(format!("attachment: {attachment}"));
         }
+        if !message.reactions.is_empty() {
+            let labels: Vec<String> = message.reactions.iter().map(reaction_label).collect();
+            notes.push(labels.join("  "));
+        }
         if !notes.is_empty() {
             if !text.is_empty() {
                 text.push(' ');
@@ -626,6 +630,11 @@ pub(crate) fn render_messages(
         writeln!(out, "{indent}{}", style.dim(note))?;
     }
     Ok(())
+}
+
+/// An emoji and how many put it there: `👍 3`, `:yolo: 1`.
+pub(crate) fn reaction_label(reaction: &Reaction) -> String {
+    format!("{} {}", emoji::label(&reaction.name), reaction.count)
 }
 
 /// Newer than the read cursor, when there is one.
@@ -718,6 +727,7 @@ mod tests {
             reply_count: 0,
             files: Vec::new(),
             attachments: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 
@@ -776,6 +786,11 @@ mod tests {
     fn the_text_rendering_groups_numbers_and_marks_what_was_shown() {
         let mut with_replies = message("1760899000.000200", Some("U1"), "no rush");
         with_replies.reply_count = 2;
+        with_replies.reactions = vec![Reaction {
+            name: "eyes".into(),
+            count: 1,
+            users: vec!["U7".into()],
+        }];
         let view = View {
             direct_messages: vec![entry(
                 "D1",
@@ -843,7 +858,7 @@ mod tests {
             lines[2]
         );
         assert!(
-            lines[3].ends_with("  no rush [thread 1: 2 replies]"),
+            lines[3].ends_with("  no rush [thread 1: 2 replies, 👀 1]"),
             "{}",
             lines[3]
         );

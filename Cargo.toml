@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+emojis = "0.9.1"
 jiff = "0.2.38"
 percent-encoding = "2.3.2"
 # The line-info feature gives the wrapped row of a line, which the

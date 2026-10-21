@@ -1,8 +1,8 @@
-//! The user's own Slack preferences, read for one thing: the conversations
-//! they muted. `users.prefs.get` is a web-client endpoint and the
-//! per-channel settings are a JSON string inside it, so a missing or
-//! unreadable pref reads as "nothing muted", which shows more rather than
-//! less.
+//! The user's own Slack preferences, read for two things: the
+//! conversations they muted, and the emoji they use most. `users.prefs.get`
+//! is a web-client endpoint and both are JSON strings inside it, so a
+//! missing or unreadable pref reads as "nothing muted", which shows more
+//! rather than less, and as no emoji used yet.
 
 use std::collections::HashSet;
 
@@ -14,6 +14,9 @@ use crate::api::{self, Client};
 pub struct Prefs {
     /// Muted conversations: the app badges them for mentions only.
     pub muted: HashSet<String>,
+    /// Emoji names, the most used first: what the app's picker offers
+    /// first, and the screen's `+` too.
+    pub frequent_emoji: Vec<String>,
 }
 
 /// The preferences that shape the view. Only a dead session is an error;
@@ -31,28 +34,50 @@ pub fn fetch(client: &Client) -> Result<Prefs, api::Error> {
     }
 }
 
+pub fn parse(body: &Value) -> Prefs {
+    Prefs {
+        muted: muted(body),
+        frequent_emoji: frequent_emoji(body),
+    }
+}
+
+/// A pref that holds JSON in a string.
+fn nested(body: &Value, name: &str) -> Option<Value> {
+    let raw = body.get("prefs")?.get(name)?.as_str()?;
+    serde_json::from_str(raw).ok()
+}
+
 /// `prefs.all_notifications_prefs` is a JSON string whose `channels` map
 /// carries `muted: true` per conversation, among its notification levels.
-pub fn parse(body: &Value) -> Prefs {
-    let Some(raw) = body
-        .pointer("/prefs/all_notifications_prefs")
-        .and_then(Value::as_str)
-    else {
-        return Prefs::default();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
-        return Prefs::default();
+fn muted(body: &Value) -> HashSet<String> {
+    let Some(parsed) = nested(body, "all_notifications_prefs") else {
+        return HashSet::new();
     };
     let Some(channels) = parsed.get("channels").and_then(Value::as_object) else {
-        return Prefs::default();
+        return HashSet::new();
     };
-    let mut prefs = Prefs::default();
-    for (id, pref) in channels {
-        if pref.get("muted").and_then(Value::as_bool) == Some(true) {
-            prefs.muted.insert(id.clone());
-        }
-    }
-    prefs
+    channels
+        .iter()
+        .filter(|(_, pref)| pref.get("muted").and_then(Value::as_bool) == Some(true))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// `prefs.emoji_use` is a JSON string mapping each emoji name to how many
+/// times it was used.
+fn frequent_emoji(body: &Value) -> Vec<String> {
+    let Some(parsed) = nested(body, "emoji_use") else {
+        return Vec::new();
+    };
+    let Some(uses) = parsed.as_object() else {
+        return Vec::new();
+    };
+    let mut ranked: Vec<(&String, u64)> = uses
+        .iter()
+        .map(|(name, count)| (name, count.as_u64().unwrap_or(0)))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.into_iter().map(|(name, _)| name.clone()).collect()
 }
 
 #[cfg(test)]
@@ -86,6 +111,17 @@ mod tests {
         ] {
             let prefs = parse(&body);
             assert!(prefs.muted.is_empty());
+            assert!(prefs.frequent_emoji.is_empty());
         }
+    }
+
+    #[test]
+    fn the_most_used_emoji_come_first() {
+        let uses = json!({"wink": 346, "+1": 415, "yolo": 7, "joy": 65, "grin": 65});
+        let body = json!({"ok": true, "prefs": {"emoji_use": uses.to_string()}});
+        assert_eq!(
+            parse(&body).frequent_emoji,
+            ["+1", "wink", "grin", "joy", "yolo"]
+        );
     }
 }

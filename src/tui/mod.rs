@@ -36,7 +36,9 @@ use crate::directory::{self, Listed};
 use crate::history::Message;
 use crate::names::Names;
 use crate::style::Style;
-use crate::{counts, history, lastview, mention, mrkdwn, read, replies, target, view, warn};
+use crate::{
+    counts, emoji, history, lastview, mention, mrkdwn, react, read, replies, target, view, warn,
+};
 
 pub fn run(
     client: &Client,
@@ -74,6 +76,7 @@ fn screen(
         pulse: Pulse::of(&counts),
         polls: poll(client.clone()),
     };
+    app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
     let modes = Modes::ask();
     let result = app.run(&mut terminal);
@@ -319,6 +322,30 @@ impl App<'_> {
                 }
                 Err(err) => self.fail(err),
             },
+            Action::React {
+                channel,
+                ts,
+                name,
+                add,
+            } => {
+                self.busy(
+                    terminal,
+                    if add {
+                        "Reacting…"
+                    } else {
+                        "Taking it back…"
+                    },
+                )?;
+                match react::set(self.client, &channel, &ts, &name, add) {
+                    Ok(()) => {
+                        self.state.apply_reaction(&channel, &ts, &name, add);
+                        let done = if add { "Reacted" } else { "Took back" };
+                        self.state.status = Some(format!("{done} {}", emoji::label(&name)));
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err.into()),
+                }
+            }
             Action::OpenLink(url) => match launch(&url) {
                 Ok(()) => {
                     self.state.status = Some(format!("Opened {url}"));
@@ -439,6 +466,7 @@ impl App<'_> {
     fn reload(&mut self, counts: &Counts) -> Result<()> {
         let items = load(self.client, self.names, counts)?;
         self.state.replace_items(items);
+        self.state.frequent_emoji.clone_from(&counts.frequent_emoji);
         if let Some(pane) = self.state.thread.take() {
             let reloaded = self.reload_thread(&pane);
             // A failed reload keeps the thread as it was on the screen.

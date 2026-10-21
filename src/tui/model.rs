@@ -9,7 +9,7 @@ use crate::mrkdwn::{self, Link};
 use crate::names::Names;
 use crate::style::Style;
 use crate::view::{self, Entry, View};
-use crate::{directory, threads};
+use crate::{directory, emoji, threads};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -404,6 +404,17 @@ impl Draft {
     }
 }
 
+/// The emoji prompt of `+`, over the highlighted message.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reacting {
+    pub query: String,
+    /// Index into `State::emoji_choices`.
+    pub pick: usize,
+}
+
+/// How many emoji the `+` prompt offers at once.
+const REACT_ROWS: usize = 8;
+
 /// What the reply box completes: `@handle` for a person, `#name` for a
 /// channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,6 +533,7 @@ pub enum Mode {
     ConfirmReadAll,
     Help,
     Pick(Picker),
+    React(Reacting),
     /// Which link of the highlighted message: a digit picks one, to
     /// open it or to copy it.
     Links {
@@ -575,6 +587,13 @@ pub enum Action {
     OpenLink(String),
     /// Put a URL in the clipboard.
     CopyLink(String),
+    /// Put an emoji on a message, or take yours back.
+    React {
+        channel: String,
+        ts: String,
+        name: String,
+        add: bool,
+    },
 }
 
 /// The messages pane as drawn, for the keys that move by screens: only
@@ -611,6 +630,8 @@ pub struct State {
     /// load, so the box works without a list).
     pub candidates: Option<Vec<Candidate>>,
     pub me: Option<String>,
+    /// Slack's most used emoji, which the `+` prompt offers first.
+    pub frequent_emoji: Vec<String>,
     pub focus: Focus,
     /// The highlighted message of the pane, when the pane has the focus.
     pub cursor: usize,
@@ -633,6 +654,7 @@ impl State {
             viewport: Viewport::default(),
             pending_g: false,
             candidates: None,
+            frequent_emoji: Vec::new(),
         }
     }
 
@@ -657,6 +679,80 @@ impl State {
             matches,
             pick: pick.min(last),
         })
+    }
+
+    /// What the `+` prompt offers for the typed part: the reactions on
+    /// the message, then the emoji you use most, then the standard ones.
+    /// A name nothing matches is offered as typed, for a custom emoji
+    /// you have not used yet.
+    pub fn emoji_choices(&self, query: &str) -> Vec<String> {
+        let query = emoji::normalize(query);
+        let mut names: Vec<&str> = self
+            .highlighted()
+            .into_iter()
+            .flat_map(|message| message.reactions.iter().map(|r| r.name.as_str()))
+            .chain(self.frequent_emoji.iter().map(String::as_str))
+            .collect();
+        if !query.is_empty() {
+            // Not `extend`, which would ask the list for `'static` names only.
+            for code in emoji::matching(&query) {
+                names.push(code);
+            }
+        }
+        let mut choices: Vec<String> = Vec::new();
+        for name in names {
+            if choices.len() == REACT_ROWS {
+                break;
+            }
+            if emoji::begins(name, &query) && !choices.iter().any(|choice| choice == name) {
+                choices.push(name.to_string());
+            }
+        }
+        if choices.is_empty() && !query.is_empty() {
+            choices.push(query);
+        }
+        choices
+    }
+
+    /// The highlighted message, when the pane has the focus.
+    pub fn highlighted(&self) -> Option<&Message> {
+        (self.focus == Focus::Messages)
+            .then(|| self.pane_messages().get(self.cursor))
+            .flatten()
+    }
+
+    /// Whether you put this emoji on the highlighted message.
+    pub fn reacted_with(&self, name: &str) -> bool {
+        let Some(me) = self.me.as_deref() else {
+            return false;
+        };
+        self.highlighted().is_some_and(|message| {
+            message
+                .reactions
+                .iter()
+                .any(|reaction| reaction.name == name && reaction.by(me))
+        })
+    }
+
+    /// A reaction Slack took: the messages on the screen follow without
+    /// being read again, in the thread pane and in the list alike.
+    pub fn apply_reaction(&mut self, channel: &str, ts: &str, name: &str, add: bool) {
+        let Some(me) = self.me.clone() else {
+            return;
+        };
+        let thread = self
+            .thread
+            .iter_mut()
+            .filter(|thread| thread.channel == channel)
+            .flat_map(|thread| thread.messages.iter_mut());
+        let items = self
+            .items
+            .iter_mut()
+            .filter(|item| item.channel == channel)
+            .flat_map(|item| item.messages.iter_mut());
+        for message in thread.chain(items).filter(|message| message.ts == ts) {
+            message.react(name, &me, add);
+        }
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -802,6 +898,7 @@ impl State {
             },
             Mode::Help => Action::None,
             Mode::Pick(picker) => self.pick(picker, key),
+            Mode::React(reacting) => self.react(reacting, key),
             Mode::Links { links, copy } => self.choose_link(links, copy, key),
         }
     }
@@ -823,6 +920,13 @@ impl State {
                     .extend(pasted.chars().filter(|c| !c.is_control()));
                 picker.selected = 0;
                 self.mode = Mode::Pick(picker);
+            }
+            Mode::React(mut reacting) => {
+                reacting
+                    .query
+                    .extend(pasted.chars().filter(|c| !c.is_whitespace()));
+                reacting.pick = 0;
+                self.mode = Mode::React(reacting);
             }
             other => self.mode = other,
         }
@@ -865,6 +969,14 @@ impl State {
             }
             KeyCode::Char('u') => self.link(false),
             KeyCode::Char('y') => self.link(true),
+            KeyCode::Char('+') => {
+                if self.highlighted().is_some() {
+                    self.mode = Mode::React(Reacting::default());
+                } else {
+                    self.status = Some("Move onto a message first (l)".to_string());
+                }
+                Action::None
+            }
             KeyCode::Char('c') => Action::OpenPicker { compose: false },
             KeyCode::Char('n') => Action::OpenPicker { compose: true },
             KeyCode::Char('?') => {
@@ -1120,6 +1232,60 @@ impl State {
         }
     }
 
+    /// The `+` prompt: typing filters, Up and Down (Tab, Ctrl-n and
+    /// Ctrl-p too) move, Enter puts the highlighted emoji on the message
+    /// or takes yours back, Esc gives up.
+    fn react(&mut self, mut reacting: Reacting, key: KeyEvent) -> Action {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(cut) = Cut::of(key) {
+            cut.apply(&mut reacting.query);
+            reacting.pick = 0;
+            self.mode = Mode::React(reacting);
+            return Action::None;
+        }
+        let choices = self.emoji_choices(&reacting.query);
+        let last = choices.len().saturating_sub(1);
+        let down = (reacting.pick + 1).min(last);
+        let up = reacting.pick.saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => return Action::None,
+            KeyCode::Enter => {
+                if let Some(name) = choices.get(reacting.pick.min(last)) {
+                    return self.reaction(name);
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => reacting.pick = down,
+            KeyCode::Char('n') if control => reacting.pick = down,
+            KeyCode::Up | KeyCode::BackTab => reacting.pick = up,
+            KeyCode::Char('p') if control => reacting.pick = up,
+            KeyCode::Char(c) if !control && !c.is_whitespace() => {
+                reacting.query.push(c);
+                reacting.pick = 0;
+            }
+            _ => {}
+        }
+        self.mode = Mode::React(reacting);
+        Action::None
+    }
+
+    /// The chosen emoji on the highlighted message: put on, or taken back
+    /// when it is already yours, the way a click on it works in the app.
+    fn reaction(&self, name: &str) -> Action {
+        let channel = match &self.thread {
+            Some(thread) => Some(thread.channel.clone()),
+            None => self.selected_item().map(|item| item.channel.clone()),
+        };
+        match (self.highlighted(), channel) {
+            (Some(message), Some(channel)) => Action::React {
+                channel,
+                ts: message.ts.clone(),
+                name: name.to_string(),
+                add: !self.reacted_with(name),
+            },
+            _ => Action::None,
+        }
+    }
+
     /// A digit picks a link of the prompt; any other key gives up.
     fn choose_link(&mut self, mut links: Vec<Link>, copy: bool, key: KeyEvent) -> Action {
         if let KeyCode::Char(c) = key.code
@@ -1237,6 +1403,7 @@ mod tests {
             reply_count: 0,
             files: Vec::new(),
             attachments: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 
@@ -1918,6 +2085,99 @@ mod tests {
         assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
         assert_eq!(state.items.len(), 3);
         assert_eq!((state.selected, state.focus), (Some(2), Focus::List));
+    }
+
+    #[test]
+    fn plus_puts_an_emoji_on_the_highlighted_message_or_takes_yours_back() {
+        let mut state = state();
+        state.me = Some("U7".into());
+        state.frequent_emoji = vec!["+1".into(), "joy".into(), "yolo".into()];
+        state.items[0].messages[0].reactions = vec![history::Reaction {
+            name: "eyes".into(),
+            count: 2,
+            users: vec!["U2".into(), "U7".into()],
+        }];
+        assert_eq!(state.key(press(KeyCode::Char('+'))), Action::None);
+        assert_eq!(
+            state.status.as_deref(),
+            Some("Move onto a message first (l)")
+        );
+
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('+')));
+        assert!(matches!(state.mode, Mode::React(_)));
+        assert_eq!(
+            state.emoji_choices(""),
+            ["eyes", "+1", "joy", "yolo"],
+            "the message's own first, then the most used"
+        );
+        let ts = state.items[0].messages[0].ts.clone();
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::React {
+                channel: "D1".into(),
+                ts: ts.clone(),
+                name: "eyes".into(),
+                add: false,
+            },
+            "Enter on yours takes it back"
+        );
+
+        state.key(press(KeyCode::Char('+')));
+        for c in "che".chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+        assert!(
+            state
+                .emoji_choices("che")
+                .contains(&"white_check_mark".to_string())
+        );
+        state.key(press(KeyCode::Backspace));
+        state.key(press(KeyCode::Char('q')));
+        assert!(
+            matches!(&state.mode, Mode::React(r) if r.query == "chq"),
+            "q types"
+        );
+        assert_eq!(
+            state.emoji_choices("chq"),
+            ["chq"],
+            "no match is sent as typed"
+        );
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
+        assert!(matches!(state.mode, Mode::Browse));
+
+        let frequent = std::mem::take(&mut state.frequent_emoji);
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('+')));
+        assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
+        assert!(
+            matches!(state.mode, Mode::React(_)),
+            "nothing to pick keeps the prompt"
+        );
+        state.key(press(KeyCode::Esc));
+        state.key(press(KeyCode::Char('k')));
+        state.frequent_emoji = frequent;
+
+        state.key(press(KeyCode::Char('+')));
+        state.key(press(KeyCode::Down));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::React {
+                channel: "D1".into(),
+                ts: ts.clone(),
+                name: "+1".into(),
+                add: true,
+            }
+        );
+        state.apply_reaction("D1", &ts, "+1", true);
+        state.apply_reaction("D1", &ts, "eyes", false);
+        let reactions = &state.items[0].messages[0].reactions;
+        assert_eq!(reactions.len(), 2);
+        assert_eq!(
+            (reactions[0].name.as_str(), reactions[0].count),
+            ("eyes", 1)
+        );
+        assert_eq!(reactions[1].users, ["U7"]);
     }
 
     #[test]

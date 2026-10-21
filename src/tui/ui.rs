@@ -12,7 +12,7 @@ use super::model::{
 };
 use crate::history::Message;
 use crate::names::Names;
-use crate::{mrkdwn, view};
+use crate::{emoji, mrkdwn, view};
 
 const LIST_HINTS: &str = "j/k move  l messages  Enter reply  n new  c open any  r read  R read all  o in Slack  Ctrl-R refresh  ? keys  q quit";
 const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  n new  x close  c open any  r read  o in Slack  Ctrl-R refresh  ? keys  q quit";
@@ -35,6 +35,7 @@ const HELP: &[&str] = &[
     "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
     "x               close an opened conversation",
     "u, y            open, or copy, a link of the highlighted message",
+    "+               react to the highlighted message: type to filter, Enter puts it on, or takes yours back",
     "r               mark the selected one as read",
     "R               mark everything listed as read (asks first)",
     "o               open it in Slack, at the highlighted message from the pane",
@@ -53,6 +54,7 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Vie
         }
         Mode::Help => HELP.len() as u16 + 2,
         Mode::Links { links, .. } => links.len() as u16 + 2,
+        Mode::React(reacting) => state.emoji_choices(&reacting.query).len() as u16 + 3,
         Mode::Browse | Mode::ConfirmReadAll | Mode::Pick(_) => 1,
     };
     let [main, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_height)])
@@ -270,6 +272,24 @@ fn draw_messages(
                 Line::from(vec![Span::raw(indent.clone()), Span::raw(rest.to_string())])
                     .style(style),
             );
+        }
+        // Under the message, as the app has them; yours stand out, since
+        // `+` on one of them takes it back.
+        if !message.reactions.is_empty() {
+            let mut spans = vec![Span::raw(indent.clone())];
+            for (at, reaction) in message.reactions.iter().enumerate() {
+                if at > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                let mine = state.me.as_deref().is_some_and(|me| reaction.by(me));
+                let look = if mine {
+                    Style::new().blue().bold()
+                } else {
+                    Style::new()
+                };
+                spans.push(Span::styled(view::reaction_label(reaction), look));
+            }
+            lines.push(Line::from(spans).style(style));
         }
         ends.push(lines.len());
     }
@@ -529,6 +549,50 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 area,
             );
         }
+        Mode::React(reacting) => {
+            let who = state
+                .highlighted()
+                .map_or_else(|| "the message".to_string(), |m| describe(m, names));
+            let title = match &state.status {
+                Some(status) => format!(" React to {who} · {status} "),
+                None => {
+                    format!(" React to {who} · Enter puts it on or takes yours back, Esc cancels ")
+                }
+            };
+            let mut lines = vec![Line::from(vec![
+                Span::raw(reacting.query.as_str()),
+                Span::styled("▏", Style::new().dim()),
+            ])];
+            let choices = state.emoji_choices(&reacting.query);
+            let pick = reacting.pick.min(choices.len().saturating_sub(1));
+            let on_message = |name: &str| {
+                state
+                    .highlighted()
+                    .and_then(|m| m.reactions.iter().find(|r| r.name == name))
+                    .map(|r| r.count)
+            };
+            for (at, name) in choices.iter().enumerate() {
+                let note = match (on_message(name), state.reacted_with(name)) {
+                    (Some(_), true) => "  yours, Enter takes it back".to_string(),
+                    (Some(count), false) => format!("  {count} on it"),
+                    (None, _) => String::new(),
+                };
+                let line = Line::from(vec![
+                    // A custom emoji has no character: its name alone.
+                    Span::raw(format!(" {}  {name}", emoji::glyph(name).unwrap_or("  "))),
+                    Span::styled(note, Style::new().dim()),
+                ]);
+                lines.push(if at == pick {
+                    line.style(Style::new().add_modifier(Modifier::REVERSED))
+                } else {
+                    line
+                });
+            }
+            frame.render_widget(
+                Paragraph::new(lines).block(Block::bordered().title(title)),
+                area,
+            );
+        }
         Mode::Help => {
             let lines: Vec<Line> = HELP.iter().map(|line| Line::from(*line)).collect();
             frame.render_widget(
@@ -623,6 +687,7 @@ mod tests {
             reply_count: 0,
             files: Vec::new(),
             attachments: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 
@@ -669,6 +734,48 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    #[test]
+    fn reactions_sit_under_their_message_and_plus_offers_them() {
+        let mut state = history(&["hello", "world"], None);
+        state.me = Some("U7".to_string());
+        state.items[0].messages[0].reactions = vec![
+            crate::history::Reaction {
+                name: "+1".to_string(),
+                count: 2,
+                users: vec!["U2".to_string(), "U7".to_string()],
+            },
+            crate::history::Reaction {
+                name: "yolo".to_string(),
+                count: 1,
+                users: vec!["U2".to_string()],
+            },
+        ];
+        let (buffer, _) = render(&state, 100, 20);
+        let rows: Vec<String> = (0..20).map(|y| row(&buffer, y)).collect();
+        let hello = rows
+            .iter()
+            .position(|r| r.contains("hello"))
+            .expect("hello");
+        // A wide character fills two cells, the second one blank here.
+        assert!(
+            rows[hello + 1].contains("👍  2  :yolo: 1"),
+            "{}",
+            rows[hello + 1]
+        );
+        assert!(rows[hello + 2].contains("world"));
+
+        state.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        let (buffer, _) = render(&state, 100, 20);
+        let rows: Vec<String> = (0..20).map(|y| row(&buffer, y)).collect();
+        assert!(rows.iter().any(|r| r.contains("React to")));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("👍   +1  yours, Enter takes it back"))
+        );
+        assert!(rows.iter().any(|r| r.contains("│     yolo  1 on it")));
     }
 
     fn row_with(buffer: &Buffer, needle: &str) -> Option<u16> {

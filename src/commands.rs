@@ -18,7 +18,9 @@ use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
-use crate::{counts, directory, history, lastview, mrkdwn, read, replies, send, target, tui, view};
+use crate::{
+    counts, directory, history, lastview, mrkdwn, react, read, replies, send, target, tui, view,
+};
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
@@ -99,6 +101,23 @@ pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()
         target,
         text,
         thread,
+    );
+    names.save();
+    result
+}
+
+pub fn react(message: &str, emoji: &str, ts: Option<&str>, remove: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (team_id, workspace) = store.default_workspace()?;
+    let mut names = Names::load();
+    let result = react::run(
+        &workspace.client(),
+        &mut names,
+        team_id,
+        message,
+        emoji,
+        ts,
+        remove,
     );
     names.save();
     result
