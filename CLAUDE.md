@@ -85,6 +85,11 @@ Deferred on purpose by the review of 2026-10-21 (`v0.11.0..main`): a conversatio
 
 Deferred on purpose by the review of 2026-10-21 (`v0.10.0..main`): with people marked, Enter on a typed name whose highlighted match is a channel or a group does nothing and says nothing (the picker has no status line of its own). Rare, since a group is people; a typo that matches nothing goes to the list instead.
 
+Deferred on purpose by the review of 2026-10-21 (`v0.12.0..main`):
+
+- The whole threads are read after the histories and the thread view, not beside them, and a long thread is read again on every reload even when nothing in it moved. Overlapping them needs the thread view first, and a cache keyed by `latest_reply` would be a store of its own; worth it if a reload feels slow.
+- Each unread conversation reads one page of 200 and usually keeps 50 or today's. Asking from midnight and falling back to the last 50 would be two calls where one is now; Denis chose the one bigger call.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
