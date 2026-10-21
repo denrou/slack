@@ -518,12 +518,14 @@ impl App<'_> {
     /// What the socket said since the last pass: applied to the screen
     /// when it can be, else passed on to the poll as a nudge.
     fn heard(&mut self) {
+        let now = Instant::now();
+        self.state.forget_typing(now);
         let mut wake = Wake::Nothing;
         for signal in self.signals.try_iter() {
             let asked = match signal {
                 Signal::Up { again: true } => Wake::Reload,
                 Signal::Up { again: false } | Signal::Down => Wake::Check,
-                Signal::Event(event) => self.state.hear(event),
+                Signal::Event(event) => self.state.hear(event, now),
             };
             wake = wake.max(asked);
         }

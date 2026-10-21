@@ -56,6 +56,13 @@ pub enum Event {
         name: String,
         add: bool,
     },
+    /// Someone is typing; Slack says it again every few seconds while
+    /// they do.
+    Typing {
+        channel: String,
+        thread_ts: Option<String>,
+        user: String,
+    },
 }
 
 /// A message posted, edited or deleted.
@@ -140,6 +147,11 @@ impl Event {
                     add: kind == "reaction_added",
                 })
             }
+            "user_typing" => Some(Event::Typing {
+                channel: text(frame, "channel")?,
+                thread_ts: text(frame, "thread_ts"),
+                user: text(frame, "user")?,
+            }),
             _ => None,
         }
     }
@@ -321,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn cursors_reactions_and_the_rest() {
+    fn cursors_reactions_typing_and_the_rest() {
         for kind in [
             "channel_marked",
             "im_marked",
@@ -344,6 +356,15 @@ mod tests {
                 user: "U2".to_string(),
                 name: "eyes".to_string(),
                 add: false,
+            })
+        );
+        let frame = json!({"type": "user_typing", "channel": "D1", "user": "U2"});
+        assert_eq!(
+            Event::parse(&frame),
+            Some(Event::Typing {
+                channel: "D1".to_string(),
+                thread_ts: None,
+                user: "U2".to_string(),
             })
         );
         // A reaction on a file has no channel: nothing on the screen shows it.

@@ -79,12 +79,19 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
             Row::Item(index) => {
                 let item = &state.items[*index];
                 let tick = if state.is_checked(item) { "✓ " } else { "  " };
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::raw(tick),
                     Span::raw(item.title.as_str()),
                     Span::raw("  "),
                     Span::styled(item.detail.as_str(), Style::new().dim()),
-                ]))
+                ];
+                if !state
+                    .typists(&item.channel, item.thread_ts.as_deref())
+                    .is_empty()
+                {
+                    spans.push(Span::styled("  ✎", Style::new().dim()));
+                }
+                ListItem::new(Line::from(spans))
             }
         })
         .collect();
@@ -379,7 +386,16 @@ fn draw_messages(
         .iter()
         .filter(|&&start| screen.contains(&row_of(start)))
         .count();
-    let block = Block::bordered().title(title);
+    let shown = match (&state.thread, state.selected_item()) {
+        (Some(thread), _) => Some((thread.channel.as_str(), Some(thread.thread_ts.as_str()))),
+        (None, item) => item.map(|item| (item.channel.as_str(), item.thread_ts.as_deref())),
+    };
+    let mut block = Block::bordered().title(title);
+    if let Some(typing) = shown
+        .and_then(|(channel, thread_ts)| typing_line(&state.typists(channel, thread_ts), names))
+    {
+        block = block.title_bottom(Line::from(typing).dim());
+    }
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(pinned) = pinned {
@@ -414,6 +430,17 @@ fn draw_messages(
         height,
         rows: total,
         in_view,
+    }
+}
+
+/// On the pane's bottom border, where it moves nothing in the pane.
+fn typing_line(typists: &[&str], names: &Names) -> Option<String> {
+    let name = |id: &str| names.user_name(id).unwrap_or_else(|| "someone".to_string());
+    match typists {
+        [] => None,
+        [one] => Some(format!(" {} is typing… ", name(one))),
+        [one, two] => Some(format!(" {} and {} are typing… ", name(one), name(two))),
+        _ => Some(" several people are typing… ".to_string()),
     }
 }
 
@@ -772,6 +799,28 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    #[test]
+    fn typing_marks_the_conversation_and_signs_under_its_pane() {
+        let mut state = history(&["hello"], None);
+        let (buffer, _) = render(&state, 100, 12);
+        let rows: Vec<String> = (0..12).map(|y| row(&buffer, y)).collect();
+        assert!(!rows.iter().any(|r| r.contains('✎') || r.contains("typing")));
+
+        state.typing.insert(
+            ("C1".to_string(), None),
+            [("U2".to_string(), std::time::Instant::now())].into(),
+        );
+        let (buffer, _) = render(&state, 100, 12);
+        let rows: Vec<String> = (0..12).map(|y| row(&buffer, y)).collect();
+        assert!(
+            rows[2].contains("#c1") && rows[2].contains('✎'),
+            "{}",
+            rows[2]
+        );
+        // The pane's bottom border, above the status line.
+        assert!(rows[10].contains("someone is typing…"), "{}", rows[10]);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! so the keys are testable; `mod.rs` performs the actions.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -687,6 +688,14 @@ pub enum Wake {
     Reload,
 }
 
+/// How long a typing notice holds without another: Slack repeats it every
+/// few seconds while someone types.
+const TYPING_FOR: Duration = Duration::from_secs(6);
+
+/// Who is typing where, by channel and thread, with when Slack last said
+/// so.
+type Typing = BTreeMap<(String, Option<String>), BTreeMap<String, Instant>>;
+
 /// The messages pane as drawn, for the keys that move by screens: only
 /// the drawing knows how the text wraps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -731,6 +740,7 @@ pub struct State {
     /// The highlighted message of the pane, when the pane has the focus.
     pub cursor: usize,
     pub thread: Option<ThreadPane>,
+    pub typing: Typing,
 }
 
 impl State {
@@ -751,6 +761,7 @@ impl State {
             candidates: None,
             frequent_emoji: Vec::new(),
             checked: BTreeMap::new(),
+            typing: BTreeMap::new(),
         }
     }
 
@@ -859,8 +870,19 @@ impl State {
     /// What an event from Slack's socket asks of the screen. A reaction
     /// and a reply's count are applied here, without a call; the rest is
     /// for the counts to tell.
-    pub fn hear(&mut self, event: Event) -> Wake {
+    pub fn hear(&mut self, event: Event, now: Instant) -> Wake {
         match event {
+            Event::Typing {
+                channel,
+                thread_ts,
+                user,
+            } => {
+                if Some(&user) != self.me.as_ref() {
+                    let typists = self.typing.entry((channel, thread_ts)).or_default();
+                    typists.insert(user, now);
+                }
+                Wake::Nothing
+            }
             Event::Moved => Wake::Check,
             Event::Reaction {
                 channel,
@@ -878,6 +900,18 @@ impl State {
 
     fn posted(&mut self, posted: &Posted) -> Wake {
         let channel = posted.channel.as_str();
+        // They sent what they were typing.
+        if let Some(user) = &posted.user
+            && !posted.changed
+        {
+            let key = (
+                posted.channel.clone(),
+                posted.reply_to().map(str::to_string),
+            );
+            if let Some(typists) = self.typing.get_mut(&key) {
+                typists.remove(user);
+            }
+        }
         if posted.changed {
             return if self.shows_channel(channel) {
                 Wake::Reload
@@ -901,6 +935,23 @@ impl State {
         }
         // A thread you follow moves the threads block.
         Wake::Check
+    }
+
+    /// Drop the typing notices that were not repeated.
+    pub fn forget_typing(&mut self, now: Instant) {
+        self.typing.retain(|_, typists| {
+            typists.retain(|_, seen| now.duration_since(*seen) < TYPING_FOR);
+            !typists.is_empty()
+        });
+    }
+
+    /// Who is typing in this conversation, or in this thread.
+    pub fn typists(&self, channel: &str, thread_ts: Option<&str>) -> Vec<&str> {
+        self.typing
+            .iter()
+            .filter(|((at, thread), _)| at == channel && thread.as_deref() == thread_ts)
+            .flat_map(|(_, typists)| typists.keys().map(String::as_str))
+            .collect()
     }
 
     fn shows_channel(&self, channel: &str) -> bool {
@@ -3095,21 +3146,27 @@ mod tests {
         })
     }
 
+    impl State {
+        fn hear_now(&mut self, event: Event) -> Wake {
+            self.hear(event, Instant::now())
+        }
+    }
+
     #[test]
     fn the_socket_reloads_only_for_what_the_counts_would_miss() {
         let mut state = state();
         state.me = Some("U7".into());
 
-        assert_eq!(state.hear(posted("C9", "5.0", None, "U1")), Wake::Check);
-        assert_eq!(state.hear(Event::Moved), Wake::Check);
+        assert_eq!(state.hear_now(posted("C9", "5.0", None, "U1")), Wake::Check);
+        assert_eq!(state.hear_now(Event::Moved), Wake::Check);
         assert_eq!(
-            state.hear(posted("C1", "5.0", None, "U7")),
+            state.hear_now(posted("C1", "5.0", None, "U7")),
             Wake::Nothing,
             "yours: the cursor it moves comes on its own"
         );
 
         assert_eq!(
-            state.hear(posted("C2", "5.0", Some("2.000100"), "U1")),
+            state.hear_now(posted("C2", "5.0", Some("2.000100"), "U1")),
             Wake::Reload,
             "a reply in a listed thread"
         );
@@ -3122,13 +3179,13 @@ mod tests {
             from_message: 0,
         });
         assert_eq!(
-            state.hear(posted("C1", "5.0", Some("3.0"), "U1")),
+            state.hear_now(posted("C1", "5.0", Some("3.0"), "U1")),
             Wake::Reload,
             "a reply in the open thread"
         );
 
         assert_eq!(
-            state.hear(posted("D1", "5.0", Some("1.000100"), "U1")),
+            state.hear_now(posted("D1", "5.0", Some("1.000100"), "U1")),
             Wake::Check,
             "a reply elsewhere"
         );
@@ -3142,7 +3199,7 @@ mod tests {
         };
         edit.changed = true;
         assert_eq!(
-            state.hear(Event::Message(edit)),
+            state.hear_now(Event::Message(edit)),
             Wake::Reload,
             "an edit on the screen"
         );
@@ -3151,7 +3208,7 @@ mod tests {
         };
         edit.changed = true;
         assert_eq!(
-            state.hear(Event::Message(edit)),
+            state.hear_now(Event::Message(edit)),
             Wake::Nothing,
             "an edit elsewhere"
         );
@@ -3163,16 +3220,45 @@ mod tests {
             name: "eyes".into(),
             add,
         };
-        assert_eq!(state.hear(reaction("U1", true)), Wake::Nothing);
-        assert_eq!(state.hear(reaction("U7", true)), Wake::Nothing);
+        assert_eq!(state.hear_now(reaction("U1", true)), Wake::Nothing);
+        assert_eq!(state.hear_now(reaction("U7", true)), Wake::Nothing);
         assert_eq!(
-            state.hear(reaction("U7", true)),
+            state.hear_now(reaction("U7", true)),
             Wake::Nothing,
             "yours again, as the socket echoes what `R` did"
         );
         let reactions = &state.items[0].messages[1].reactions;
         assert_eq!((reactions[0].count, reactions[0].users.len()), (2, 2));
-        state.hear(reaction("U1", false));
+        state.hear_now(reaction("U1", false));
         assert_eq!(state.items[0].messages[1].reactions[0].users, ["U7"]);
+    }
+
+    #[test]
+    fn typing_shows_until_the_message_or_until_it_stops() {
+        let mut state = state();
+        state.me = Some("U7".into());
+        let typing = |channel: &str, thread_ts: Option<&str>, user: &str| Event::Typing {
+            channel: channel.into(),
+            thread_ts: thread_ts.map(str::to_string),
+            user: user.into(),
+        };
+        let start = Instant::now();
+        state.hear(typing("D1", None, "U1"), start);
+        state.hear(typing("D1", None, "U7"), start);
+        state.hear(typing("C2", Some("2.000100"), "U2"), start);
+        assert_eq!(state.typists("D1", None), ["U1"], "never you");
+        assert_eq!(state.typists("C2", Some("2.000100")), ["U2"]);
+        assert!(
+            state.typists("C2", None).is_empty(),
+            "the thread, not its channel"
+        );
+
+        state.hear(posted("D1", "5.0", None, "U1"), start);
+        assert!(state.typists("D1", None).is_empty(), "sent");
+
+        state.forget_typing(start + TYPING_FOR / 2);
+        assert_eq!(state.typists("C2", Some("2.000100")), ["U2"]);
+        state.forget_typing(start + TYPING_FOR);
+        assert!(state.typing.is_empty(), "not repeated");
     }
 }
