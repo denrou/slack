@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use jiff::Zoned;
@@ -75,6 +75,7 @@ fn screen(
         directory_walked: false,
         pulse: Pulse::of(&counts),
         polls: poll(client.clone()),
+        written: Instant::now(),
     };
     app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
@@ -149,22 +150,26 @@ fn load(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>
 /// How often the screen asks Slack whether anything moved.
 const POLL_EVERY: Duration = Duration::from_secs(15);
 
-/// `client.counts` every `POLL_EVERY` on a thread of its own, so the
-/// screen never stalls on it: one round trip, where a reload is one per
-/// unread conversation. Detached, so a quit never waits on a call in
+/// The counts every `POLL_EVERY` on a thread of its own, so the screen
+/// never stalls on them: `client.counts` and the preferences side by side,
+/// where a reload is one call per unread conversation. Each result carries
+/// when its fetch began. Detached, so a quit never waits on a call in
 /// flight; it stops once the screen drops the receiver.
-fn poll(client: Client) -> Receiver<Result<Counts, api::Error>> {
+fn poll(client: Client) -> Receiver<Polled> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         loop {
             thread::sleep(POLL_EVERY);
-            if sender.send(counts::fetch(&client)).is_err() {
+            let began = Instant::now();
+            if sender.send((began, counts::fetch(&client))).is_err() {
                 return;
             }
         }
     });
     receiver
 }
+
+type Polled = (Instant, Result<Counts, api::Error>);
 
 /// What a poll compares to decide on a reload: per unread conversation
 /// its newest message, read cursor and mentions, and the threads block.
@@ -206,7 +211,10 @@ struct App<'a> {
     directory_walked: bool,
     /// The counts the list was last loaded from.
     pulse: Pulse,
-    polls: Receiver<Result<Counts, api::Error>>,
+    polls: Receiver<Polled>,
+    /// When the last mark or reply finished: a poll begun before it shows
+    /// what was just read as unread, and is dropped.
+    written: Instant,
 }
 
 impl App<'_> {
@@ -248,6 +256,18 @@ impl App<'_> {
     }
 
     fn perform(&mut self, action: Action, terminal: &mut DefaultTerminal) -> Result<()> {
+        let writes = matches!(
+            action,
+            Action::MarkRead(_) | Action::MarkAllRead | Action::Send { .. }
+        );
+        let performed = self.act(action, terminal);
+        if writes {
+            self.written = Instant::now();
+        }
+        performed
+    }
+
+    fn act(&mut self, action: Action, terminal: &mut DefaultTerminal) -> Result<()> {
         match action {
             Action::None | Action::Quit => Ok(()),
             Action::Refresh => self.refresh(terminal),
@@ -437,9 +457,12 @@ impl App<'_> {
         if !matches!(self.state.mode, Mode::Browse | Mode::Help) {
             return Ok(());
         }
-        let Some(polled) = self.polls.try_iter().last() else {
+        let Some((began, polled)) = self.polls.try_iter().last() else {
             return Ok(());
         };
+        if began < self.written {
+            return Ok(());
+        }
         let counts = match polled {
             Ok(counts) => counts,
             Err(err) => {
