@@ -239,7 +239,12 @@ fn draw_messages(
             Span::styled(format!("{time:>width$}"), time_style),
             Span::raw("  "),
         ];
-        if let Some(author) = author_of(message, names) {
+        let author = match (&message.user, &message.bot) {
+            (Some(user), _) => Some(names.user_label(user)),
+            (None, Some(bot)) => Some(format!("{bot} (bot)")),
+            (None, None) => None,
+        };
+        if let Some(author) = author {
             spans.push(Span::styled(author, Style::new().cyan()));
             spans.push(Span::raw(": "));
         }
@@ -326,6 +331,17 @@ fn draw_messages(
         first_row.push(total);
     }
     let row_of = |line: usize| first_row[line];
+    // A thread is read from its new replies, which can put the root, what
+    // the thread is about, above the pane: a thread taller than the pane
+    // keeps its top row for the root. Kept before the scroll is worked
+    // out, so the height is the same from one frame to the next.
+    let keeps_root_row = inner_height > 1
+        && total > inner_height
+        && messages
+            .first()
+            .is_some_and(|root| root_ts == Some(root.ts.as_str()));
+    let height = height - u16::from(keeps_root_row);
+    let inner_height = usize::from(height);
     // From the list, a history starts at its new part with a few rows of
     // what came before above it, or at its end when nothing is new, the
     // way a chat scrolls; Ctrl-U shows the rest.
@@ -346,30 +362,13 @@ fn draw_messages(
     } else {
         (i32::from(anchor) + state.scroll).max(0) as u16
     };
-    // A thread is read from its new replies, which can put the root, what
-    // the thread is about, above the pane: its first line stays on top.
-    let pinned = messages
-        .first()
-        .filter(|root| root_ts == Some(root.ts.as_str()))
-        .filter(|_| {
-            starts
-                .first()
-                .is_some_and(|&at| row_of(at) < usize::from(scroll))
-        })
-        .map(|root| {
-            let text = mrkdwn::render(&root.text, &user, &channel, &plain);
-            let mut spans = vec![Span::raw(indent.clone())];
-            if let Some(author) = author_of(root, names) {
-                spans.push(Span::styled(author, Style::new().cyan()));
-                spans.push(Span::raw(": "));
-            }
-            spans.push(Span::raw(text.lines().next().unwrap_or("").to_string()));
-            spans.push(Span::raw(" [root]"));
-            Line::from(spans).dim()
-        });
-    let top = u16::from(pinned.is_some());
-    let height = height.saturating_sub(top);
-    let inner_height = usize::from(height);
+    // Once the whole root is above, its first line, as drawn, fills that
+    // row; until then the row shows the text like the others.
+    let pinned = (keeps_root_row
+        && ends
+            .first()
+            .is_some_and(|&end| row_of(end) <= usize::from(scroll)))
+    .then(|| lines[starts[0]].clone().dim());
     // The highlighted message as rows of the pane, every row it wraps to.
     let highlight = (state.focus == Focus::Messages)
         .then(|| starts.get(state.cursor).zip(ends.get(state.cursor)))
@@ -386,7 +385,7 @@ fn draw_messages(
     if let Some(pinned) = pinned {
         frame.render_widget(Paragraph::new(pinned), Rect { height: 1, ..inner });
         inner.y += 1;
-        inner.height = inner.height.saturating_sub(1);
+        inner.height -= 1;
     }
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -415,14 +414,6 @@ fn draw_messages(
         height,
         rows: total,
         in_view,
-    }
-}
-
-fn author_of(message: &Message, names: &Names) -> Option<String> {
-    match (&message.user, &message.bot) {
-        (Some(user), _) => Some(names.user_label(user)),
-        (None, Some(bot)) => Some(format!("{bot} (bot)")),
-        (None, None) => None,
     }
 }
 
@@ -834,26 +825,55 @@ mod tests {
         state.items[0].thread_ts = Some(ts(1));
         let roots = |buffer: &Buffer| {
             (0..20)
-                .filter(|&y| row(buffer, y).contains("[root]"))
+                .filter(|&y| row(buffer, y).contains("why did the build break"))
                 .count()
         };
 
-        let (buffer, _) = render(&state, 100, 20);
+        let (buffer, viewport) = render(&state, 100, 20);
         let pinned = row_with(&buffer, "why did the build break [root]").expect("the root");
         assert_eq!(pinned, 1, "right under the border");
         assert!(row_with(&buffer, "── new ──").is_some_and(|new| new > pinned));
         assert_eq!(roots(&buffer), 1);
+        let thread_height = viewport.height;
 
         state.focus = Focus::Messages;
         state.cursor = 0;
-        let (buffer, _) = render(&state, 100, 20);
+        let (buffer, viewport) = render(&state, 100, 20);
         assert_eq!(roots(&buffer), 1, "the root in view is not pinned again");
+        assert_eq!(viewport.height, thread_height, "the same height either way");
 
+        // The thread pane, its last reply highlighted: still on screen
+        // under the pinned root.
+        let mut root = message(&ts(1), "");
+        root.files = vec!["diagram.png".to_string()];
+        let mut messages = vec![root];
+        messages.extend((2..=40).map(|n| message(&ts(n), &format!("reply {n}"))));
+        state.open_thread(crate::tui::model::ThreadPane {
+            channel: "C1".to_string(),
+            thread_ts: ts(1),
+            title: "#c1".to_string(),
+            messages,
+            has_more: false,
+            from_message: 0,
+        });
+        state.cursor = 39;
+        let (buffer, _) = render(&state, 100, 20);
+        assert_eq!(
+            row_with(&buffer, "[root, file: diagram.png]"),
+            Some(1),
+            "a root without text still says what it is"
+        );
+        let last = row_with(&buffer, "reply 40").expect("the highlighted reply");
+        let x = column_of(&buffer, last, "reply 40").unwrap();
+        assert!(has(&buffer, x, last, Modifier::REVERSED));
+
+        state.thread = None;
         state.items[0].section = Section::Channels;
         state.items[0].thread_ts = None;
         state.focus = Focus::List;
-        let (buffer, _) = render(&state, 100, 20);
+        let (buffer, viewport) = render(&state, 100, 20);
         assert_eq!(roots(&buffer), 0, "a channel pins nothing");
+        assert_eq!(viewport.height, thread_height + 1, "the root keeps its row");
     }
 
     fn row_with(buffer: &Buffer, needle: &str) -> Option<u16> {

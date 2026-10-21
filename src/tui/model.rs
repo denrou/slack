@@ -681,7 +681,8 @@ pub struct Viewport {
     /// Where the pane starts on its own in list focus, in rows: the new
     /// part of a history.
     pub anchor: u16,
-    /// Rows inside the border.
+    /// Rows the text scrolls in: inside the border, less the top row a
+    /// thread taller than the pane keeps for its root.
     pub height: u16,
     /// Rows of the whole text, wrapped.
     pub rows: usize,
