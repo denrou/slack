@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::history::{self, Message, compare_ts};
 use crate::mrkdwn::{self, Link};
 use crate::names::Names;
+use crate::rtm::{Event, Posted};
 use crate::style::Style;
 use crate::view::{self, Entry, View};
 use crate::{directory, emoji, threads};
@@ -674,6 +675,18 @@ pub enum Action {
     },
 }
 
+/// What an event from Slack's socket asks of the screen, the strongest
+/// of a batch winning: a reload covers a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Wake {
+    Nothing,
+    /// Read the counts, and reload if they moved.
+    Check,
+    /// Reload whatever the counts say: what changed is on the screen,
+    /// and the counts would not show it.
+    Reload,
+}
+
 /// The messages pane as drawn, for the keys that move by screens: only
 /// the drawing knows how the text wraps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -819,25 +832,95 @@ impl State {
         })
     }
 
-    /// A reaction Slack took: the messages on the screen follow without
-    /// being read again, in the thread pane and in the list alike.
-    pub fn apply_reaction(&mut self, channel: &str, ts: &str, name: &str, add: bool) {
-        let Some(me) = self.me.clone() else {
-            return;
-        };
+    /// A reaction Slack took, yours or someone else's: the messages on
+    /// the screen follow without being read again.
+    pub fn apply_reaction(&mut self, channel: &str, ts: &str, user: &str, name: &str, add: bool) {
+        for message in self.shown_messages(channel, ts) {
+            message.react(name, user, add);
+        }
+    }
+
+    /// Every copy of a message on the screen, in the thread pane and in
+    /// the list alike.
+    fn shown_messages(&mut self, channel: &str, ts: &str) -> impl Iterator<Item = &mut Message> {
         let thread = self
             .thread
             .iter_mut()
-            .filter(|thread| thread.channel == channel)
+            .filter(move |thread| thread.channel == channel)
             .flat_map(|thread| thread.messages.iter_mut());
         let items = self
             .items
             .iter_mut()
-            .filter(|item| item.channel == channel)
+            .filter(move |item| item.channel == channel)
             .flat_map(|item| item.messages.iter_mut());
-        for message in thread.chain(items).filter(|message| message.ts == ts) {
-            message.react(name, &me, add);
+        thread.chain(items).filter(move |message| message.ts == ts)
+    }
+
+    /// What an event from Slack's socket asks of the screen. A reaction
+    /// and a reply's count are applied here, without a call; the rest is
+    /// for the counts to tell.
+    pub fn hear(&mut self, event: Event) -> Wake {
+        match event {
+            Event::Moved => Wake::Check,
+            Event::Reaction {
+                channel,
+                ts,
+                user,
+                name,
+                add,
+            } => {
+                self.apply_reaction(&channel, &ts, &user, &name, add);
+                Wake::Nothing
+            }
+            Event::Message(posted) => self.posted(&posted),
         }
+    }
+
+    fn posted(&mut self, posted: &Posted) -> Wake {
+        let channel = posted.channel.as_str();
+        if posted.changed {
+            return if self.shows_channel(channel) {
+                Wake::Reload
+            } else {
+                Wake::Nothing
+            };
+        }
+        // Yours, sent from here or from another client: the cursor it
+        // moves comes as an event of its own.
+        if posted.user.is_some() && posted.user == self.me {
+            return Wake::Nothing;
+        }
+        let Some(root) = posted.reply_to() else {
+            return Wake::Check;
+        };
+        if self.shows_thread(channel, root) {
+            return Wake::Reload;
+        }
+        for message in self.shown_messages(channel, root) {
+            message.reply_count += 1;
+        }
+        // A thread you follow moves the threads block.
+        Wake::Check
+    }
+
+    fn shows_channel(&self, channel: &str) -> bool {
+        self.items.iter().any(|item| item.channel == channel)
+            || self
+                .thread
+                .as_ref()
+                .is_some_and(|thread| thread.channel == channel)
+    }
+
+    /// A thread listed, or open in the pane: shown whole, so a new reply
+    /// is read again.
+    fn shows_thread(&self, channel: &str, root: &str) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.key() == (channel, Some(root)))
+            || self
+                .thread
+                .as_ref()
+                .is_some_and(|thread| thread.channel == channel && thread.thread_ts == root)
     }
 
     pub fn is_checked(&self, item: &Item) -> bool {
@@ -2516,7 +2599,7 @@ mod tests {
             },
             "under the name the message has it"
         );
-        state.apply_reaction("D1", &ts, "thumbsup", false);
+        state.apply_reaction("D1", &ts, "U7", "thumbsup", false);
         assert!(state.items[0].messages[0].reactions.is_empty());
     }
 
@@ -2602,8 +2685,8 @@ mod tests {
                 add: true,
             }
         );
-        state.apply_reaction("D1", &ts, "+1", true);
-        state.apply_reaction("D1", &ts, "eyes", false);
+        state.apply_reaction("D1", &ts, "U7", "+1", true);
+        state.apply_reaction("D1", &ts, "U7", "eyes", false);
         let reactions = &state.items[0].messages[0].reactions;
         assert_eq!(reactions.len(), 2);
         assert_eq!(
@@ -2999,5 +3082,97 @@ mod tests {
             2,
             "an opened conversation with no cursor, from its end"
         );
+    }
+
+    fn posted(channel: &str, ts: &str, thread_ts: Option<&str>, user: &str) -> Event {
+        Event::Message(Posted {
+            channel: channel.to_string(),
+            ts: ts.to_string(),
+            thread_ts: thread_ts.map(str::to_string),
+            user: Some(user.to_string()),
+            changed: false,
+            broadcast: false,
+        })
+    }
+
+    #[test]
+    fn the_socket_reloads_only_for_what_the_counts_would_miss() {
+        let mut state = state();
+        state.me = Some("U7".into());
+
+        assert_eq!(state.hear(posted("C9", "5.0", None, "U1")), Wake::Check);
+        assert_eq!(state.hear(Event::Moved), Wake::Check);
+        assert_eq!(
+            state.hear(posted("C1", "5.0", None, "U7")),
+            Wake::Nothing,
+            "yours: the cursor it moves comes on its own"
+        );
+
+        assert_eq!(
+            state.hear(posted("C2", "5.0", Some("2.000100"), "U1")),
+            Wake::Reload,
+            "a reply in a listed thread"
+        );
+        state.thread = Some(ThreadPane {
+            channel: "C1".into(),
+            thread_ts: "3.0".into(),
+            title: String::new(),
+            messages: vec![message("3.0")],
+            has_more: false,
+            from_message: 0,
+        });
+        assert_eq!(
+            state.hear(posted("C1", "5.0", Some("3.0"), "U1")),
+            Wake::Reload,
+            "a reply in the open thread"
+        );
+
+        assert_eq!(
+            state.hear(posted("D1", "5.0", Some("1.000100"), "U1")),
+            Wake::Check,
+            "a reply elsewhere"
+        );
+        assert_eq!(
+            state.items[0].messages[0].reply_count, 1,
+            "its root counts it without a call"
+        );
+
+        let Event::Message(mut edit) = posted("D1", "1.000100", None, "U1") else {
+            unreachable!()
+        };
+        edit.changed = true;
+        assert_eq!(
+            state.hear(Event::Message(edit)),
+            Wake::Reload,
+            "an edit on the screen"
+        );
+        let Event::Message(mut edit) = posted("C9", "1.0", None, "U1") else {
+            unreachable!()
+        };
+        edit.changed = true;
+        assert_eq!(
+            state.hear(Event::Message(edit)),
+            Wake::Nothing,
+            "an edit elsewhere"
+        );
+
+        let reaction = |user: &str, add: bool| Event::Reaction {
+            channel: "D1".into(),
+            ts: "1.000200".into(),
+            user: user.into(),
+            name: "eyes".into(),
+            add,
+        };
+        assert_eq!(state.hear(reaction("U1", true)), Wake::Nothing);
+        assert_eq!(state.hear(reaction("U7", true)), Wake::Nothing);
+        assert_eq!(
+            state.hear(reaction("U7", true)),
+            Wake::Nothing,
+            "yours again, as the socket echoes what `R` did"
+        );
+        let reactions = &state.items[0].messages[1].reactions;
+        assert_eq!((reactions[0].count, reactions[0].users.len()), (2, 2));
+        state.hear(reaction("U1", false));
+        assert_eq!(state.items[0].messages[1].reactions[0].users, ["U7"]);
     }
 }

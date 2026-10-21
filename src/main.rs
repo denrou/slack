@@ -18,6 +18,7 @@ mod prefs;
 mod react;
 mod read;
 mod replies;
+mod rtm;
 mod send;
 mod store;
 mod style;

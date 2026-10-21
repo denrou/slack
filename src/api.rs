@@ -2,10 +2,16 @@
 //! authenticated the way the web client does it, with the `xoxc` token in
 //! the body and the `xoxd` session cookie. Commands never see the headers.
 
+use std::net::TcpStream;
 use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
+use tungstenite::client::IntoClientRequest;
+use tungstenite::http::HeaderValue;
+use tungstenite::stream::MaybeTlsStream;
+
+use crate::auth::capture;
 
 /// What `encodeURIComponent` leaves unescaped: the cookie is sent exactly
 /// as the browser sends it.
@@ -55,7 +61,13 @@ pub enum Error {
     },
     #[error("unexpected response to {method}: {reason}")]
     Shape { method: String, reason: String },
+    /// Never the URL: it carries the session's ticket.
+    #[error("could not open Slack's socket: {reason}")]
+    Socket { reason: String },
 }
+
+/// Slack's real-time socket, as `Client::socket` opens it.
+pub type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
 pub struct Credentials<'a> {
     pub xoxc: &'a str,
@@ -137,6 +149,43 @@ impl Client {
                 })?;
             return envelope(method, body);
         }
+    }
+
+    /// Slack's real-time socket for this session: `rtm.connect` names it,
+    /// and it opens with the cookie, as the web client opens its own.
+    pub fn socket(&self) -> Result<Socket, Error> {
+        const METHOD: &str = "rtm.connect";
+        let body = self.call(METHOD, &[])?;
+        let url = body
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Shape {
+                method: METHOD.to_string(),
+                reason: "missing `url`".to_string(),
+            })?;
+        if !capture::is_slack_socket_url(url) {
+            return Err(Error::Shape {
+                method: METHOD.to_string(),
+                reason: "a socket outside slack.com".to_string(),
+            });
+        }
+        let socket_error = |reason: String| Error::Socket { reason };
+        let mut request = url
+            .into_client_request()
+            .map_err(|err| socket_error(err.to_string()))?;
+        let headers = request.headers_mut();
+        for (name, value) in [
+            ("Cookie", self.cookie.as_str()),
+            ("Origin", "https://app.slack.com"),
+            ("User-Agent", USER_AGENT),
+        ] {
+            let value = HeaderValue::from_str(value)
+                .map_err(|_| socket_error(format!("a `{name}` header that is not text")))?;
+            headers.insert(name, value);
+        }
+        let (socket, _response) =
+            tungstenite::connect(request).map_err(|err| socket_error(err.to_string()))?;
+        Ok(socket)
     }
 
     pub fn auth_test(&self) -> Result<Identity, Error> {

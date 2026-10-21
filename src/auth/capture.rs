@@ -268,6 +268,15 @@ pub fn is_slack_workspace_url(candidate: &str) -> bool {
     split_https(candidate).is_some_and(|(host, _)| is_workspace_host(&host))
 }
 
+/// The same gate for the real-time socket `rtm.connect` names: a `wss://`
+/// URL on a workspace host, since the cookie goes with it too.
+pub fn is_slack_socket_url(candidate: &str) -> bool {
+    candidate
+        .get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss://"))
+        && is_slack_workspace_url(&format!("https://{}", &candidate[6..]))
+}
+
 /// The workspace origin of a Slack API URL, or None when it is not one.
 pub fn origin_from_api_url(url: &str) -> Option<String> {
     let (host, path) = split_https(url)?;
@@ -547,6 +556,20 @@ mod tests {
         assert!(!is_slack_workspace_url("https://user@foo.slack.com"));
         assert!(!is_slack_workspace_url("https://foo.slack.com:8443"));
         assert!(!is_slack_workspace_url("nonsense"));
+    }
+
+    #[test]
+    fn only_wss_slack_sockets_pass_the_gate() {
+        assert!(is_slack_socket_url(
+            "wss://wss-primary.slack.com/websocket/abc?ticket=x"
+        ));
+        assert!(!is_slack_socket_url(
+            "https://wss-primary.slack.com/websocket"
+        ));
+        assert!(!is_slack_socket_url("ws://wss-primary.slack.com/websocket"));
+        assert!(!is_slack_socket_url("wss://app.slack.com/websocket"));
+        assert!(!is_slack_socket_url("wss://slack.com.evil.net/websocket"));
+        assert!(!is_slack_socket_url("wss://"));
     }
 
     #[test]

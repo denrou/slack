@@ -12,7 +12,9 @@ mod ui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,13 +30,14 @@ use serde_json::Value;
 
 use self::model::{
     Action, Candidate, Choice, ChoiceKind, Draft, Item, Mark, Mode, Picker, Section, State,
-    ThreadPane, Viewport,
+    ThreadPane, Viewport, Wake,
 };
 use crate::api::{self, Client};
 use crate::counts::{Counts, Kind};
 use crate::directory::{self, Listed};
 use crate::history::Message;
 use crate::names::Names;
+use crate::rtm::{self, Signal};
 use crate::style::Style;
 use crate::{counts, emoji, lastview, mention, mrkdwn, react, read, replies, target, view, warn};
 
@@ -64,6 +67,8 @@ fn screen(
 ) -> Result<()> {
     let counts = counts::fetch(client)?;
     let items = load(client, names, &counts)?;
+    let live = Arc::new(AtomicBool::new(false));
+    let (nudges, nudged) = mpsc::channel();
     let mut app = App {
         client,
         names,
@@ -72,7 +77,9 @@ fn screen(
         state: State::new(items, me.map(str::to_string)),
         directory_walked: false,
         pulse: Pulse::of(&counts),
-        polls: poll(client.clone()),
+        polls: poll(client.clone(), Arc::clone(&live), nudged),
+        signals: rtm::listen(client.clone(), live),
+        nudges,
         written: Instant::now(),
         poll_error: None,
     };
@@ -176,21 +183,50 @@ fn load(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>
     Ok(Item::from_view(view, names))
 }
 
-/// How often the screen asks Slack whether anything moved.
+/// How often the screen asks Slack whether anything moved while the
+/// socket is down.
 const POLL_EVERY: Duration = Duration::from_secs(15);
+/// The slow poll beside a live socket: the endpoint is Slack's legacy
+/// one, and an event it stopped sending would otherwise go unnoticed.
+const POLL_LIVE: Duration = Duration::from_secs(120);
+/// After a nudge, the rest of a burst of events gathers.
+const GATHER: Duration = Duration::from_secs(1);
+/// The least time between two fetches, however busy the socket.
+const MIN_GAP: Duration = Duration::from_secs(5);
 
-/// The counts every `POLL_EVERY` on a thread of its own, so the screen
-/// never stalls on them: `client.counts` and the preferences side by side,
-/// where a reload is one call per unread conversation. Each result carries
-/// when its fetch began. Detached, so a quit never waits on a call in
-/// flight; it stops once the screen drops the receiver.
-fn poll(client: Client) -> Receiver<Polled> {
+/// The counts on a thread of its own, so the screen never stalls on them:
+/// `client.counts` and the preferences side by side, where a reload is one
+/// call per unread conversation. Fetched when the socket nudges (`true`
+/// asks for a reload whatever the counts say), and every `POLL_EVERY`
+/// without it. Detached, so a quit never waits on a call in flight; it
+/// stops once the screen drops the receiver.
+fn poll(client: Client, live: Arc<AtomicBool>, nudges: Receiver<bool>) -> Receiver<Polled> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
+        let mut last = Instant::now();
         loop {
-            thread::sleep(POLL_EVERY);
+            let every = if live.load(Ordering::Relaxed) {
+                POLL_LIVE
+            } else {
+                POLL_EVERY
+            };
+            let mut force = match nudges.recv_timeout(every) {
+                Ok(force) => {
+                    thread::sleep(GATHER.max(MIN_GAP.saturating_sub(last.elapsed())));
+                    force
+                }
+                Err(RecvTimeoutError::Timeout) => false,
+                Err(RecvTimeoutError::Disconnected) => return,
+            };
+            force |= nudges.try_iter().fold(false, |any, force| any | force);
             let began = Instant::now();
-            if sender.send((began, counts::fetch(&client))).is_err() {
+            last = began;
+            let polled = Polled {
+                began,
+                counts: counts::fetch(&client),
+                force,
+            };
+            if sender.send(polled).is_err() {
                 return;
             }
         }
@@ -198,12 +234,17 @@ fn poll(client: Client) -> Receiver<Polled> {
     receiver
 }
 
-type Polled = (Instant, Result<Counts, api::Error>);
+struct Polled {
+    began: Instant,
+    counts: Result<Counts, api::Error>,
+    /// Reload even if the counts did not move.
+    force: bool,
+}
 
 /// What a poll compares to decide on a reload: per unread conversation
 /// its newest message, read cursor and mentions, and the threads block.
-/// A new reply in a thread already unread moves none of them; Ctrl-R
-/// picks it up.
+/// A new reply in a thread already unread moves none of them; the socket
+/// asks for that reload itself.
 #[derive(PartialEq, Eq)]
 struct Pulse {
     conversations: Vec<(String, Option<String>, Option<String>, u64)>,
@@ -241,6 +282,9 @@ struct App<'a> {
     /// The counts the list was last loaded from.
     pulse: Pulse,
     polls: Receiver<Polled>,
+    signals: Receiver<Signal>,
+    /// To the poll: fetch now, and reload whatever the counts say if true.
+    nudges: Sender<bool>,
     /// When the last mark or reply finished: a poll begun before it shows
     /// what was just read as unread, and is dropped.
     written: Instant,
@@ -251,6 +295,7 @@ struct App<'a> {
 impl App<'_> {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
+            self.heard();
             self.draw(terminal)?;
             if !event::poll(Duration::from_millis(250))? {
                 self.polled(terminal)?;
@@ -377,7 +422,9 @@ impl App<'_> {
                 )?;
                 match react::set(self.client, &channel, &ts, &name, add) {
                     Ok(name) => {
-                        self.state.apply_reaction(&channel, &ts, &name, add);
+                        if let Some(me) = self.state.me.clone() {
+                            self.state.apply_reaction(&channel, &ts, &me, &name, add);
+                        }
                         let done = if add { "Reacted" } else { "Took back" };
                         self.state.status = Some(format!("{done} {}", emoji::label(&name)));
                         Ok(())
@@ -468,6 +515,24 @@ impl App<'_> {
         }
     }
 
+    /// What the socket said since the last pass: applied to the screen
+    /// when it can be, else passed on to the poll as a nudge.
+    fn heard(&mut self) {
+        let mut wake = Wake::Nothing;
+        for signal in self.signals.try_iter() {
+            let asked = match signal {
+                Signal::Up { again: true } => Wake::Reload,
+                Signal::Up { again: false } | Signal::Down => Wake::Check,
+                Signal::Event(event) => self.state.hear(event),
+            };
+            wake = wake.max(asked);
+        }
+        if wake != Wake::Nothing {
+            // The poll outlives no screen: an error here means quitting.
+            let _ = self.nudges.send(wake == Wake::Reload);
+        }
+    }
+
     /// The latest poll, between keys and only while nothing is open over
     /// the list: a reload under the reply box or a prompt would move what
     /// it acts on. It waits in the channel until then.
@@ -475,13 +540,23 @@ impl App<'_> {
         if !matches!(self.state.mode, Mode::Browse | Mode::Help) {
             return Ok(());
         }
-        let Some((began, polled)) = self.polls.try_iter().last() else {
+        let mut force = false;
+        let mut latest = None;
+        for polled in self.polls.try_iter() {
+            force |= polled.force;
+            latest = Some(polled);
+        }
+        let Some(Polled { began, counts, .. }) = latest else {
             return Ok(());
         };
         if began < self.written {
+            // What the socket asked for still holds.
+            if force {
+                let _ = self.nudges.send(true);
+            }
             return Ok(());
         }
-        let counts = match polled {
+        let counts = match counts {
             Ok(counts) => counts,
             Err(err) => {
                 let err = anyhow::Error::from(err).context("could not check for new messages");
@@ -500,7 +575,7 @@ impl App<'_> {
         if counts.prefs_missing {
             return Ok(());
         }
-        if Pulse::of(&counts) == self.pulse {
+        if !force && Pulse::of(&counts) == self.pulse {
             return Ok(());
         }
         // The status line was for the last key, not for the refresh.
