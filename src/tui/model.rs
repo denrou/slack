@@ -193,8 +193,17 @@ impl Item {
         (&self.channel, self.thread_ts.as_deref())
     }
 
-    fn owned_key(&self) -> (String, Option<String>) {
-        (self.channel.clone(), self.thread_ts.clone())
+    fn check_key(&self) -> CheckKey {
+        (
+            self.channel.clone(),
+            self.thread_ts.clone(),
+            self.section == Section::Opened,
+        )
+    }
+
+    fn is(&self, (channel, thread_ts, opened): &CheckKey) -> bool {
+        self.key() == (channel.as_str(), thread_ts.as_deref())
+            && (self.section == Section::Opened) == *opened
     }
 }
 
@@ -573,6 +582,11 @@ pub enum Mode {
     },
 }
 
+/// What the selection holds a conversation by: its channel and thread,
+/// and whether it is the opened copy, which can sit in the list beside
+/// the unread one.
+type CheckKey = (String, Option<String>, bool);
+
 /// A conversation `e` marks read, up to the newest message it had when
 /// it was chosen: one that came in since was never seen, so it stays
 /// unread.
@@ -673,7 +687,7 @@ pub struct State {
     pub frequent_emoji: Vec<String>,
     /// The conversations `x` selected for `e`, by channel and thread,
     /// with the newest message each had then.
-    pub checked: BTreeMap<(String, Option<String>), Option<String>>,
+    pub checked: BTreeMap<CheckKey, Option<String>>,
     pub focus: Focus,
     /// The highlighted message of the pane, when the pane has the focus.
     pub cursor: usize,
@@ -801,7 +815,16 @@ impl State {
     }
 
     pub fn is_checked(&self, item: &Item) -> bool {
-        self.checked.contains_key(&item.owned_key())
+        self.checked_upto(item).is_some()
+    }
+
+    /// As far as `e` marks a selected conversation. A lookup by
+    /// comparison: the selection is a handful, and the list is drawn
+    /// four times a second.
+    fn checked_upto(&self, item: &Item) -> Option<&Option<String>> {
+        self.checked
+            .iter()
+            .find_map(|(key, upto)| item.is(key).then_some(upto))
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -893,11 +916,8 @@ impl State {
             .filter(|item| item.section == Section::Opened);
         self.items = items;
         self.items.extend(opened);
-        self.checked.retain(|(channel, thread_ts), _| {
-            self.items
-                .iter()
-                .any(|item| item.key() == (channel.as_str(), thread_ts.as_deref()))
-        });
+        self.checked
+            .retain(|key, _| self.items.iter().any(|item| item.is(key)));
         let found = key.and_then(|(channel, thread_ts)| {
             self.items
                 .iter()
@@ -926,10 +946,17 @@ impl State {
         }
     }
 
+    /// Out of the selection, once `e` is done with it.
+    pub fn uncheck(&mut self, index: usize) {
+        if let Some(item) = self.items.get(index) {
+            self.checked.remove(&item.check_key());
+        }
+    }
+
     pub fn remove(&mut self, index: usize) {
         if index < self.items.len() {
             let item = self.items.remove(index);
-            self.checked.remove(&item.owned_key());
+            self.checked.remove(&item.check_key());
         }
         self.selected = if self.items.is_empty() {
             None
@@ -1056,14 +1083,14 @@ impl State {
         let Some(item) = self.selected_item() else {
             return;
         };
-        let (key, latest) = (item.owned_key(), item.latest.clone());
+        let (key, latest) = (item.check_key(), item.latest.clone());
         if self.checked.remove(&key).is_none() {
             self.checked.insert(key, latest);
         }
     }
 
     /// `e`: the selected conversations read, else the one under the
-    /// cursor; an opened one is closed with it.
+    /// cursor; an opened one is closed instead.
     fn mark(&self) -> Action {
         let marks: Vec<Mark> = if self.checked.is_empty() {
             self.selected
@@ -1078,7 +1105,7 @@ impl State {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, item)| {
-                    self.checked.get(&item.owned_key()).map(|upto| Mark {
+                    self.checked_upto(item).map(|upto| Mark {
                         item: index,
                         upto: upto.clone(),
                     })
@@ -2350,19 +2377,32 @@ mod tests {
     }
 
     #[test]
-    fn e_marks_an_opened_conversation_from_its_pane() {
+    fn an_opened_conversation_is_selected_apart_from_its_unread_row() {
         let mut state = state();
         let page = history::Unread {
             messages: vec![message("3.000100")],
             has_more: false,
         };
-        state.open_item(Item::opened("C7".into(), "#ops".into(), page, None));
+        // C1 is listed unread, and opened from the picker as well.
+        state.open_item(Item::opened("C1".into(), "#ops".into(), page, None));
         assert_eq!((state.selected, state.focus), (Some(3), Focus::Messages));
         let Action::MarkRead(marks) = state.key(press(KeyCode::Char('e'))) else {
             panic!("e marks");
         };
         assert_eq!(marks.len(), 1);
-        assert_eq!(marks[0].item, 3, "mod.rs closes it once marked");
+        assert_eq!(marks[0].item, 3, "mod.rs closes it without a mark");
+
+        state.key(press(KeyCode::Char('x')));
+        assert!(state.is_checked(&state.items[3]));
+        assert!(
+            !state.is_checked(&state.items[1]),
+            "the unread row is apart"
+        );
+        state.remove(1);
+        assert!(
+            state.is_checked(&state.items[2]),
+            "and leaving takes only its own tick"
+        );
     }
 
     #[test]

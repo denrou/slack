@@ -137,8 +137,38 @@ enum Marked {
     Done(String),
     /// Slack already read past it: left alone.
     Already(String),
-    /// Nothing to mark at: an opened conversation with no message yet.
+    /// Nothing to mark at: no message to mark up to.
     Nothing(String),
+    /// An opened conversation, closed without a mark.
+    Closed(String),
+}
+
+impl Marked {
+    /// The status line: the sentence of a single one, the counts of
+    /// several.
+    fn summary(done: &[Marked]) -> String {
+        if let [one] = done {
+            return match one {
+                Marked::Done(title) => format!("Marked {title} as read"),
+                Marked::Already(title) => format!("{title} was already read"),
+                Marked::Nothing(title) => format!("{title} has nothing to mark"),
+                Marked::Closed(title) => format!("Closed {title}"),
+            };
+        }
+        let read = done
+            .iter()
+            .filter(|marked| matches!(marked, Marked::Done(_) | Marked::Already(_)))
+            .count();
+        let closed = done
+            .iter()
+            .filter(|marked| matches!(marked, Marked::Closed(_)))
+            .count();
+        match (read, closed) {
+            (read, 0) => format!("Marked {read} as read"),
+            (0, closed) => format!("Closed {closed}"),
+            (read, closed) => format!("Marked {read} as read, closed {closed}"),
+        }
+    }
 }
 
 fn load(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>> {
@@ -277,37 +307,34 @@ impl App<'_> {
                     Ok(cursors) => cursors,
                     Err(err) => return self.fail(err),
                 };
-                let mut marked = 0;
-                let mut status = None;
+                let mut done = Vec::new();
                 // Last to first, so an index stays valid after a removal.
-                // On a failure the selection keeps what is left to mark.
+                // Each one leaves the selection as it is done, so after a
+                // failure the selection holds what is left.
                 for mark in marks.iter().rev() {
-                    let opened = self.state.items[mark.item].section == Section::Opened;
-                    let result = match self.mark_read(mark.item, mark.upto.as_deref(), &cursors) {
-                        Ok(result) => result,
-                        Err(err) => return self.fail(err),
-                    };
-                    status = Some(match (&result, opened) {
-                        (Marked::Done(title), _) => format!("Marked {title} as read"),
-                        (Marked::Already(title) | Marked::Nothing(title), true) => {
-                            format!("Closed {title}")
+                    let result = if self.state.items[mark.item].section == Section::Opened {
+                        // Closing is not reading: an unread conversation is
+                        // listed in its section too, where `e` marks it.
+                        Marked::Closed(self.state.items[mark.item].title.clone())
+                    } else {
+                        match self.mark_read(mark.item, mark.upto.as_deref(), &cursors) {
+                            Ok(result) => result,
+                            Err(err) => {
+                                self.fail(err)?;
+                                if !done.is_empty()
+                                    && let Some(error) = self.state.status.take()
+                                {
+                                    let progress = Marked::summary(&done);
+                                    self.state.status = Some(format!("{progress}, then {error}"));
+                                }
+                                return Ok(());
+                            }
                         }
-                        (Marked::Already(title), false) => format!("{title} was already read"),
-                        (Marked::Nothing(title), false) => format!("{title} has nothing to mark"),
-                    });
-                    if matches!(result, Marked::Done(_)) {
-                        marked += 1;
-                    }
-                    if opened || !matches!(result, Marked::Nothing(_)) {
-                        self.after_mark(mark);
-                    }
+                    };
+                    self.after_mark(mark, &result);
+                    done.push(result);
                 }
-                self.state.checked.clear();
-                self.state.status = if marks.len() == 1 {
-                    status
-                } else {
-                    Some(format!("Marked {marked} as read"))
-                };
+                self.state.status = Some(Marked::summary(&done));
                 Ok(())
             }
             Action::Send {
@@ -576,11 +603,15 @@ impl App<'_> {
 
     /// What needed you leaves the list once read, and an opened
     /// conversation is closed. One with a message newer than the mark
-    /// stays, unread: the next refresh shows it.
-    fn after_mark(&mut self, mark: &Mark) {
-        let item = &self.state.items[mark.item];
-        if item.section == Section::Opened || item.latest == mark.upto {
-            self.state.remove(mark.item);
+    /// stays, for the next refresh to show what is left; one with
+    /// nothing to mark stays as it was.
+    fn after_mark(&mut self, mark: &Mark, result: &Marked) {
+        self.state.uncheck(mark.item);
+        let newer = self.state.items[mark.item].latest != mark.upto;
+        match result {
+            Marked::Nothing(_) => {}
+            Marked::Done(_) | Marked::Already(_) if newer => {}
+            _ => self.state.remove(mark.item),
         }
     }
 
@@ -968,6 +999,28 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[test]
+    fn a_mark_says_what_became_of_it() {
+        let done = |title: &str| Marked::Done(title.to_string());
+        assert_eq!(
+            Marked::summary(&[Marked::Closed("#ops".into())]),
+            "Closed #ops"
+        );
+        assert_eq!(
+            Marked::summary(&[
+                done("a"),
+                Marked::Already("b".into()),
+                Marked::Closed("c".into())
+            ]),
+            "Marked 2 as read, closed 1",
+            "what was already read left the list too"
+        );
+        assert_eq!(
+            Marked::summary(&[done("a"), Marked::Nothing("b".into())]),
+            "Marked 1 as read"
+        );
+    }
 
     fn counts(channels: Value, threads: Value) -> Counts {
         Counts::parse(&json!({"ok": true, "channels": channels, "threads": threads})).unwrap()

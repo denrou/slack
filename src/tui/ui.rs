@@ -34,7 +34,7 @@ const HELP: &[&str] = &[
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "Ctrl-J          a new line in the reply box (Ctrl-Enter, Shift-Enter too where the terminal reports them)",
     "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
-    "e               mark it as read, and close it if you opened it; with a selection, all of the selection",
+    "e               mark it as read, or close it, unmarked, if you opened it; with a selection, all of the selection",
     "x               select the conversation for e, or unselect it",
     "u, y            open, or copy, a link of the highlighted message",
     "R               react to the highlighted message: type to filter, Enter puts it on, or takes yours back",
