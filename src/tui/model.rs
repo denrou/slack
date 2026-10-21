@@ -490,11 +490,7 @@ impl Cut {
                 let end = text
                     .trim_end_matches(|c: char| c != '\n' && c.is_whitespace())
                     .len();
-                text[..end]
-                    .char_indices()
-                    .rev()
-                    .find(|(_, c)| c.is_whitespace())
-                    .map_or(0, |(at, c)| at + c.len_utf8())
+                word_start(&text[..end])
             }
             Cut::Line => text.rfind('\n').map_or(0, |at| at + 1),
         };
@@ -502,14 +498,18 @@ impl Cut {
     }
 }
 
+/// Where the last word of the text starts: after its last blank, or at 0.
+fn word_start(text: &str) -> usize {
+    text.char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(at, c)| at + c.len_utf8())
+}
+
 /// The word being completed: where it starts, its sigil and what follows,
 /// when the text ends in a word that starts with `@` or `#`.
 fn completing(text: &str) -> Option<(usize, char, &str)> {
-    let start = text
-        .char_indices()
-        .rev()
-        .find(|(_, c)| c.is_whitespace())
-        .map_or(0, |(at, c)| at + c.len_utf8());
+    let start = word_start(text);
     let word = &text[start..];
     let sigil = word.chars().next().filter(|c| matches!(c, '@' | '#'))?;
     Some((start, sigil, &word[sigil.len_utf8()..]))
@@ -2013,9 +2013,7 @@ mod tests {
         assert_eq!(text(&state), "one two", "a line break goes alone");
         state.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER));
         assert_eq!(text(&state), "", "Command-Backspace: the line");
-        for c in "a".chars() {
-            state.key(press(KeyCode::Char(c)));
-        }
+        state.key(press(KeyCode::Char('a')));
         state.key(control('j'));
         for c in "bc".chars() {
             state.key(press(KeyCode::Char(c)));
