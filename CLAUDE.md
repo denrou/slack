@@ -70,6 +70,8 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 
 Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the list with its error instead of dropping it, an `ItemKind` enum in place of `Item`'s parallel fields, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
 
+Deferred by the review of 2026-10-21 (`v0.9.0..main`): the `+` list follows Slack's `emoji_use`, so an emoji just used from here moves up only once Slack counts it (whether `reactions.add` does is unverified). A local bump would be undone by the next reload unless the CLI wrote the pref back with `users.prefs.set`, a write for a cosmetic gain.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
