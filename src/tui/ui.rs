@@ -191,8 +191,8 @@ fn draw_messages(
         }
     };
     // A conversation's page is a history, read down from its oldest
-    // message, so what is missing comes before it; a thread's page is its
-    // new replies, and what is missing comes after.
+    // message, so what is missing comes before it; a thread's page starts
+    // at its root, and what is missing comes after.
     let history = !in_thread
         && state
             .selected_item()

@@ -80,16 +80,8 @@ impl Item {
         let unread_from = entry.unread_from;
         // A history holds read messages too; without a cursor the page is
         // the unread part itself, or a conversation never read at all.
-        let (unread, more) = match &unread_from {
-            Some(cursor) => {
-                let new = messages
-                    .iter()
-                    .filter(|message| view::is_new(message, Some(cursor)))
-                    .count();
-                (new, entry.has_more && new == messages.len())
-            }
-            None => (messages.len(), entry.has_more),
-        };
+        let unread = unread_count(&messages, unread_from.as_deref());
+        let more = entry.has_more && unread == messages.len();
         let mut detail = format!("{unread}{} unread", if more { "+" } else { "" });
         match entry.mention_count {
             0 => {}
@@ -120,8 +112,7 @@ impl Item {
         let whole = thread.history.filter(|history| !history.has_more);
         let (messages, has_more, unread_from) = match whole {
             Some(history) => {
-                let mut messages = vec![history.root];
-                messages.extend(history.replies);
+                let messages = history.into_messages();
                 let cursor = thread.unread_replies.first().and_then(|first| {
                     messages
                         .iter()
@@ -135,14 +126,7 @@ impl Item {
         };
         // `e` marks what the pane shows.
         let latest = messages.last().map(|message| message.ts.clone());
-        let new = match &unread_from {
-            Some(cursor) => messages
-                .iter()
-                .filter(|message| view::is_new(message, Some(cursor)))
-                .count(),
-            None => messages.len(),
-        };
-        let detail = match new {
+        let detail = match unread_count(&messages, unread_from.as_deref()) {
             1 if !has_more => "1 new reply".to_string(),
             n => format!("{n}{} new replies", if has_more { "+" } else { "" }),
         };
@@ -233,6 +217,18 @@ impl Item {
     fn is(&self, (channel, thread_ts, opened): &CheckKey) -> bool {
         self.key() == (channel.as_str(), thread_ts.as_deref())
             && (self.section == Section::Opened) == *opened
+    }
+}
+
+/// The messages past the read cursor; without one, the page is the unread
+/// part itself.
+fn unread_count(messages: &[Message], unread_from: Option<&str>) -> usize {
+    match unread_from {
+        Some(_) => messages
+            .iter()
+            .filter(|message| view::is_new(message, unread_from))
+            .count(),
+        None => messages.len(),
     }
 }
 

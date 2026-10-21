@@ -718,14 +718,13 @@ impl App<'_> {
             self.names.channel_label(&channel),
             view::excerpt(&root, 40)
         );
-        let mut messages = vec![fetched.root];
-        messages.extend(fetched.replies);
+        let has_more = fetched.has_more;
         Ok(ThreadPane {
             channel,
             thread_ts,
             title,
-            messages,
-            has_more: fetched.has_more,
+            messages: fetched.into_messages(),
+            has_more,
             from_message: message,
         })
     }
@@ -733,14 +732,12 @@ impl App<'_> {
     fn reload_thread(&mut self, pane: &ThreadPane) -> Result<ThreadPane> {
         let fetched = replies::fetch(self.client, &pane.channel, &pane.thread_ts)?;
         self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
-        let mut messages = vec![fetched.root];
-        messages.extend(fetched.replies);
         Ok(ThreadPane {
             channel: pane.channel.clone(),
             thread_ts: pane.thread_ts.clone(),
             title: pane.title.clone(),
-            messages,
             has_more: fetched.has_more,
+            messages: fetched.into_messages(),
             from_message: pane.from_message,
         })
     }
