@@ -28,9 +28,37 @@ pub enum Reach {
     Recent,
 }
 
-/// Messages a history holds: enough to catch up, one line each on a
-/// screen.
-pub const RECENT_LIMIT: usize = 50;
+/// A history on the screen holds today's messages, never fewer than the
+/// last `RECENT_MIN` (a quiet channel keeps its context) nor more than one
+/// page of `RECENT_MAX` (a busy one is read again on every reload).
+pub const RECENT_MIN: usize = 50;
+pub const RECENT_MAX: usize = 200;
+
+/// A conversation's recent history, as the screen shows it.
+pub fn recent(client: &Client, channel: &str) -> Result<history::Unread, api::Error> {
+    let page = history::fetch(client, channel, None, RECENT_MAX)?;
+    Ok(keep_recent(page, &Zoned::now()))
+}
+
+/// Today's messages, or the last `RECENT_MIN` when today holds fewer.
+fn keep_recent(mut page: history::Unread, now: &Zoned) -> history::Unread {
+    let today = match now.start_of_day() {
+        Ok(midnight) => {
+            let midnight = format!("{}.000000", midnight.timestamp().as_second());
+            page.messages
+                .iter()
+                .filter(|message| compare_ts(&message.ts, &midnight).is_ge())
+                .count()
+        }
+        Err(_) => 0,
+    };
+    let keep = today.max(RECENT_MIN);
+    if page.messages.len() > keep {
+        page.messages.drain(..page.messages.len() - keep);
+        page.has_more = true;
+    }
+    page
+}
 
 #[derive(Serialize)]
 pub struct View {
@@ -197,7 +225,7 @@ pub fn build(
             Reach::Unread => {
                 history::fetch(client, &id, last_read.as_deref(), history::DEFAULT_LIMIT)
             }
-            Reach::Recent => history::fetch(client, &id, None, RECENT_LIMIT),
+            Reach::Recent => recent(client, &id),
         };
         (id, page)
     });
@@ -795,6 +823,38 @@ mod tests {
         Timestamp::from_second(1760900000)
             .unwrap()
             .to_zoned(TimeZone::UTC)
+    }
+
+    #[test]
+    fn the_screen_keeps_today_and_never_fewer_than_the_minimum() {
+        // Midnight of `now()` is 1760832000.
+        let page = |older: usize, today: usize| history::Unread {
+            messages: (0..older)
+                .map(|n| 1760800000 + n)
+                .chain((0..today).map(|n| 1760832000 + n))
+                .map(|second| message(&format!("{second}.000100"), None, ""))
+                .collect(),
+            has_more: false,
+        };
+        let kept = keep_recent(page(10, 3), &now());
+        assert_eq!(
+            (kept.messages.len(), kept.has_more),
+            (13, false),
+            "a quiet channel"
+        );
+        let kept = keep_recent(page(100, 3), &now());
+        assert_eq!((kept.messages.len(), kept.has_more), (RECENT_MIN, true));
+        assert_eq!(
+            kept.messages[0].ts, "1760800053.000100",
+            "the newest of the older ones"
+        );
+        let kept = keep_recent(page(100, 80), &now());
+        assert_eq!(
+            (kept.messages.len(), kept.has_more),
+            (80, true),
+            "a busy day"
+        );
+        assert!(kept.messages[0].ts.starts_with("1760832000."));
     }
 
     fn rendered(view: &View) -> String {

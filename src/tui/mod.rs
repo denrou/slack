@@ -36,9 +36,7 @@ use crate::directory::{self, Listed};
 use crate::history::Message;
 use crate::names::Names;
 use crate::style::Style;
-use crate::{
-    counts, emoji, history, lastview, mention, mrkdwn, react, read, replies, target, view, warn,
-};
+use crate::{counts, emoji, lastview, mention, mrkdwn, react, read, replies, target, view, warn};
 
 pub fn run(
     client: &Client,
@@ -889,7 +887,7 @@ impl App<'_> {
 
     /// The recent history of a conversation, as an item of the list.
     fn load_opened(&mut self, channel: String, unread_from: Option<String>) -> Result<Item> {
-        let page = history::fetch(self.client, &channel, None, view::RECENT_LIMIT)?;
+        let page = view::recent(self.client, &channel)?;
         self.names
             .resolve_channels(self.client, [channel.clone()])?;
         self.resolve_people(page.messages.iter())?;
