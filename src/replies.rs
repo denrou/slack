@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::api::{self, Client};
-use crate::history::{Message, compare_ts, is_usable_cursor, message_from};
+use crate::history::{Message, compare_ts, message_from};
 
 const METHOD: &str = "conversations.replies";
 const PAGE: usize = 200;
@@ -19,10 +19,6 @@ pub struct Replies {
     /// The page cap left replies out.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more: bool,
-    /// Your read cursor in the thread, which Slack puts on the root of a
-    /// thread you follow.
-    #[serde(skip)]
-    pub last_read: Option<String>,
 }
 
 pub fn fetch(client: &Client, channel: &str, thread_ts: &str) -> Result<Replies, api::Error> {
@@ -30,7 +26,6 @@ pub fn fetch(client: &Client, channel: &str, thread_ts: &str) -> Result<Replies,
     let mut messages: Vec<Message> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut has_more = false;
-    let mut last_read = None;
     for _ in 0..MAX_PAGES {
         let mut params = vec![("channel", channel), ("ts", thread_ts), ("limit", &limit)];
         if let Some(cursor) = &cursor {
@@ -41,9 +36,6 @@ pub fn fetch(client: &Client, channel: &str, thread_ts: &str) -> Result<Replies,
             .get("messages")
             .and_then(Value::as_array)
             .ok_or_else(|| shape("no `messages` array"))?;
-        if last_read.is_none() {
-            last_read = root_last_read(raw, thread_ts);
-        }
         messages.extend(raw.iter().filter_map(message_from));
         cursor = body
             .pointer("/response_metadata/next_cursor")
@@ -67,42 +59,12 @@ pub fn fetch(client: &Client, channel: &str, thread_ts: &str) -> Result<Replies,
         root,
         replies: messages,
         has_more,
-        last_read,
     })
-}
-
-fn root_last_read(raw: &[Value], thread_ts: &str) -> Option<String> {
-    raw.iter()
-        .find(|message| message.get("ts").and_then(Value::as_str) == Some(thread_ts))?
-        .get("last_read")?
-        .as_str()
-        .filter(|cursor| is_usable_cursor(cursor))
-        .map(str::to_string)
 }
 
 fn shape(reason: &str) -> api::Error {
     api::Error::Shape {
         method: METHOD.to_string(),
         reason: reason.to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn the_read_cursor_comes_from_the_root_alone() {
-        let raw = json!([
-            {"ts": "1.000100", "thread_ts": "1.000100", "last_read": "1.000300"},
-            {"ts": "1.000200", "thread_ts": "1.000100", "last_read": "1.000900"}
-        ]);
-        let raw = raw.as_array().unwrap();
-        assert_eq!(root_last_read(raw, "1.000100").as_deref(), Some("1.000300"));
-        assert_eq!(root_last_read(&raw[1..], "1.000100"), None);
-        let never = json!([{"ts": "1.000100", "last_read": "0000000000.000000"}]);
-        assert_eq!(root_last_read(never.as_array().unwrap(), "1.000100"), None);
     }
 }

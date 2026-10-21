@@ -113,25 +113,28 @@ impl Item {
         let user = |id: &str| names.user_name(id);
         let channel = |id: &str| names.channel_name(id);
         let root = mrkdwn::render(&thread.root.text, &user, &channel, &Style::plain());
-        let latest = thread.unread_replies.last().map(|reply| reply.ts.clone());
-        let (messages, has_more, unread_from) = match thread.history {
+        // The read part ends just before the first reply the thread view
+        // calls unread, the view that listed the thread. A history cut by
+        // the page cap misses its newest replies, the unread ones: the new
+        // replies alone then.
+        let whole = thread.history.filter(|history| !history.has_more);
+        let (messages, has_more, unread_from) = match whole {
             Some(history) => {
-                // Slack's cursor when it gives one, else just before the
-                // first reply the thread view calls unread.
-                let cursor = history.last_read.clone().or_else(|| {
-                    let first_new = &thread.unread_replies.first()?.ts;
-                    std::iter::once(&history.root)
-                        .chain(&history.replies)
-                        .rev()
-                        .find(|message| compare_ts(&message.ts, first_new).is_lt())
-                        .map(|message| message.ts.clone())
-                });
                 let mut messages = vec![history.root];
                 messages.extend(history.replies);
-                (messages, history.has_more, cursor)
+                let cursor = thread.unread_replies.first().and_then(|first| {
+                    messages
+                        .iter()
+                        .rev()
+                        .find(|message| compare_ts(&message.ts, &first.ts).is_lt())
+                        .map(|message| message.ts.clone())
+                });
+                (messages, false, cursor)
             }
             None => (thread.unread_replies, thread.has_more, None),
         };
+        // `e` marks what the pane shows.
+        let latest = messages.last().map(|message| message.ts.clone());
         let new = match &unread_from {
             Some(cursor) => messages
                 .iter()
@@ -1567,17 +1570,16 @@ mod tests {
             has_more: false,
             history,
         };
-        let whole = |last_read: Option<&str>| crate::replies::Replies {
+        let whole = |has_more: bool| crate::replies::Replies {
             root: message("1.000100"),
             replies: ["1.000200", "1.000300", "1.000400", "1.000500"]
                 .map(message)
                 .to_vec(),
-            has_more: false,
-            last_read: last_read.map(str::to_string),
+            has_more,
         };
         let names = Names::default();
 
-        let item = Item::thread(thread(Some(whole(None))), &names);
+        let item = Item::thread(thread(Some(whole(false))), &names);
         assert_eq!(item.messages.len(), 5, "the root, then every reply");
         assert_eq!(item.unread_from.as_deref(), Some("1.000200"));
         assert_eq!(
@@ -1587,23 +1589,25 @@ mod tests {
         assert_eq!(item.landing(), 2);
         assert_eq!(
             item.latest.as_deref(),
-            Some("1.000400"),
-            "a mark goes no further than the thread view saw"
+            Some("1.000500"),
+            "e marks what the pane shows"
         );
 
-        let item = Item::thread(thread(Some(whole(Some("1.000300")))), &names);
+        let item = Item::thread(thread(Some(whole(true))), &names);
         assert_eq!(
-            item.unread_from.as_deref(),
-            Some("1.000300"),
-            "Slack's own cursor"
+            item.messages.len(),
+            2,
+            "cut by the page cap: the new replies alone"
         );
-        assert_eq!((item.detail.as_str(), item.landing()), ("2 new replies", 3));
-
         let item = Item::thread(thread(None), &names);
         assert_eq!(item.messages.len(), 2, "unreadable: the new replies alone");
         assert_eq!(
-            (item.unread_from, item.detail.as_str()),
-            (None, "2 new replies")
+            (
+                item.unread_from,
+                item.detail.as_str(),
+                item.latest.as_deref()
+            ),
+            (None, "2 new replies", Some("1.000400"))
         );
     }
 
