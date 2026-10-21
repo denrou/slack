@@ -1,6 +1,6 @@
 [package]
 name = "slack"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Read and answer Slack from the terminal: what needs you, a count for the status bar, send, mark read"
