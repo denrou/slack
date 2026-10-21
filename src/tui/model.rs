@@ -448,9 +448,9 @@ fn breaks_line(key: KeyEvent) -> bool {
     }
 }
 
-/// What a deleting key takes off the end of the text: Backspace a
-/// character; Ctrl-W, or Backspace with Option (Alt) or Ctrl, the word
-/// before it; Ctrl-U, or Backspace with Command (Super), the line. The
+/// What a deleting key takes off the end of the text: Backspace (or the
+/// Ctrl-H some terminals send for it) a character; Ctrl-W, or Backspace
+/// with Option (Alt) or Ctrl, the word before it; Ctrl-U, or Backspace with Command (Super), the line. The
 /// modified Backspaces are a Mac's and reach the box only where the
 /// terminal reports them; the Ctrl keys are readline's and work
 /// everywhere.
@@ -472,6 +472,7 @@ impl Cut {
             KeyCode::Backspace if line => Some(Cut::Line),
             KeyCode::Backspace if word => Some(Cut::Word),
             KeyCode::Backspace => Some(Cut::Char),
+            KeyCode::Char('h') if control => Some(Cut::Char),
             KeyCode::Char('w') if control => Some(Cut::Word),
             KeyCode::Char('u') if control => Some(Cut::Line),
             _ => None,
@@ -2023,6 +2024,8 @@ mod tests {
         assert_eq!(text(&state), "a\n", "Ctrl-U: the line, not the one above");
         state.key(press(KeyCode::Backspace));
         assert_eq!(text(&state), "a");
+        state.key(control('h'));
+        assert_eq!(text(&state), "", "Ctrl-H is Backspace");
     }
 
     #[test]
