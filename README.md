@@ -67,6 +67,8 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 `slack` with no command puts the same view in a two-pane screen: the list of what is unread on the left, the messages of the selected item on the right, a reply box at the bottom when you press Enter. A conversation shows its last 50 messages, the ones already read greyed out and a `── new ──` line where the unread part starts; the pane opens there, and `l` lands on the first new message. `u` opens a link of the highlighted message in the browser and `y` copies it; with several links, a box lists them and a digit picks one. `c` opens a picker over the channels and group messages you are in and every person in the workspace: type to filter, Enter hands the keys to the narrowed list (`j`/`k` move, `/` goes back to the filter), and Enter again loads the one selected into an **Opened** section at the end of the list, where it stays through refreshes and replies until `x` closes it. Space marks people instead, and Enter then opens their group message. Conversations you muted in Slack stay out of the picker until `m` shows them. `n` is the same picker followed by the reply box: a new message to whoever you picked. Enter answers where you are: the conversation from the list, the highlighted message in its thread from the pane, the thread once one is open. `s` writes to the conversation itself from anywhere in it.
 
+The screen keeps itself current: every 15 seconds it asks Slack whether anything moved and reloads when something did, leaving you where you were (the selection, the highlighted message, the open thread). It waits while the reply box, the picker or a prompt is open, so nothing moves under what you are typing. A new reply in a thread already unread does not show on its own; Ctrl-R picks it up.
+
 | Key              | Action                                                                                                                            |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `j`/`k`, arrows  | Move through the list, or through the messages                                                                                    |
@@ -85,7 +87,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 | `r`              | Mark it as read                                                                                                                   |
 | `R`              | Mark everything listed as read (asks first)                                                                                       |
 | `o`              | Open it in Slack, at the highlighted message from the pane                                                                        |
-| Ctrl-R           | Refresh                                                                                                                           |
+| Ctrl-R           | Refresh now (it also happens on its own every 15 seconds)                                                                         |
 | `?`              | Keys                                                                                                                              |
 | `q`, Ctrl-C      | Quit                                                                                                                              |
 

@@ -57,6 +57,7 @@ Written down because none of them can be read from the code.
 - **Every unread conversation is shown, muted ones excepted (2026-10-20).** The first rule hid public channels unless private or set to "All new messages" in Slack, and twice hid a channel Denis wanted to see (`#log-team-dev`, then `#proj-prediction-service`). He mutes what he does not want, so the rest is wanted: the view and the count follow Slack's sidebar, bold for anything unread, muted ones greyed out. The `-a` tier (`slack -a`, `--count --all`, `ui -a`, `read --all`, the `a` key) went with it.
 - **The screen reads with context, the text view without (2026-10-20).** `slack` shows the last 50 messages of each unread conversation with the read part dimmed and a `── new ──` line, because a message is understood with what came before it. `slack unreads` keeps printing the new part alone: a script or Claude Code wants what is new and nothing else.
 - **`slack` alone is the interactive view (2026-10-20).** Denis lives in the TUI; the text view is `slack unreads`, for scripts and for Claude Code reading messages. Without a terminal on both ends, `slack` prints the text instead of drawing, so a pipe never hangs on a screen.
+- **The screen refreshes itself every 15 seconds (2026-10-21).** A full reload is one history call per unread conversation, so the timer polls `client.counts` alone, on a detached thread so the screen never stalls, and reloads only when a conversation's newest message, read cursor or mentions moved. A refresh, Ctrl-R included, keeps your place instead of sending you back to the list, and none runs while the reply box, the picker or a prompt is open: the reply goes to whatever is selected when Enter is pressed, and `R` marks what the prompt was shown over. A new reply in a thread already unread moves none of the counts, so it waits for Ctrl-R.
 - **Binary name `slack`**, kept because it is fast to type. Slack's platform CLI (`brew install slack-cli`) also installs a `slack` binary; it is not on this machine.
 - **Public repo, MIT**, like gh-prs.
 
@@ -67,8 +68,6 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 `--workspace`, a `watch` mode, loading older history from the TUI.
 
 Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the list with its error instead of dropping it, an `ItemKind` enum in place of `Item`'s parallel fields, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
-
-**Auto-refresh of the screen** is wanted (Denis, 2026-10-20) but not designed: think it through before building it. A refresh today is one `client.counts` call plus one history call per unread conversation, so a timer multiplies the API load by the number of conversations; `State::replace_items` sends the focus back to the list, which would throw you out of a thread or a reply box mid-typing; and the loop blocks on `event::read`, so it needs a `poll` with a timeout first. The cheap version is to poll `client.counts` alone and reload only when a cursor or a count moved, keeping focus, cursor, thread and the reply box as they are.
 
 ## Reference implementation
 

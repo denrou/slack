@@ -720,25 +720,60 @@ impl State {
         }
     }
 
-    /// New items after a refresh; the opened conversations stay, and the
-    /// selection follows the same conversation when it is still there.
+    /// New items after a refresh; the opened conversations stay. A refresh
+    /// comes on its own every few seconds, so it never moves you: the
+    /// selection, the focus, the highlighted message and the open thread
+    /// follow the same conversation while it is still there. Once it is
+    /// gone (read elsewhere), its neighbour is selected from the list.
     pub fn replace_items(&mut self, items: Vec<Item>) {
+        let previous = self.selected;
         let key = self
             .selected_item()
             .map(|item| (item.channel.clone(), item.thread_ts.clone()));
+        // New messages shift the indices: the positions are held by ts.
+        let ts_at = |index: usize| {
+            self.selected_item()
+                .and_then(|item| item.messages.get(index))
+                .map(|message| message.ts.clone())
+        };
+        let cursor_ts = (self.focus == Focus::Messages && self.thread.is_none())
+            .then(|| ts_at(self.cursor))
+            .flatten();
+        let from_ts = self
+            .thread
+            .as_ref()
+            .and_then(|thread| ts_at(thread.from_message));
         let opened = std::mem::take(&mut self.items)
             .into_iter()
             .filter(|item| item.section == Section::Opened);
         self.items = items;
         self.items.extend(opened);
-        self.selected = key
-            .and_then(|(channel, thread_ts)| {
-                self.items
-                    .iter()
-                    .position(|item| item.key() == (channel.as_str(), thread_ts.as_deref()))
-            })
-            .or_else(|| (!self.items.is_empty()).then_some(0));
-        self.back_to_list();
+        let found = key.and_then(|(channel, thread_ts)| {
+            self.items
+                .iter()
+                .position(|item| item.key() == (channel.as_str(), thread_ts.as_deref()))
+        });
+        let Some(index) = found else {
+            self.selected =
+                (!self.items.is_empty()).then(|| previous.unwrap_or(0).min(self.items.len() - 1));
+            self.back_to_list();
+            return;
+        };
+        self.selected = Some(index);
+        let messages = &self.items[index].messages;
+        let position = |ts: Option<String>, fallback: usize| {
+            ts.and_then(|ts| messages.iter().position(|message| message.ts == ts))
+                .unwrap_or_else(|| fallback.min(messages.len().saturating_sub(1)))
+        };
+        if let Some(thread) = &mut self.thread {
+            thread.from_message = position(from_ts, thread.from_message);
+        } else if self.focus == Focus::Messages {
+            if messages.is_empty() {
+                self.back_to_list();
+            } else {
+                self.cursor = position(cursor_ts, self.cursor);
+            }
+        }
     }
 
     pub fn remove(&mut self, index: usize) {
@@ -1467,7 +1502,7 @@ mod tests {
             item(Section::Threads, "C2", Some("2.000100")),
         ]);
         assert_eq!(state.selected, Some(0), "C1 is now first");
-        assert_eq!(state.focus, Focus::List);
+        assert_eq!(state.focus, Focus::Messages, "a refresh keeps the focus");
         state.remove(0);
         assert_eq!(state.selected, Some(0));
         assert_eq!(state.items[0].channel, "C2");
@@ -1477,6 +1512,50 @@ mod tests {
         assert_eq!(state.key(press(KeyCode::Char('r'))), Action::None);
         assert_eq!(state.key(press(KeyCode::Char('l'))), Action::None);
         assert_eq!(state.focus, Focus::List, "nothing to focus");
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_highlighted_message_and_the_open_thread() {
+        let mut state = state();
+        state.key(press(KeyCode::Char('l')));
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(state.cursor, 1);
+        // Two new messages, the oldest one gone from the page.
+        let mut d1 = item(Section::DirectMessages, "D1", None);
+        d1.messages = ["1.000200", "1.000300", "1.000400"].map(message).into();
+        state.replace_items(vec![d1, item(Section::Mentions, "C1", None)]);
+        assert_eq!(
+            (state.focus, state.cursor),
+            (Focus::Messages, 0),
+            "same message"
+        );
+
+        state.open_thread(ThreadPane {
+            channel: "D1".into(),
+            thread_ts: "1.000300".into(),
+            title: "@jane › no rush".into(),
+            messages: vec![message("1.000300"), message("1.000310")],
+            has_more: false,
+            from_message: 1,
+        });
+        state.cursor = 1;
+        let mut d1 = item(Section::DirectMessages, "D1", None);
+        d1.messages = ["1.000300", "1.000400", "1.000500"].map(message).into();
+        state.replace_items(vec![d1]);
+        assert_eq!(state.thread.as_ref().map(|t| t.from_message), Some(0));
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+        state.key(press(KeyCode::Char('h')));
+        assert_eq!(state.cursor, 0, "back on the message it was opened from");
+
+        // Read elsewhere: the neighbour, from the list.
+        state.replace_items(vec![
+            item(Section::Mentions, "C1", None),
+            item(Section::Channels, "C3", None),
+        ]);
+        assert_eq!((state.selected, state.focus), (Some(0), Focus::List));
+        state.key(press(KeyCode::Char('j')));
+        state.replace_items(vec![item(Section::Mentions, "C1", None)]);
+        assert_eq!(state.selected, Some(0));
     }
 
     #[test]

@@ -12,6 +12,8 @@ mod ui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -29,7 +31,7 @@ use self::model::{
     Viewport,
 };
 use crate::api::{self, Client};
-use crate::counts::Kind;
+use crate::counts::{Counts, Kind};
 use crate::directory::{self, Listed};
 use crate::history::Message;
 use crate::names::Names;
@@ -60,7 +62,8 @@ fn screen(
     me: Option<&str>,
     workspace_url: &str,
 ) -> Result<()> {
-    let items = load(client, names)?;
+    let counts = counts::fetch(client)?;
+    let items = load(client, names, &counts)?;
     let mut app = App {
         client,
         names,
@@ -68,6 +71,8 @@ fn screen(
         workspace_url: workspace_url.trim_end_matches('/'),
         state: State::new(items, me.map(str::to_string)),
         directory_walked: false,
+        pulse: Pulse::of(&counts),
+        polls: poll(client.clone()),
     };
     let mut terminal = ratatui::init();
     let modes = Modes::ask();
@@ -131,12 +136,60 @@ enum Marked {
     Nothing(String),
 }
 
-fn load(client: &Client, names: &mut Names) -> Result<Vec<Item>> {
-    let counts = counts::fetch(client)?;
+fn load(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>> {
     // The screen reads with context: the recent history, the new part
     // told apart. The text view reads the new part alone.
-    let view = view::build(client, &counts, names, view::Reach::Recent)?;
+    let view = view::build(client, counts, names, view::Reach::Recent)?;
     Ok(Item::from_view(view, names))
+}
+
+/// How often the screen asks Slack whether anything moved.
+const POLL_EVERY: Duration = Duration::from_secs(15);
+
+/// `client.counts` every `POLL_EVERY` on a thread of its own, so the
+/// screen never stalls on it: one round trip, where a reload is one per
+/// unread conversation. Detached, so a quit never waits on a call in
+/// flight; it stops once the screen drops the receiver.
+fn poll(client: Client) -> Receiver<Result<Counts, api::Error>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(POLL_EVERY);
+            if sender.send(counts::fetch(&client)).is_err() {
+                return;
+            }
+        }
+    });
+    receiver
+}
+
+/// What a poll compares to decide on a reload: per unread conversation
+/// its newest message, read cursor and mentions, and the threads block.
+/// A new reply in a thread already unread moves none of them; Ctrl-R
+/// picks it up.
+#[derive(PartialEq, Eq)]
+struct Pulse {
+    conversations: Vec<(String, Option<String>, Option<String>, u64)>,
+    threads: Option<(bool, u64)>,
+}
+
+impl Pulse {
+    fn of(counts: &Counts) -> Pulse {
+        let mut conversations: Vec<_> = counts
+            .unread()
+            .map(|c| {
+                let (id, latest, read) = (c.id.clone(), c.latest.clone(), c.last_read.clone());
+                (id, latest, read, c.mention_count)
+            })
+            .collect();
+        conversations.sort();
+        Pulse {
+            conversations,
+            threads: counts
+                .threads
+                .map(|threads| (threads.has_unreads, threads.mention_count)),
+        }
+    }
 }
 
 struct App<'a> {
@@ -148,6 +201,9 @@ struct App<'a> {
     /// The whole directory was read once this session; the picker needs
     /// it for the people without a DM, and once is enough.
     directory_walked: bool,
+    /// The counts the list was last loaded from.
+    pulse: Pulse,
+    polls: Receiver<Result<Counts, api::Error>>,
 }
 
 impl App<'_> {
@@ -155,6 +211,7 @@ impl App<'_> {
         loop {
             self.draw(terminal)?;
             if !event::poll(Duration::from_millis(250))? {
+                self.polled(terminal)?;
                 continue;
             }
             let action = match event::read()? {
@@ -333,14 +390,69 @@ impl App<'_> {
 
     fn refresh(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.busy(terminal, "Refreshing…")?;
-        match load(self.client, self.names) {
-            Ok(items) => {
-                self.state.replace_items(items);
+        let reloaded = counts::fetch(self.client)
+            .map_err(anyhow::Error::from)
+            .and_then(|counts| self.reload(&counts));
+        match reloaded {
+            Ok(()) => {
                 self.state.status = None;
                 Ok(())
             }
             Err(err) => self.fail(err),
         }
+    }
+
+    /// The latest poll, between keys and only while nothing is open over
+    /// the list: a reload under the reply box would move the conversation
+    /// it sends to, and one under the read-all prompt would add to what
+    /// `y` marks. It waits in the channel until then.
+    fn polled(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        if !matches!(self.state.mode, Mode::Browse | Mode::Help) {
+            return Ok(());
+        }
+        let Some(polled) = self.polls.try_iter().last() else {
+            return Ok(());
+        };
+        let counts = match polled {
+            Ok(counts) => counts,
+            Err(err) => {
+                let err = anyhow::Error::from(err).context("could not check for new messages");
+                return self.fail(err);
+            }
+        };
+        if Pulse::of(&counts) == self.pulse {
+            return Ok(());
+        }
+        // The status line was for the last key, not for the refresh.
+        let status = self.state.status.take();
+        self.busy(terminal, "Refreshing…")?;
+        match self.reload(&counts) {
+            Ok(()) => {
+                self.state.status = status;
+                Ok(())
+            }
+            Err(err) => self.fail(err),
+        }
+    }
+
+    /// The list from these counts, and the open thread with it.
+    fn reload(&mut self, counts: &Counts) -> Result<()> {
+        let items = load(self.client, self.names, counts)?;
+        self.state.replace_items(items);
+        if let Some(pane) = self.state.thread.take() {
+            let reloaded = self.reload_thread(&pane);
+            // A failed reload keeps the thread as it was on the screen.
+            let (pane, failed) = match reloaded {
+                Ok(reloaded) => (reloaded, None),
+                Err(err) => (pane, Some(err)),
+            };
+            self.state.thread = Some(pane);
+            if let Some(err) = failed {
+                return Err(err);
+            }
+        }
+        self.pulse = Pulse::of(counts);
+        Ok(())
     }
 
     /// A dead session ends the program (main says to log in again); any

@@ -72,6 +72,8 @@ pub struct Identity {
     pub url: String,
 }
 
+/// Cloned for the screen's poller, which runs detached (`tui::poll`).
+#[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
     base_url: String,
