@@ -38,6 +38,9 @@ struct Cli {
     /// Print only the number of conversations, for a status bar
     #[arg(long)]
     count: bool,
+    /// With --count: the conversations and the messages aimed at you, as JSON
+    #[arg(long, requires = "count")]
+    json: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -134,7 +137,7 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        None if cli.count => commands::count(),
+        None if cli.count => commands::count(cli.json),
         // A pipe or a script cannot drive a screen; it gets the text.
         None if io::stdin().is_terminal() && io::stdout().is_terminal() => commands::ui(),
         None => commands::unreads(false, false),

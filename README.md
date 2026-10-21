@@ -33,6 +33,7 @@ slack                 # what is unread, interactive: move through it, reply, mar
 slack unreads         # the same, printed: DMs, mentions, channels, threads
 slack unreads --json  # the same data, for scripts
 slack --count         # the same, as one number for a status bar
+slack --count --json  # that number and the messages aimed at you
 slack thread 2        # the thread numbered 2 in the last output, or a permalink
 
 slack channels                  # the channels and group messages you are in
@@ -112,6 +113,8 @@ Security notes, the short version:
 ## Status bar
 
 `slack --count` makes two API calls side by side, prints one number and exits non-zero when the fetch fails, so a poller can tell "nothing" from "broken". The number is the unread conversations (DMs, group messages and channels with something new, muted ones excepted unless you were mentioned) plus one when followed threads have unread replies.
+
+`slack --count --json` prints `{"unread": 3, "me": 2}` from the same two calls: `unread` is that number, `me` the messages aimed at you (the unread messages of DMs and group messages, the mentions in channels and in followed threads), for a bar that shows the urgent part apart.
 
 ## Files
 

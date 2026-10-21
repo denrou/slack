@@ -128,6 +128,20 @@ impl Counts {
     pub fn unread_count(&self) -> usize {
         self.unread().count() + usize::from(self.threads_unread())
     }
+
+    /// The messages aimed at you: the unread messages of a DM or group
+    /// message (at least one), the mentions in a channel and in followed
+    /// threads. Only over `unread`, so a muted DM stays out here too.
+    pub fn me_count(&self) -> u64 {
+        let conversations: u64 = self
+            .unread()
+            .map(|c| match c.kind {
+                Kind::Channel => c.mention_count,
+                Kind::Im | Kind::Mpim => c.mention_count.max(1),
+            })
+            .sum();
+        conversations + self.threads.map_or(0, |t| t.mention_count)
+    }
 }
 
 /// The read cursor of every conversation, from `client.counts` alone, for
@@ -239,6 +253,11 @@ mod tests {
         assert_eq!(ids(counts.unread()), ["C02ALERTS", "C03RANDOM", "D06JANE"]);
         assert!(counts.threads_unread());
         assert_eq!(counts.unread_count(), 4);
+        assert_eq!(
+            counts.me_count(),
+            3,
+            "the mention in C02ALERTS and the two unread messages of D06JANE"
+        );
     }
 
     #[test]
@@ -252,6 +271,11 @@ mod tests {
         );
         assert_eq!(counts.muted_unread_count(), 2);
         assert_eq!(counts.unread_count(), 2);
+        assert_eq!(
+            counts.me_count(),
+            1,
+            "a muted DM is not aimed at you either"
+        );
 
         counts.apply_prefs(&prefs(&["C02ALERTS"]));
         assert!(

@@ -19,7 +19,7 @@ Each module knows one thing, and the dependencies point down this list:
 
 **`slack unreads`, the view.** `Workspaces::load` picks the default workspace and builds its `Client`. `counts::fetch` calls `client.counts` and `users.prefs.get` in two threads and flags the muted conversations. `view::build` sorts the unread conversations into direct messages, mentions and channels, reads the unread part of each (`history::fetch`, `conversations.history` from the read cursor, through `par::map`) and the followed threads (`threads::fetch`), then fills the names it needs from the cache (`users.info` and `conversations.info` on a miss). `lastview::remember` records what was shown; a failure there is a warning, the view still prints. Then `--json` serialises the `View`, or `view::render` prints it.
 
-**`slack --count`.** `counts::fetch` and `Counts::unread_count`, nothing else: no names, no cache file, two calls side by side. Any failure exits non-zero with a message on stderr, so a status bar can tell "nothing" from "broken".
+**`slack --count`.** `counts::fetch` and `Counts::unread_count` (with `--json`, `Counts::me_count` beside it), nothing else: no names, no cache file, two calls side by side. Any failure exits non-zero with a message on stderr, so a status bar can tell "nothing" from "broken".
 
 **`slack send`.** `target::resolve` turns the argument into a channel id and maybe a thread: a number from the last output (`lastview::thread_ref`), a permalink, a bare id, `#channel` or `@person` through the names cache with a `conversations.list` or `users.list` walk on a miss (`@person` opens the DM with `conversations.open`). Then `mention::link` on the text, `chat.postMessage`, and `chat.getPermalink` best effort for the line printed.
 

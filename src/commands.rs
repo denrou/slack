@@ -59,10 +59,16 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     })
 }
 
-pub fn count() -> Result<()> {
+pub fn count(json: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (_, workspace) = store.default_workspace()?;
     let counts = counts::fetch(&workspace.client())?;
+    if json {
+        return print_json(&json!({
+            "unread": counts.unread_count(),
+            "me": counts.me_count(),
+        }));
+    }
     println!("{}", counts.unread_count());
     Ok(())
 }
