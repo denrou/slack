@@ -27,8 +27,8 @@ use ratatui::crossterm::{execute, terminal};
 use serde_json::Value;
 
 use self::model::{
-    Action, Candidate, Choice, ChoiceKind, Draft, Item, Mode, Picker, Section, State, ThreadPane,
-    Viewport,
+    Action, Candidate, Choice, ChoiceKind, Draft, Item, Mark, Mode, Picker, Section, State,
+    ThreadPane, Viewport,
 };
 use crate::api::{self, Client};
 use crate::counts::{Counts, Kind};
@@ -259,10 +259,7 @@ impl App<'_> {
     }
 
     fn perform(&mut self, action: Action, terminal: &mut DefaultTerminal) -> Result<()> {
-        let writes = matches!(
-            action,
-            Action::MarkRead(_) | Action::MarkAllRead | Action::Send { .. }
-        );
+        let writes = matches!(action, Action::MarkRead(_) | Action::Send { .. });
         let performed = self.act(action, terminal);
         if writes {
             self.written = Instant::now();
@@ -274,49 +271,43 @@ impl App<'_> {
         match action {
             Action::None | Action::Quit => Ok(()),
             Action::Refresh => self.refresh(terminal),
-            Action::MarkRead(index) => {
+            Action::MarkRead(marks) => {
                 self.busy(terminal, "Marking as read…")?;
-                let marked = self
-                    .cursors()
-                    .and_then(|cursors| self.mark_read(index, &cursors));
-                match marked {
-                    Ok(Marked::Done(title)) => {
-                        self.after_mark(index);
-                        self.state.status = Some(format!("Marked {title} as read"));
-                        Ok(())
-                    }
-                    Ok(Marked::Already(title)) => {
-                        self.after_mark(index);
-                        self.state.status = Some(format!("{title} was already read"));
-                        Ok(())
-                    }
-                    Ok(Marked::Nothing(title)) => {
-                        self.state.status = Some(format!("{title} has nothing to mark"));
-                        Ok(())
-                    }
-                    Err(err) => self.fail(err),
-                }
-            }
-            Action::MarkAllRead => {
-                self.busy(terminal, "Marking everything as read…")?;
                 let cursors = match self.cursors() {
                     Ok(cursors) => cursors,
                     Err(err) => return self.fail(err),
                 };
                 let mut marked = 0;
+                let mut status = None;
                 // Last to first, so an index stays valid after a removal.
-                for index in (0..self.state.items.len()).rev() {
-                    match self.mark_read(index, &cursors) {
-                        Ok(Marked::Done(_)) => {
-                            self.after_mark(index);
-                            marked += 1;
-                        }
-                        Ok(Marked::Already(_)) => self.after_mark(index),
-                        Ok(Marked::Nothing(_)) => {}
+                // On a failure the selection keeps what is left to mark.
+                for mark in marks.iter().rev() {
+                    let opened = self.state.items[mark.item].section == Section::Opened;
+                    let result = match self.mark_read(mark.item, mark.upto.as_deref(), &cursors) {
+                        Ok(result) => result,
                         Err(err) => return self.fail(err),
+                    };
+                    status = Some(match (&result, opened) {
+                        (Marked::Done(title), _) => format!("Marked {title} as read"),
+                        (Marked::Already(title) | Marked::Nothing(title), true) => {
+                            format!("Closed {title}")
+                        }
+                        (Marked::Already(title), false) => format!("{title} was already read"),
+                        (Marked::Nothing(title), false) => format!("{title} has nothing to mark"),
+                    });
+                    if matches!(result, Marked::Done(_)) {
+                        marked += 1;
+                    }
+                    if opened || !matches!(result, Marked::Nothing(_)) {
+                        self.after_mark(mark);
                     }
                 }
-                self.state.status = Some(format!("Marked {marked} as read"));
+                self.state.checked.clear();
+                self.state.status = if marks.len() == 1 {
+                    status
+                } else {
+                    Some(format!("Marked {marked} as read"))
+                };
                 Ok(())
             }
             Action::Send {
@@ -543,10 +534,15 @@ impl App<'_> {
         Ok(counts::cursors(self.client)?)
     }
 
-    fn mark_read(&mut self, index: usize, cursors: &BTreeMap<String, String>) -> Result<Marked> {
+    fn mark_read(
+        &mut self,
+        index: usize,
+        upto: Option<&str>,
+        cursors: &BTreeMap<String, String>,
+    ) -> Result<Marked> {
         let item = &self.state.items[index];
         let title = item.title.clone();
-        let Some(latest) = item.latest.as_deref() else {
+        let Some(latest) = upto else {
             return Ok(Marked::Nothing(title));
         };
         match &item.thread_ts {
@@ -578,13 +574,13 @@ impl App<'_> {
         Ok(Marked::Done(title))
     }
 
-    /// What needed you leaves the list once read; an opened conversation
-    /// stays, with nothing new in it.
-    fn after_mark(&mut self, index: usize) {
-        if self.state.items[index].section == Section::Opened {
-            self.state.items[index].caught_up();
-        } else {
-            self.state.remove(index);
+    /// What needed you leaves the list once read, and an opened
+    /// conversation is closed. One with a message newer than the mark
+    /// stays, unread: the next refresh shows it.
+    fn after_mark(&mut self, mark: &Mark) {
+        let item = &self.state.items[mark.item];
+        if item.section == Section::Opened || item.latest == mark.upto {
+            self.state.remove(mark.item);
         }
     }
 
@@ -851,7 +847,7 @@ impl App<'_> {
         self.load_opened(channel, None)
     }
 
-    /// The conversation is in the list; `n` goes on to write to it.
+    /// The conversation is in the list; `c` goes on to write to it.
     fn opened(&mut self, item: Item, compose: bool) -> Result<()> {
         self.state.open_item(item);
         self.state.status = None;

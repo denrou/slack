@@ -2,6 +2,8 @@
 //! selected, which pane has the focus, which mode the keys go to. No I/O,
 //! so the keys are testable; `mod.rs` performs the actions.
 
+use std::collections::BTreeMap;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::history::{self, Message};
@@ -18,7 +20,7 @@ pub enum Section {
     /// The other channels with unreads, mentions aside.
     Channels,
     Threads,
-    /// Conversations opened from the picker (`c`), with their recent
+    /// Conversations opened from the picker (`o`), with their recent
     /// history. They stay through a refresh and a reply.
     Opened,
 }
@@ -39,7 +41,7 @@ impl Section {
 pub struct Item {
     pub section: Section,
     pub channel: String,
-    /// Set for a thread: replies go there, and `o` opens it.
+    /// Set for a thread: replies go there, and `O` opens it.
     pub thread_ts: Option<String>,
     pub title: String,
     pub detail: String,
@@ -170,12 +172,6 @@ impl Item {
         }
     }
 
-    /// Nothing is new any more: after a mark or a reply.
-    pub fn caught_up(&mut self) {
-        self.unread_from = None;
-        self.describe();
-    }
-
     fn describe(&mut self) {
         let new = self
             .messages
@@ -195,6 +191,10 @@ impl Item {
 
     fn key(&self) -> (&str, Option<&str>) {
         (&self.channel, self.thread_ts.as_deref())
+    }
+
+    fn owned_key(&self) -> (String, Option<String>) {
+        (self.channel.clone(), self.thread_ts.clone())
     }
 }
 
@@ -283,8 +283,8 @@ pub struct Picker {
     /// People marked with Space, as indexes into `choices`: Enter opens
     /// their group message instead of the highlighted choice.
     pub marked: Vec<usize>,
-    /// Write to the chosen conversation straight away (`n`), rather
-    /// than only open it (`c`).
+    /// Write to the chosen conversation straight away (`c`), rather
+    /// than only open it (`o`).
     pub compose: bool,
 }
 
@@ -436,7 +436,7 @@ impl Draft {
     }
 }
 
-/// The emoji prompt of `+`, over the highlighted message.
+/// The emoji prompt of `R`, over the highlighted message.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Reacting {
     pub query: String,
@@ -444,7 +444,7 @@ pub struct Reacting {
     pub pick: usize,
 }
 
-/// How many emoji the `+` prompt offers at once.
+/// How many emoji the `R` prompt offers at once.
 const REACT_ROWS: usize = 8;
 
 /// What the reply box completes: `@handle` for a person, `#name` for a
@@ -562,7 +562,6 @@ fn completing(text: &str) -> Option<(usize, char, &str)> {
 pub enum Mode {
     Browse,
     Compose(Draft),
-    ConfirmReadAll,
     Help,
     Pick(Picker),
     React(Reacting),
@@ -574,13 +573,21 @@ pub enum Mode {
     },
 }
 
+/// A conversation `e` marks read, up to the newest message it had when
+/// it was chosen: one that came in since was never seen, so it stays
+/// unread.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Mark {
+    pub item: usize,
+    pub upto: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     None,
     Quit,
     Refresh,
-    MarkRead(usize),
-    MarkAllRead,
+    MarkRead(Vec<Mark>),
     Send {
         item: usize,
         text: String,
@@ -662,8 +669,11 @@ pub struct State {
     /// load, so the box works without a list).
     pub candidates: Option<Vec<Candidate>>,
     pub me: Option<String>,
-    /// Slack's most used emoji, which the `+` prompt offers first.
+    /// Slack's most used emoji, which the `R` prompt offers first.
     pub frequent_emoji: Vec<String>,
+    /// The conversations `x` selected for `e`, by channel and thread,
+    /// with the newest message each had then.
+    pub checked: BTreeMap<(String, Option<String>), Option<String>>,
     pub focus: Focus,
     /// The highlighted message of the pane, when the pane has the focus.
     pub cursor: usize,
@@ -687,6 +697,7 @@ impl State {
             pending_g: false,
             candidates: None,
             frequent_emoji: Vec::new(),
+            checked: BTreeMap::new(),
         }
     }
 
@@ -713,7 +724,7 @@ impl State {
         })
     }
 
-    /// What the `+` prompt offers for the typed part: the reactions on
+    /// What the `R` prompt offers for the typed part: the reactions on
     /// the message, then the emoji you use most, then the standard ones.
     /// A name nothing matches is offered as typed, for a custom emoji
     /// you have not used yet.
@@ -787,6 +798,10 @@ impl State {
         for message in thread.chain(items).filter(|message| message.ts == ts) {
             message.react(name, &me, add);
         }
+    }
+
+    pub fn is_checked(&self, item: &Item) -> bool {
+        self.checked.contains_key(&item.owned_key())
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -878,6 +893,11 @@ impl State {
             .filter(|item| item.section == Section::Opened);
         self.items = items;
         self.items.extend(opened);
+        self.checked.retain(|(channel, thread_ts), _| {
+            self.items
+                .iter()
+                .any(|item| item.key() == (channel.as_str(), thread_ts.as_deref()))
+        });
         let found = key.and_then(|(channel, thread_ts)| {
             self.items
                 .iter()
@@ -908,7 +928,8 @@ impl State {
 
     pub fn remove(&mut self, index: usize) {
         if index < self.items.len() {
-            self.items.remove(index);
+            let item = self.items.remove(index);
+            self.checked.remove(&item.owned_key());
         }
         self.selected = if self.items.is_empty() {
             None
@@ -926,10 +947,6 @@ impl State {
         match std::mem::replace(&mut self.mode, Mode::Browse) {
             Mode::Browse => self.browse(key),
             Mode::Compose(draft) => self.compose(draft, key),
-            Mode::ConfirmReadAll => match key.code {
-                KeyCode::Char('y' | 'Y') => Action::MarkAllRead,
-                _ => Action::None,
-            },
             Mode::Help => Action::None,
             Mode::Pick(picker) => self.pick(picker, key),
             Mode::React(reacting) => self.react(reacting, key),
@@ -968,7 +985,9 @@ impl State {
     }
 
     /// `q` and Ctrl-C quit from anywhere; Esc and `h` step back; `gg`,
-    /// `G` and the Ctrl keys of vim move by screens.
+    /// `G` and the Ctrl keys of vim move by screens. The letters are
+    /// Gmail's where Gmail has the action (`e`, `x`, `r`, `c`, `o`), and
+    /// Slack's `R` for a reaction.
     fn browse(&mut self, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let after_g = std::mem::take(&mut self.pending_g);
@@ -987,7 +1006,7 @@ impl State {
                 self.back();
                 Action::None
             }
-            KeyCode::Char('l') | KeyCode::Right => self.deeper(),
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => self.deeper(),
             KeyCode::Char('j') | KeyCode::Down => self.step(1),
             KeyCode::Char('k') | KeyCode::Up => self.step(-1),
             KeyCode::Char('g') if after_g => self.step(isize::MIN),
@@ -998,12 +1017,13 @@ impl State {
             KeyCode::Home => self.step(isize::MIN),
             KeyCode::Char('G') | KeyCode::End => self.step(isize::MAX),
             KeyCode::Char('x') => {
-                self.close_opened();
+                self.check();
                 Action::None
             }
+            KeyCode::Char('e') => self.mark(),
             KeyCode::Char('u') => self.link(false),
             KeyCode::Char('y') => self.link(true),
-            KeyCode::Char('+') => {
+            KeyCode::Char('R') => {
                 if self.highlighted().is_some() {
                     self.mode = Mode::React(Reacting::default());
                 } else {
@@ -1011,22 +1031,17 @@ impl State {
                 }
                 Action::None
             }
-            KeyCode::Char('c') => Action::OpenPicker { compose: false },
-            KeyCode::Char('n') => Action::OpenPicker { compose: true },
+            KeyCode::Char('c') => Action::OpenPicker { compose: true },
+            KeyCode::Char('o') => Action::OpenPicker { compose: false },
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
                 Action::None
             }
-            KeyCode::Char('r') => self.selected.map_or(Action::None, Action::MarkRead),
-            KeyCode::Char('R') if !self.items.is_empty() => {
-                self.mode = Mode::ConfirmReadAll;
-                Action::None
-            }
-            KeyCode::Char('o') => self.selected.map_or(Action::None, |item| Action::Open {
+            KeyCode::Char('O') => self.selected.map_or(Action::None, |item| Action::Open {
                 item,
                 message: (self.focus == Focus::Messages).then_some(self.cursor),
             }),
-            KeyCode::Enter => self.enter(),
+            KeyCode::Char('r') => self.reply(),
             KeyCode::Char('s') => {
                 self.compose_to_conversation();
                 Action::None
@@ -1035,10 +1050,52 @@ impl State {
         }
     }
 
-    /// Enter: reply where you are. From the list, to the conversation
-    /// (in the thread for a thread item); on a message of the pane, in
-    /// that message's thread; inside a thread, in it.
-    fn enter(&mut self) -> Action {
+    /// `x`: select the conversation for `e`, or unselect it. It keeps the
+    /// newest message the conversation has now, as far as `e` will mark.
+    fn check(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let (key, latest) = (item.owned_key(), item.latest.clone());
+        if self.checked.remove(&key).is_none() {
+            self.checked.insert(key, latest);
+        }
+    }
+
+    /// `e`: the selected conversations read, else the one under the
+    /// cursor; an opened one is closed with it.
+    fn mark(&self) -> Action {
+        let marks: Vec<Mark> = if self.checked.is_empty() {
+            self.selected
+                .map(|item| Mark {
+                    item,
+                    upto: self.items[item].latest.clone(),
+                })
+                .into_iter()
+                .collect()
+        } else {
+            self.items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    self.checked.get(&item.owned_key()).map(|upto| Mark {
+                        item: index,
+                        upto: upto.clone(),
+                    })
+                })
+                .collect()
+        };
+        if marks.is_empty() {
+            Action::None
+        } else {
+            Action::MarkRead(marks)
+        }
+    }
+
+    /// `r`: reply where you are. From the list, to the conversation (in
+    /// the thread for a thread item); on a message of the pane, in that
+    /// message's thread; inside a thread, in it.
+    fn reply(&mut self) -> Action {
         let Some(item) = self.selected else {
             return Action::None;
         };
@@ -1059,7 +1116,7 @@ impl State {
         Action::None
     }
 
-    /// `s`, and the end of `n`: a message to the selected conversation
+    /// `s`, and the end of `c`: a message to the selected conversation
     /// itself, wherever the focus is in it (a thread item takes it in
     /// the thread, since that is the conversation it stands for).
     pub fn compose_to_conversation(&mut self) {
@@ -1068,8 +1125,9 @@ impl State {
         }
     }
 
-    /// One level deeper, the way `l` moves in vim: the messages pane from
-    /// the list, then the highlighted message's thread.
+    /// One level deeper, the way `l` moves in vim and Enter opens in
+    /// Gmail: the messages pane from the list, then the highlighted
+    /// message's thread.
     fn deeper(&mut self) -> Action {
         match (self.focus, &self.thread) {
             (Focus::List, _) => {
@@ -1246,16 +1304,6 @@ impl State {
         Action::None
     }
 
-    /// `x`: an opened conversation leaves the list. What needs you stays
-    /// until it is read.
-    fn close_opened(&mut self) {
-        if let Some(index) = self.selected
-            && self.items[index].section == Section::Opened
-        {
-            self.remove(index);
-        }
-    }
-
     /// `u` and `y`: a link of the highlighted message, opened or copied.
     /// One link goes straight away; several ask which; none, or no
     /// message under the cursor, is a status line.
@@ -1284,7 +1332,7 @@ impl State {
         }
     }
 
-    /// The `+` prompt: typing filters, Up and Down (Tab, Ctrl-n and
+    /// The `R` prompt: typing filters, Up and Down (Tab, Ctrl-n and
     /// Ctrl-p too) move, Enter puts the highlighted emoji on the message
     /// or takes yours back, Esc gives up.
     fn react(&mut self, mut reacting: Reacting, key: KeyEvent) -> Action {
@@ -1363,6 +1411,8 @@ impl State {
         } else if self.focus == Focus::Messages {
             self.focus = Focus::List;
             self.cursor = 0;
+        } else {
+            self.checked.clear();
         }
     }
 
@@ -1548,7 +1598,7 @@ mod tests {
     #[test]
     fn replying_from_the_list_goes_through_the_compose_mode() {
         let mut state = state();
-        assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
+        assert_eq!(state.key(press(KeyCode::Char('r'))), Action::None);
         assert_eq!(state.mode, Mode::Compose(Draft::new(None)));
         for c in "ok!".chars() {
             state.key(press(KeyCode::Char(c)));
@@ -1578,7 +1628,7 @@ mod tests {
         // A thread item from the list replies in its thread.
         state.key(press(KeyCode::Char('j')));
         state.key(press(KeyCode::Char('j')));
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         assert_eq!(
             state.mode,
             Mode::Compose(Draft::new(Some("2.000100".to_string())))
@@ -1594,7 +1644,7 @@ mod tests {
         assert_eq!(state.cursor, 1);
         state.key(press(KeyCode::Char('j')));
         assert_eq!(state.cursor, 1, "stays on the last message");
-        assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
+        assert_eq!(state.key(press(KeyCode::Char('r'))), Action::None);
         assert_eq!(
             state.mode,
             Mode::Compose(Draft::new(Some("1.000200".to_string()))),
@@ -1618,7 +1668,7 @@ mod tests {
             from_message: 1,
         });
         assert_eq!((state.focus, state.cursor), (Focus::Messages, 0));
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         assert_eq!(
             state.mode,
             Mode::Compose(Draft::new(Some("1.000200".to_string())))
@@ -1649,8 +1699,16 @@ mod tests {
     #[test]
     fn l_goes_one_level_deeper_and_h_comes_back() {
         let mut state = state();
-        state.key(press(KeyCode::Char('l')));
+        assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
+        assert_eq!(state.focus, Focus::Messages, "Enter goes deeper, as l does");
         state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::OpenThread {
+                item: 0,
+                message: 1
+            }
+        );
         assert_eq!(
             state.key(press(KeyCode::Char('l'))),
             Action::OpenThread {
@@ -1683,10 +1741,10 @@ mod tests {
     }
 
     #[test]
-    fn o_opens_slack_at_the_highlighted_message_from_the_pane() {
+    fn capital_o_opens_slack_at_the_highlighted_message_from_the_pane() {
         let mut state = state();
         assert_eq!(
-            state.key(press(KeyCode::Char('o'))),
+            state.key(press(KeyCode::Char('O'))),
             Action::Open {
                 item: 0,
                 message: None
@@ -1695,7 +1753,7 @@ mod tests {
         state.key(press(KeyCode::Char('l')));
         state.key(press(KeyCode::Char('j')));
         assert_eq!(
-            state.key(press(KeyCode::Char('o'))),
+            state.key(press(KeyCode::Char('O'))),
             Action::Open {
                 item: 0,
                 message: Some(1)
@@ -1704,14 +1762,43 @@ mod tests {
     }
 
     #[test]
-    fn marking_everything_asks_first() {
+    fn e_marks_the_conversation_or_what_x_selected() {
+        let mark = |item: usize| Mark {
+            item,
+            upto: Some("1.000200".to_string()),
+        };
         let mut state = state();
-        assert_eq!(state.key(press(KeyCode::Char('R'))), Action::None);
-        assert_eq!(state.mode, Mode::ConfirmReadAll);
-        assert_eq!(state.key(press(KeyCode::Char('n'))), Action::None);
-        state.key(press(KeyCode::Char('R')));
-        assert_eq!(state.key(press(KeyCode::Char('y'))), Action::MarkAllRead);
-        assert_eq!(state.key(press(KeyCode::Char('r'))), Action::MarkRead(0));
+        assert_eq!(
+            state.key(press(KeyCode::Char('e'))),
+            Action::MarkRead(vec![mark(0)])
+        );
+        state.key(press(KeyCode::Char('x')));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('x')));
+        assert_eq!(state.checked.len(), 2);
+
+        // A message that came in after x is not marked: it was never seen.
+        let mut d1 = item(Section::DirectMessages, "D1", None);
+        d1.latest = Some("1.000300".to_string());
+        state.replace_items(vec![d1, item(Section::Threads, "C2", Some("2.000100"))]);
+        assert_eq!(
+            state.key(press(KeyCode::Char('e'))),
+            Action::MarkRead(vec![mark(0), mark(1)])
+        );
+
+        assert_eq!(state.selected, Some(1));
+        state.key(press(KeyCode::Char('x')));
+        assert_eq!(state.checked.len(), 1, "x again unselects");
+        state.key(press(KeyCode::Esc));
+        assert!(state.checked.is_empty(), "Esc unselects everything");
+        state.key(press(KeyCode::Char('x')));
+        state.replace_items(vec![item(Section::DirectMessages, "D1", None)]);
+        assert!(
+            state.checked.is_empty(),
+            "gone from the list, gone from the selection"
+        );
+
         assert_eq!(state.key(control('r')), Action::Refresh);
         assert_eq!(state.key(press(KeyCode::Char('q'))), Action::Quit);
         assert_eq!(state.key(control('c')), Action::Quit);
@@ -1787,7 +1874,7 @@ mod tests {
     fn the_picker_opens_in_its_filter_and_enter_opens_the_highlighted_match() {
         let mut state = state();
         assert_eq!(
-            state.key(press(KeyCode::Char('c'))),
+            state.key(press(KeyCode::Char('o'))),
             Action::OpenPicker { compose: false }
         );
         let choices = vec![
@@ -1971,7 +2058,7 @@ mod tests {
     #[test]
     fn the_reply_box_completes_people_and_channels() {
         let mut state = state();
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "hi ".chars() {
             assert_eq!(state.key(press(KeyCode::Char(c))), Action::None);
         }
@@ -2027,7 +2114,7 @@ mod tests {
             "with the list closed, Enter sends"
         );
 
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "#te".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -2060,7 +2147,7 @@ mod tests {
                 thread_ts: None
             }
         );
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "@zz".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -2174,10 +2261,10 @@ mod tests {
     }
 
     #[test]
-    fn n_picks_people_for_a_new_message_and_space_marks_several() {
+    fn c_picks_people_for_a_new_message_and_space_marks_several() {
         let mut state = state();
         assert_eq!(
-            state.key(press(KeyCode::Char('n'))),
+            state.key(press(KeyCode::Char('c'))),
             Action::OpenPicker { compose: true }
         );
         let mut choices = vec![
@@ -2263,19 +2350,19 @@ mod tests {
     }
 
     #[test]
-    fn x_closes_an_opened_conversation_and_nothing_else() {
+    fn e_marks_an_opened_conversation_from_its_pane() {
         let mut state = state();
-        assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
-        assert_eq!(state.items.len(), 3, "what needs you is not closed");
         let page = history::Unread {
             messages: vec![message("3.000100")],
             has_more: false,
         };
         state.open_item(Item::opened("C7".into(), "#ops".into(), page, None));
         assert_eq!((state.selected, state.focus), (Some(3), Focus::Messages));
-        assert_eq!(state.key(press(KeyCode::Char('x'))), Action::None);
-        assert_eq!(state.items.len(), 3);
-        assert_eq!((state.selected, state.focus), (Some(2), Focus::List));
+        let Action::MarkRead(marks) = state.key(press(KeyCode::Char('e'))) else {
+            panic!("e marks");
+        };
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].item, 3, "mod.rs closes it once marked");
     }
 
     #[test]
@@ -2289,7 +2376,7 @@ mod tests {
             users: vec!["U7".into()],
         }];
         state.key(press(KeyCode::Char('l')));
-        state.key(press(KeyCode::Char('+')));
+        state.key(press(KeyCode::Char('R')));
         assert_eq!(state.emoji_choices(""), ["+1"], "one emoji, one row");
         for c in "thumbsu".chars() {
             state.key(press(KeyCode::Char(c)));
@@ -2319,14 +2406,14 @@ mod tests {
             count: 2,
             users: vec!["U2".into(), "U7".into()],
         }];
-        assert_eq!(state.key(press(KeyCode::Char('+'))), Action::None);
+        assert_eq!(state.key(press(KeyCode::Char('R'))), Action::None);
         assert_eq!(
             state.status.as_deref(),
             Some("Move onto a message first (l)")
         );
 
         state.key(press(KeyCode::Char('l')));
-        state.key(press(KeyCode::Char('+')));
+        state.key(press(KeyCode::Char('R')));
         assert!(matches!(state.mode, Mode::React(_)));
         assert_eq!(
             state.emoji_choices(""),
@@ -2345,7 +2432,7 @@ mod tests {
             "Enter on yours takes it back"
         );
 
-        state.key(press(KeyCode::Char('+')));
+        state.key(press(KeyCode::Char('R')));
         for c in "che".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -2370,7 +2457,7 @@ mod tests {
 
         let frequent = std::mem::take(&mut state.frequent_emoji);
         state.key(press(KeyCode::Char('j')));
-        state.key(press(KeyCode::Char('+')));
+        state.key(press(KeyCode::Char('R')));
         assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
         assert!(
             matches!(state.mode, Mode::React(_)),
@@ -2380,7 +2467,7 @@ mod tests {
         state.key(press(KeyCode::Char('k')));
         state.frequent_emoji = frequent;
 
-        state.key(press(KeyCode::Char('+')));
+        state.key(press(KeyCode::Char('R')));
         state.key(press(KeyCode::Down));
         assert_eq!(
             state.key(press(KeyCode::Enter)),
@@ -2533,14 +2620,12 @@ mod tests {
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.items[1].section, Section::Opened);
         assert_eq!(state.selected, Some(1), "still on the opened one");
-        state.items[1].caught_up();
-        assert_eq!(state.items[1].unread_from, None);
     }
 
     #[test]
     fn control_keys_do_not_type_into_the_reply_box() {
         let mut state = state();
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         state.key(press(KeyCode::Char('h')));
         state.key(control('d'));
         state.key(press(KeyCode::Char('i')));
@@ -2554,7 +2639,7 @@ mod tests {
             other => panic!("still writing, not {other:?}"),
         };
         let mut state = state();
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "one two".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -2607,7 +2692,7 @@ mod tests {
         let mut state = state();
         assert_eq!(state.paste("stray"), Action::None);
         assert!(matches!(state.mode, Mode::Browse));
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         state.paste("Thanks!\r\nWill look tomorrow");
         assert!(matches!(
             &state.mode,
@@ -2623,7 +2708,7 @@ mod tests {
     #[test]
     fn a_line_break_is_ctrl_j_or_a_modified_enter_and_enter_still_sends() {
         let mut state = state();
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "one".chars() {
             state.key(press(KeyCode::Char(c)));
         }
@@ -2648,7 +2733,7 @@ mod tests {
     fn a_line_break_closes_the_completion_list_instead_of_picking() {
         let mut state = state();
         state.candidates = Some(vec![candidate("@jdoe", "Jane Doe", "jdoe jane doe")]);
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "cc @j".chars() {
             state.key(press(KeyCode::Char(c)));
         }

@@ -14,31 +14,31 @@ use crate::history::Message;
 use crate::names::Names;
 use crate::{emoji, mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  l messages  Enter reply  n new  c open any  r read  R read all  o in Slack  Ctrl-R refresh  ? keys  q quit";
-const OPENED_HINTS: &str = "j/k move  l messages  Enter reply  n new  x close  c open any  r read  o in Slack  Ctrl-R refresh  ? keys  q quit";
-const MESSAGES_HINTS: &str = "j/k move  Enter reply to it  l open the thread  u open link  y copy link  o in Slack  h back  q quit";
-const THREAD_HINTS: &str =
-    "j/k move  Enter reply in the thread  u open link  y copy link  o in Slack  h back  q quit";
+const LIST_HINTS: &str = "j/k move  Enter messages  r reply  e mark read  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
+const OPENED_HINTS: &str = "j/k move  Enter messages  r reply  e close  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
+const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  r reply to it  R react  u open link  y copy link  e mark read  O in Slack  h back  q quit";
+const THREAD_HINTS: &str = "j/k move  r reply in the thread  R react  u open link  y copy link  O in Slack  h back  q quit";
+const CHECKED_HINTS: &str =
+    "x select or unselect  e mark them read  Esc unselect  j/k move  q quit";
 
 const HELP: &[&str] = &[
     "j, k, arrows    move through the list, or through the messages",
-    "l, Right        deeper: the messages, then the highlighted message's thread",
-    "h, Left, Esc    back: close the thread, leave the messages",
+    "l, Enter, Right deeper: the messages, then the highlighted message's thread",
+    "h, Left, Esc    back: close the thread, leave the messages, unselect",
     "gg, G           the first, the last (Home, End too)",
     "Ctrl-D, Ctrl-U  half a screen down, up; Ctrl-F, Ctrl-B, PgDn, PgUp a whole one",
-    "Enter           reply: to the conversation, to the highlighted message, or in the open thread",
+    "r               reply: to the conversation, to the highlighted message, or in the open thread",
     "s               a message to the conversation, wherever you are in it",
-    "n               new message: pick a channel or people (Tab marks several as you type), then write",
-    "c               open a channel or group you are in, or anyone: type to filter, Enter opens; m in the list shows the muted",
+    "c               compose: pick a channel or people (Tab marks several as you type), then write",
+    "o               open a channel or group you are in, or anyone: type to filter, Enter opens; m in the list shows the muted",
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "Ctrl-J          a new line in the reply box (Ctrl-Enter, Shift-Enter too where the terminal reports them)",
     "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
-    "x               close an opened conversation",
+    "e               mark it as read, and close it if you opened it; with a selection, all of the selection",
+    "x               select the conversation for e, or unselect it",
     "u, y            open, or copy, a link of the highlighted message",
-    "+               react to the highlighted message: type to filter, Enter puts it on, or takes yours back",
-    "r               mark the selected one as read",
-    "R               mark everything listed as read (asks first)",
-    "o               open it in Slack, at the highlighted message from the pane",
+    "R               react to the highlighted message: type to filter, Enter puts it on, or takes yours back",
+    "O               open it in Slack, at the highlighted message from the pane",
     "Ctrl-R          refresh",
     "q, Ctrl-C       quit",
 ];
@@ -55,7 +55,7 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Vie
         Mode::Help => HELP.len() as u16 + 2,
         Mode::Links { links, .. } => links.len() as u16 + 2,
         Mode::React(reacting) => state.emoji_choices(&reacting.query).len() as u16 + 3,
-        Mode::Browse | Mode::ConfirmReadAll | Mode::Pick(_) => 1,
+        Mode::Browse | Mode::Pick(_) => 1,
     };
     let [main, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_height)])
         .areas(frame.area());
@@ -78,8 +78,9 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
             Row::Header(section) => ListItem::new(Line::from(section.title().bold().dim())),
             Row::Item(index) => {
                 let item = &state.items[*index];
+                let tick = if state.is_checked(item) { "✓ " } else { "  " };
                 ListItem::new(Line::from(vec![
-                    Span::raw("  "),
+                    Span::raw(tick),
                     Span::raw(item.title.as_str()),
                     Span::raw("  "),
                     Span::styled(item.detail.as_str(), Style::new().dim()),
@@ -87,7 +88,10 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
             }
         })
         .collect();
-    let title = format!(" slack · {} ", state.items.len());
+    let title = match state.checked.len() {
+        0 => format!(" slack · {} ", state.items.len()),
+        n => format!(" slack · {} · {n} selected ", state.items.len()),
+    };
     let highlight = if state.focus == Focus::List {
         Style::new().add_modifier(Modifier::REVERSED)
     } else {
@@ -274,7 +278,7 @@ fn draw_messages(
             );
         }
         // Under the message, as the app has them; yours stand out, since
-        // `+` on one of them takes it back.
+        // `R` on one of them takes it back.
         if !message.reactions.is_empty() {
             let mut spans = vec![Span::raw(indent.clone())];
             for (at, reaction) in message.reactions.iter().enumerate() {
@@ -517,13 +521,6 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 area,
             );
         }
-        Mode::ConfirmReadAll => {
-            let text = format!(
-                "Mark all {} as read? y, or any other key to cancel",
-                state.items.len()
-            );
-            frame.render_widget(Paragraph::new(text).yellow(), area);
-        }
         Mode::Links { links, copy } => {
             let title = if *copy {
                 " Copy which link? · a digit picks, any other key cancels "
@@ -648,6 +645,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 .selected_item()
                 .is_some_and(|item| item.section == Section::Opened);
             let hints = match (state.focus, &state.thread) {
+                _ if !state.checked.is_empty() => CHECKED_HINTS,
                 (Focus::List, _) if opened => OPENED_HINTS,
                 (Focus::List, _) => LIST_HINTS,
                 (Focus::Messages, None) => MESSAGES_HINTS,
@@ -749,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn reactions_sit_under_their_message_and_plus_offers_them() {
+    fn reactions_sit_under_their_message_and_r_offers_them() {
         let mut state = history(&["hello", "world"], None);
         state.me = Some("U7".to_string());
         state.items[0].messages[0].reactions = vec![
@@ -779,7 +777,7 @@ mod tests {
         assert!(rows[hello + 2].contains("world"));
 
         state.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        state.key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
         let (buffer, _) = render(&state, 100, 20);
         let rows: Vec<String> = (0..20).map(|y| row(&buffer, y)).collect();
         assert!(rows.iter().any(|r| r.contains("React to")));
@@ -873,7 +871,7 @@ mod tests {
             candidate("@jdoe", "Jane Doe", "jdoe jane doe"),
             candidate("@jsmith", "John Smith · SRE", "jsmith john smith"),
         ]);
-        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::Char('r')));
         for c in "hi @j".chars() {
             state.key(press(KeyCode::Char(c)));
         }

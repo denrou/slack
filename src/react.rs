@@ -1,4 +1,4 @@
-//! `slack react`, and the screen's `+`: put an emoji on a message, or take
+//! `slack react`, and the screen's `R`: put an emoji on a message, or take
 //! yours back (`reactions.add`, `reactions.remove`). Asking for what is
 //! already so (`already_reacted`, `no_reaction`) is not an error: the
 //! message ends up as asked either way. A name Slack refuses is tried

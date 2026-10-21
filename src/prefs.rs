@@ -15,7 +15,7 @@ pub struct Prefs {
     /// Muted conversations: the app badges them for mentions only.
     pub muted: HashSet<String>,
     /// Emoji names, the most used first: what the app's picker offers
-    /// first, and the screen's `+` too.
+    /// first, and the screen's `R` too.
     pub frequent_emoji: Vec<String>,
 }
 
