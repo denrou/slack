@@ -922,3 +922,73 @@ fn copy(text: &str) -> Result<()> {
         "no clipboard tool (pbcopy, wl-copy, xclip); the link is {text}"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn counts(channels: Value, threads: Value) -> Counts {
+        Counts::parse(&json!({"ok": true, "channels": channels, "threads": threads})).unwrap()
+    }
+
+    fn channel(id: &str, latest: &str, last_read: &str, mentions: u64) -> Value {
+        json!({"id": id, "latest": latest, "last_read": last_read,
+               "has_unreads": latest != last_read, "mention_count": mentions})
+    }
+
+    #[test]
+    fn a_poll_reloads_only_when_an_unread_conversation_or_the_threads_moved() {
+        let threads = json!({"has_unreads": true, "mention_count": 0});
+        let before = Pulse::of(&counts(
+            json!([
+                channel("C1", "1.3", "1.1", 0),
+                channel("C2", "2.1", "2.1", 0)
+            ]),
+            threads.clone(),
+        ));
+        let same = |channels: Value, threads: &Value| {
+            Pulse::of(&counts(channels, threads.clone())) == before
+        };
+        assert!(
+            same(
+                json!([
+                    channel("C2", "2.1", "2.1", 0),
+                    channel("C1", "1.3", "1.1", 0)
+                ]),
+                &threads
+            ),
+            "the order Slack sends them in is not a change"
+        );
+        assert!(
+            same(json!([channel("C1", "1.3", "1.1", 0)]), &threads),
+            "a read conversation is not watched"
+        );
+        for (moved, why) in [
+            (channel("C1", "1.4", "1.1", 0), "a new message"),
+            (channel("C1", "1.3", "1.2", 0), "read in the app"),
+            (channel("C1", "1.3", "1.1", 1), "a new mention"),
+        ] {
+            assert!(!same(json!([moved]), &threads), "{why}");
+        }
+        assert!(
+            !same(
+                json!([
+                    channel("C1", "1.3", "1.1", 0),
+                    channel("C2", "2.2", "2.1", 0)
+                ]),
+                &threads
+            ),
+            "a conversation that became unread"
+        );
+        assert!(!same(json!([]), &threads), "a conversation read elsewhere");
+        assert!(
+            !same(
+                json!([channel("C1", "1.3", "1.1", 0)]),
+                &json!({"has_unreads": true, "mention_count": 1})
+            ),
+            "a mention in a thread"
+        );
+    }
+}
