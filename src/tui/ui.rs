@@ -749,7 +749,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 None if completion.is_some() => {
                     format!("{title} · Tab picks, Esc closes the list ")
                 }
-                None if state.fixes => format!(
+                None if state.fixes.is_ok() => format!(
                     "{title} · Enter sends, Ctrl-G corrects, Ctrl-J a new line, Esc cancels "
                 ),
                 None => format!("{title} · Enter sends, Ctrl-J a new line, Esc cancels "),
@@ -1302,7 +1302,7 @@ mod tests {
         assert!(row_with(&buffer, "Enter sends, Ctrl-J a new line, Esc cancels").is_some());
 
         // The correction key is offered only when a command is set.
-        state.fixes = true;
+        state.fixes = Ok(());
         let (buffer, _) = render(&state, 120, 30);
         assert!(row_with(&buffer, "Enter sends, Ctrl-G corrects, Ctrl-J").is_some());
         state.status = Some("Error: channel_not_found".to_string());

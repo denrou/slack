@@ -77,14 +77,18 @@ fn screen(
     let mut state = State::new(Vec::new(), me.map(str::to_string));
     state.replace_items(Some(items), recent);
     // A config that does not read must not keep you from Slack: the box
-    // just cannot correct.
-    let fix_command = Config::load()
-        .unwrap_or_else(|err| {
+    // just cannot correct, and Ctrl-G says why.
+    let fix_command = match Config::load() {
+        Ok(config) => config.fix_command,
+        Err(err) => {
             warn::warn(format!("{err:#}"));
-            Config::default()
-        })
-        .fix_command;
-    state.fixes = fix_command.is_some();
+            state.fixes = Err(format!("{err:#}"));
+            None
+        }
+    };
+    if fix_command.is_some() {
+        state.fixes = Ok(());
+    }
     let live = Arc::new(AtomicBool::new(false));
     let (nudges, nudged) = mpsc::channel();
     let term_program = env::var("TERM_PROGRAM").ok();

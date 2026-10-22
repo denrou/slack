@@ -884,8 +884,9 @@ pub struct State {
     /// What the reply box completes, once loaded (empty after a failed
     /// load, so the box works without a list).
     pub candidates: Option<Vec<Candidate>>,
-    /// Whether the config names a command that corrects a draft.
-    pub fixes: bool,
+    /// Whether the config names a command that corrects a draft, else
+    /// what Ctrl-G says instead.
+    pub fixes: Result<(), String>,
     pub me: Option<String>,
     /// Slack's most used emoji, which the `R` prompt offers first.
     pub frequent_emoji: Vec<String>,
@@ -920,7 +921,7 @@ impl State {
             viewport: Viewport::default(),
             pending_g: false,
             candidates: None,
-            fixes: false,
+            fixes: Err("Set fix_command in ~/.config/slack/config.toml first".to_string()),
             frequent_emoji: Vec::new(),
             checked: BTreeMap::new(),
             typing: BTreeMap::new(),
@@ -1733,8 +1734,8 @@ impl State {
             draft.text = typed;
             self.status = Some("Back to your text".to_string());
             Action::None
-        } else if !self.fixes {
-            self.status = Some("Set fix_command in ~/.config/slack/config.toml first".to_string());
+        } else if let Err(why) = &self.fixes {
+            self.status = Some(why.clone());
             Action::None
         } else if draft.text.trim().is_empty() {
             Action::None
@@ -3417,7 +3418,7 @@ mod tests {
     #[test]
     fn ctrl_g_corrects_the_draft_and_again_takes_it_back() {
         let mut state = state();
-        state.fixes = true;
+        state.fixes = Ok(());
         state.key(press(KeyCode::Char('r')));
         state.paste("ca va ");
         assert_eq!(
@@ -3438,7 +3439,7 @@ mod tests {
     #[test]
     fn an_edit_after_a_correction_keeps_it() {
         let mut state = state();
-        state.fixes = true;
+        state.fixes = Ok(());
         state.key(press(KeyCode::Char('r')));
         state.paste("ca va");
         state.fixed("ca va".to_string(), "ça va".to_string());
@@ -3449,7 +3450,7 @@ mod tests {
     #[test]
     fn a_correction_that_changes_nothing_says_so() {
         let mut state = state();
-        state.fixes = true;
+        state.fixes = Ok(());
         state.key(press(KeyCode::Char('r')));
         state.paste("ça va\n");
         state.fixed("ça va\n".to_string(), "ça va".to_string());
@@ -3469,9 +3470,19 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_g_with_a_config_that_does_not_read_says_why() {
+        let mut state = state();
+        state.fixes = Err("cannot read config.toml: unknown field `notify`".to_string());
+        state.key(press(KeyCode::Char('r')));
+        state.paste("ca va");
+        assert_eq!(state.key(control('g')), Action::None);
+        assert!(state.status.as_deref().unwrap().contains("unknown field"));
+    }
+
+    #[test]
     fn a_correction_after_the_box_closed_is_dropped() {
         let mut state = state();
-        state.fixes = true;
+        state.fixes = Ok(());
         state.fixed("ca va".to_string(), "ça va".to_string());
         assert_eq!(state.mode, Mode::Browse);
         assert_eq!(state.status, None);
