@@ -1758,7 +1758,9 @@ impl State {
             self.status = Some("Nothing to correct".to_string());
             return;
         }
-        draft.text = fixed;
+        // The model trims its answer: the space or line break typed last
+        // stays, so the next word does not stick to the corrected one.
+        draft.text = fixed + &typed[typed.trim_end().len()..];
         draft.typed = Some(typed);
         draft.pick = None;
         self.status = Some("Corrected · Ctrl-G takes it back".to_string());
@@ -3428,7 +3430,7 @@ mod tests {
             }
         );
         state.fixed("ca va ".to_string(), "ça va".to_string());
-        assert_eq!(draft_text(&state), "ça va");
+        assert_eq!(draft_text(&state), "ça va ");
         assert_eq!(state.key(control('g')), Action::None);
         assert_eq!(draft_text(&state), "ca va ");
         assert_eq!(state.status.as_deref(), Some("Back to your text"));
