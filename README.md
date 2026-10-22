@@ -148,13 +148,13 @@ ln -s "$PWD/skills/slack" ~/.claude/skills/slack
 
 ## Releasing
 
-Bump `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, commit, then push a matching annotated tag:
+Bump `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, commit, then push a matching annotated tag whose message is the tag name, a blank line and the release notes:
 
 ```bash
-git tag -a v0.8.0 -m "v0.8.0" && git push origin main v0.8.0
+git tag -a v0.8.0 --cleanup=whitespace -F notes.txt && git push origin main v0.8.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them as a GitHub Release with generated notes and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-slack) to pick the release up.
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them as a GitHub Release with the tag's notes, the compare link to the previous release and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-slack) to pick the release up.
 
 ## License
 
