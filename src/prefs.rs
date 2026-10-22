@@ -1,8 +1,9 @@
-//! The user's own Slack preferences, read for two things: the
-//! conversations they muted, and the emoji they use most. `users.prefs.get`
-//! is a web-client endpoint and both are JSON strings inside it, so a
-//! missing or unreadable pref reads as "nothing muted", which shows more
-//! rather than less, and as no emoji used yet.
+//! The user's own Slack preferences, read for three things: the
+//! conversations they muted, the emoji they use most, and the
+//! conversations they visited last. `users.prefs.get` is a web-client
+//! endpoint and all three are JSON strings inside it, so a missing or
+//! unreadable pref reads as "nothing muted", which shows more rather than
+//! less, as no emoji used yet and as nothing visited.
 
 use std::collections::HashSet;
 
@@ -17,6 +18,9 @@ pub struct Prefs {
     /// Emoji names, the most used first: what the app's picker offers
     /// first, and the screen's `R` too.
     pub frequent_emoji: Vec<String>,
+    /// Conversation ids, the last visited first: the app's own recent
+    /// list, which the screen lands on.
+    pub recent: Vec<String>,
 }
 
 /// The preferences that shape the view, None when they could not be read.
@@ -38,6 +42,7 @@ pub fn parse(body: &Value) -> Prefs {
     Prefs {
         muted: muted(body),
         frequent_emoji: frequent_emoji(body),
+        recent: recent(body),
     }
 }
 
@@ -80,6 +85,39 @@ fn frequent_emoji(body: &Value) -> Vec<String> {
     ranked.into_iter().map(|(name, _)| name.clone()).collect()
 }
 
+/// `prefs.recents` is a JSON string whose `navigation` list holds what the
+/// app visited, from every client: an `id`, an `object_type` (`CHANNEL`,
+/// `DM`, `PAGE` for a view such as Threads) and a `timestamp` in
+/// milliseconds. The pages are left out; what is not a conversation you
+/// are in finds no match in the counts anyway.
+fn recent(body: &Value) -> Vec<String> {
+    let Some(parsed) = nested(body, "recents") else {
+        return Vec::new();
+    };
+    let Some(visits) = parsed.get("navigation").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut visits: Vec<(&str, u64)> = visits
+        .iter()
+        .filter(|visit| visit.get("object_type").and_then(Value::as_str) != Some("PAGE"))
+        .filter_map(|visit| {
+            let id = visit.get("id")?.as_str()?;
+            Some((
+                id,
+                visit.get("timestamp").and_then(Value::as_u64).unwrap_or(0),
+            ))
+        })
+        .collect();
+    visits.sort_by_key(|visit| std::cmp::Reverse(visit.1));
+    let mut ids: Vec<String> = Vec::new();
+    for (id, _) in visits {
+        if !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -112,6 +150,7 @@ mod tests {
             let prefs = parse(&body);
             assert!(prefs.muted.is_empty());
             assert!(prefs.frequent_emoji.is_empty());
+            assert!(prefs.recent.is_empty());
         }
     }
 
@@ -123,5 +162,21 @@ mod tests {
             parse(&body).frequent_emoji,
             ["+1", "wink", "grin", "joy", "yolo"]
         );
+    }
+
+    #[test]
+    fn the_conversations_visited_last_come_first_and_the_pages_stay_out() {
+        let recents = json!({
+            "navigation": [
+                {"id": "D1", "object_type": "DM", "timestamp": 1_792_618_752_480_u64},
+                {"id": "Vall_threads", "object_type": "PAGE", "timestamp": 1_792_700_000_000_u64},
+                {"id": "C2", "object_type": "CHANNEL", "timestamp": 1_792_650_000_000_u64},
+                {"id": "D1", "object_type": "DM", "timestamp": 1_792_500_000_000_u64},
+                {"object_type": "CHANNEL", "timestamp": 1_792_800_000_000_u64}
+            ],
+            "search": [{"query": "deploy", "timestamp": 1, "type": "messages"}]
+        });
+        let body = json!({"ok": true, "prefs": {"recents": recents.to_string()}});
+        assert_eq!(parse(&body).recent, ["C2", "D1"]);
     }
 }

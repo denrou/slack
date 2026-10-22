@@ -1,8 +1,9 @@
 //! `slack` with no command: the view as something to move through and
-//! answer. One list of what needs you on the left, the messages of the
-//! selected item on the right (or the thread opened from one of them), a
-//! reply box at the bottom. Same model as the text view; this module adds
-//! state and keys.
+//! answer. One list on the left, what needs you first and then the
+//! conversations visited last in Slack, the messages of the selected item
+//! on the right (or the thread opened from one of them), a reply box at
+//! the bottom. Same model as the text view; this module adds state and
+//! keys.
 //! API calls stay blocking: each takes a few hundred milliseconds, and the
 //! status line says so meanwhile.
 
@@ -33,9 +34,9 @@ use self::model::{
     ThreadPane, Viewport, Wake,
 };
 use crate::api::{self, Client};
-use crate::counts::{Counts, Kind};
+use crate::counts::{Conversation, Counts, Kind};
 use crate::directory::{self, Listed};
-use crate::history::Message;
+use crate::history::{self, Message};
 use crate::names::Names;
 use crate::rtm::{self, Signal};
 use crate::style::Style;
@@ -67,6 +68,9 @@ fn screen(
 ) -> Result<()> {
     let counts = counts::fetch(client)?;
     let items = load(client, names, &counts)?;
+    let recent = recent(client, names, &counts)?;
+    let mut state = State::new(Vec::new(), me.map(str::to_string));
+    state.replace_items(Some(items), recent);
     let live = Arc::new(AtomicBool::new(false));
     let (nudges, nudged) = mpsc::channel();
     let mut app = App {
@@ -74,9 +78,12 @@ fn screen(
         names,
         team_id,
         workspace_url: workspace_url.trim_end_matches('/'),
-        state: State::new(items, me.map(str::to_string)),
+        state,
         directory_walked: false,
         pulse: Pulse::of(&counts),
+        visited: Visited::of(&counts),
+        resting: None,
+        preview_failed: None,
         polls: poll(client.clone(), Arc::clone(&live), nudged),
         signals: rtm::listen(client.clone(), live),
         nudges,
@@ -183,6 +190,34 @@ fn load(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>
     Ok(Item::from_view(view, names))
 }
 
+/// The conversations visited last in Slack, as items without their
+/// history, which is read once the cursor rests on one. The unread ones
+/// are listed above already.
+fn recent(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>> {
+    let visited: Vec<&Conversation> = counts
+        .recent
+        .iter()
+        .filter_map(|id| counts.conversations.iter().find(|c| &c.id == id))
+        .filter(|c| !c.counts_as_unread())
+        .collect();
+    names.resolve_channels(client, visited.iter().map(|c| c.id.clone()))?;
+    let people: Vec<String> = visited
+        .iter()
+        .filter_map(|c| names.channel(&c.id)?.user.clone())
+        .collect();
+    names.resolve_users(client, people)?;
+    Ok(visited
+        .into_iter()
+        .map(|c| Item::recent(c, names.channel_label(&c.id)))
+        .collect())
+}
+
+/// How long the cursor rests on a recent conversation before its history
+/// is read: moving through the list with `j` reads none of them.
+const PREVIEW_AFTER: Duration = Duration::from_millis(300);
+/// The longest wait for a key, so the screen redraws and polls.
+const TICK: Duration = Duration::from_millis(250);
+
 /// How often the screen asks Slack whether anything moved while the
 /// socket is down.
 const POLL_EVERY: Duration = Duration::from_secs(15);
@@ -270,6 +305,25 @@ impl Pulse {
     }
 }
 
+/// What the recent sections are built from: the conversations visited
+/// last, in order, with what the list shows of each. Apart from `Pulse`,
+/// since a change here rebuilds the sections without reading anything.
+#[derive(PartialEq, Eq)]
+struct Visited(Vec<(String, Option<String>, bool, bool)>);
+
+impl Visited {
+    fn of(counts: &Counts) -> Visited {
+        Visited(
+            counts
+                .recent
+                .iter()
+                .filter_map(|id| counts.conversations.iter().find(|c| &c.id == id))
+                .map(|c| (c.id.clone(), c.latest.clone(), c.muted, c.is_unread()))
+                .collect(),
+        )
+    }
+}
+
 struct App<'a> {
     client: &'a Client,
     names: &'a mut Names,
@@ -281,6 +335,13 @@ struct App<'a> {
     directory_walked: bool,
     /// The counts the list was last loaded from.
     pulse: Pulse,
+    /// The recent conversations the list was last built from.
+    visited: Visited,
+    /// The recent conversation the cursor rests on, and since when.
+    resting: Option<(String, Instant)>,
+    /// A recent conversation whose history failed to load: not tried
+    /// again until the cursor leaves it.
+    preview_failed: Option<String>,
     polls: Receiver<Polled>,
     signals: Receiver<Signal>,
     /// To the poll: fetch now, and reload whatever the counts say if true.
@@ -297,7 +358,17 @@ impl App<'_> {
         loop {
             self.heard();
             self.draw(terminal)?;
-            if !event::poll(Duration::from_millis(250))? {
+            let wait = match self.preview_wait() {
+                Some(Duration::ZERO) => {
+                    if let Some(item) = self.state.to_preview() {
+                        self.preview(item, false)?;
+                    }
+                    continue;
+                }
+                Some(left) => left.min(TICK),
+                None => TICK,
+            };
+            if !event::poll(wait)? {
                 self.polled(terminal)?;
                 continue;
             }
@@ -310,6 +381,46 @@ impl App<'_> {
                 return Ok(());
             }
             self.perform(action, terminal)?;
+        }
+    }
+
+    /// How long until the history of the selected recent conversation is
+    /// read, None when there is nothing to read or a prompt is open.
+    fn preview_wait(&mut self) -> Option<Duration> {
+        let Some(item) = self.state.to_preview() else {
+            self.resting = None;
+            return None;
+        };
+        let channel = &self.state.items[item].channel;
+        match &self.resting {
+            Some((resting, since)) if resting == channel => {
+                let waiting = matches!(self.state.mode, Mode::Browse)
+                    && self.preview_failed.as_ref() != Some(channel);
+                waiting.then(|| PREVIEW_AFTER.saturating_sub(since.elapsed()))
+            }
+            _ => {
+                self.resting = Some((channel.clone(), Instant::now()));
+                self.preview_failed = None;
+                Some(PREVIEW_AFTER)
+            }
+        }
+    }
+
+    /// The recent history of a conversation listed without it. No status
+    /// line: the pane says it is loading, and the line keeps what the
+    /// last key said.
+    fn preview(&mut self, item: usize, enter: bool) -> Result<()> {
+        let it = &self.state.items[item];
+        let (channel, unread_from) = (it.channel.clone(), it.unread_from.clone());
+        match self.history(&channel, unread_from.as_deref()) {
+            Ok(page) => {
+                self.state.preview(item, page, enter);
+                Ok(())
+            }
+            Err(err) => {
+                self.preview_failed = Some(channel);
+                self.fail(err)
+            }
         }
     }
 
@@ -484,6 +595,7 @@ impl App<'_> {
                     }
                 }
             }
+            Action::Preview { item, enter } => self.preview(item, enter),
             Action::Show { choice, compose } => {
                 self.busy(terminal, &format!("Loading {}…", choice.label))?;
                 match self.show(&choice) {
@@ -578,7 +690,7 @@ impl App<'_> {
             return Ok(());
         }
         if !force && Pulse::of(&counts) == self.pulse {
-            return Ok(());
+            return self.revisited(&counts);
         }
         // The status line was for the last key, not for the refresh.
         let status = self.state.status.take();
@@ -595,13 +707,32 @@ impl App<'_> {
         }
     }
 
+    /// The recent sections rebuilt when they moved and nothing unread
+    /// did: no history is read, only a name now and then.
+    fn revisited(&mut self, counts: &Counts) -> Result<()> {
+        let visited = Visited::of(counts);
+        if visited == self.visited {
+            return Ok(());
+        }
+        match recent(self.client, self.names, counts) {
+            Ok(recent) => {
+                self.state.replace_items(None, recent);
+                self.visited = visited;
+                Ok(())
+            }
+            Err(err) => self.fail(err),
+        }
+    }
+
     /// The list from these counts, and the open thread with it. The list
     /// is loaded once the thread fails: the next poll must not redo it.
     fn reload(&mut self, counts: &Counts) -> Result<()> {
         let items = load(self.client, self.names, counts)?;
-        self.state.replace_items(items);
+        let recent = recent(self.client, self.names, counts)?;
+        self.state.replace_items(Some(items), recent);
         self.state.frequent_emoji.clone_from(&counts.frequent_emoji);
         self.pulse = Pulse::of(counts);
+        self.visited = Visited::of(counts);
         if let Some(pane) = self.state.thread.take() {
             let reloaded = self
                 .reload_thread(&pane)
@@ -678,12 +809,14 @@ impl App<'_> {
     /// What needed you leaves the list once read, and an opened
     /// conversation is closed. One with a message newer than the mark
     /// stays, for the next refresh to show what is left; one with
-    /// nothing to mark stays as it was.
+    /// nothing to mark stays as it was, and so does a recent one, read.
     fn after_mark(&mut self, mark: &Mark, result: &Marked) {
         self.state.uncheck(mark.item);
         let newer = self.state.items[mark.item].latest != mark.upto;
+        let recent = self.state.items[mark.item].section.is_recent();
         match result {
             Marked::Nothing(_) => {}
+            Marked::Done(_) | Marked::Already(_) if recent => self.state.read_in_place(mark.item),
             Marked::Done(_) | Marked::Already(_) if newer => {}
             _ => self.state.remove(mark.item),
         }
@@ -714,21 +847,23 @@ impl App<'_> {
     }
 
     /// After a reply. To the conversation itself: Slack now reads it up to
-    /// the reply, so a listed one leaves, a thread open from one of its
-    /// messages with it, and an opened one is reloaded. In a thread: an
-    /// open thread is reloaded to show the reply; a reply to a message from
-    /// the pane leaves the conversation listed, since it stays unread in
-    /// Slack, and reloads an opened one.
+    /// the reply, so an unread one leaves, a thread open from one of its
+    /// messages with it, and an opened or recent one is reloaded. In a
+    /// thread: an open thread is reloaded to show the reply; a reply to a
+    /// message from the pane leaves the conversation listed, since it
+    /// stays unread in Slack, and reloads an opened or recent one.
     fn after_send(&mut self, item: usize, title: &str, thread_ts: Option<&str>) -> Result<()> {
-        let opened = self.state.items[item].section == Section::Opened;
+        let section = self.state.items[item].section;
+        let browsed = section == Section::Opened || section.is_recent();
         if thread_ts.is_none() {
             self.state.thread = None;
-            if !opened {
+            if !browsed {
                 self.state.remove(item);
                 self.state.status = Some(format!("Sent to {title}"));
                 return Ok(());
             }
-            return self.reload_opened(item);
+            self.state.items[item].unread_from = None;
+            return self.reload_browsed(item);
         }
         if let Some(pane) = self.state.thread.take() {
             return match self.reload_thread(&pane) {
@@ -743,8 +878,8 @@ impl App<'_> {
                 }
             };
         }
-        if opened {
-            return self.reload_opened(item);
+        if browsed {
+            return self.reload_browsed(item);
         }
         if self.state.items[item].section != Section::Threads {
             self.state.status = Some("Sent in the thread".to_string());
@@ -755,11 +890,14 @@ impl App<'_> {
         Ok(())
     }
 
-    fn reload_opened(&mut self, item: usize) -> Result<()> {
-        let channel = self.state.items[item].channel.clone();
-        match self.load_opened(channel, None) {
-            Ok(reloaded) => {
-                self.state.open_item(reloaded);
+    /// An opened or recent conversation read again after a reply, in
+    /// place, landing on its newest message.
+    fn reload_browsed(&mut self, item: usize) -> Result<()> {
+        let it = &self.state.items[item];
+        let (channel, unread_from) = (it.channel.clone(), it.unread_from.clone());
+        match self.history(&channel, unread_from.as_deref()) {
+            Ok(page) => {
+                self.state.preview(item, page, true);
                 self.state.status = Some("Sent".to_string());
                 Ok(())
             }
@@ -961,12 +1099,18 @@ impl App<'_> {
 
     /// The recent history of a conversation, as an item of the list.
     fn load_opened(&mut self, channel: String, unread_from: Option<String>) -> Result<Item> {
-        let page = view::recent(self.client, &channel, unread_from.as_deref())?;
+        let page = self.history(&channel, unread_from.as_deref())?;
         self.names
             .resolve_channels(self.client, [channel.clone()])?;
-        self.resolve_people(page.messages.iter())?;
         let title = self.names.channel_label(&channel);
         Ok(Item::opened(channel, title, page, unread_from))
+    }
+
+    /// The recent history of a conversation, its people named.
+    fn history(&mut self, channel: &str, unread_from: Option<&str>) -> Result<history::Unread> {
+        let page = view::recent(self.client, channel, unread_from)?;
+        self.resolve_people(page.messages.iter())?;
+        Ok(page)
     }
 
     fn resolve_people<'m>(&mut self, messages: impl Iterator<Item = &'m Message>) -> Result<()> {

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::counts::{Conversation, Kind};
 use crate::history::{self, Message, compare_ts};
 use crate::mrkdwn::{self, Link};
 use crate::names::Names;
@@ -25,6 +26,11 @@ pub enum Section {
     /// Conversations opened from the picker (`o`), with their recent
     /// history. They stay through a refresh and a reply.
     Opened,
+    /// The channels visited last in Slack, read ones only: the unread
+    /// ones are listed above.
+    RecentChannels,
+    /// The direct and group messages visited last in Slack.
+    RecentPeople,
 }
 
 impl Section {
@@ -35,7 +41,19 @@ impl Section {
             Section::Channels => "Channels",
             Section::Threads => "Threads",
             Section::Opened => "Opened",
+            Section::RecentChannels => "Recent channels",
+            Section::RecentPeople => "Recent people",
         }
+    }
+
+    pub fn is_recent(self) -> bool {
+        matches!(self, Section::RecentChannels | Section::RecentPeople)
+    }
+
+    /// A conversation listed for itself rather than for something new:
+    /// read from its newest message, and kept in the list once replied to.
+    fn is_browsed(self) -> bool {
+        self == Section::Opened || self.is_recent()
     }
 }
 
@@ -53,6 +71,12 @@ pub struct Item {
     pub latest: Option<String>,
     /// The read cursor of a history: the pane marks where "new" starts.
     pub unread_from: Option<String>,
+    /// False for a recent conversation until its history is read, which
+    /// happens once the cursor rests on it, and again when a message came
+    /// in since (the old history is shown meanwhile).
+    pub loaded: bool,
+    /// Muted in Slack: drawn greyed out.
+    pub muted: bool,
 }
 
 impl Item {
@@ -100,6 +124,8 @@ impl Item {
             has_more: entry.has_more,
             latest: entry.latest,
             unread_from,
+            loaded: true,
+            muted: false,
         }
     }
 
@@ -146,6 +172,8 @@ impl Item {
             messages,
             has_more,
             unread_from,
+            loaded: true,
+            muted: false,
         }
     }
 
@@ -163,12 +191,64 @@ impl Item {
             title,
             detail: String::new(),
             latest: page.messages.last().map(|message| message.ts.clone()),
-            messages: page.messages,
-            has_more: page.has_more,
+            messages: Vec::new(),
+            has_more: false,
             unread_from,
+            loaded: false,
+            muted: false,
+        };
+        item.fill(page);
+        item
+    }
+
+    /// A conversation visited last in Slack, its history not read yet.
+    /// Its `latest` stays the one the counts gave: a newer one there
+    /// means the history shown is out of date.
+    pub fn recent(conversation: &Conversation, title: String) -> Item {
+        let section = match conversation.kind {
+            Kind::Channel => Section::RecentChannels,
+            Kind::Im | Kind::Mpim => Section::RecentPeople,
+        };
+        let mut item = Item {
+            section,
+            channel: conversation.id.clone(),
+            thread_ts: None,
+            title,
+            detail: String::new(),
+            messages: Vec::new(),
+            has_more: false,
+            latest: conversation.latest.clone(),
+            // A muted one can be unread without being listed above.
+            unread_from: conversation
+                .last_read
+                .clone()
+                .filter(|_| conversation.is_unread()),
+            loaded: false,
+            muted: conversation.muted,
         };
         item.describe();
         item
+    }
+
+    /// The recent history, read.
+    fn fill(&mut self, page: history::Unread) {
+        self.messages = page.messages;
+        self.has_more = page.has_more;
+        self.loaded = true;
+        self.describe();
+    }
+
+    /// The history this conversation had before a refresh rebuilt it,
+    /// kept while it is still current, and shown until it is read again
+    /// when it is not.
+    fn keep_history(&mut self, old: Item) {
+        if old.messages.is_empty() && !old.loaded {
+            return;
+        }
+        self.loaded = old.loaded && old.latest == self.latest;
+        self.messages = old.messages;
+        self.has_more = old.has_more;
+        self.describe();
     }
 
     /// Where reading starts in the pane: the first new message of a
@@ -182,12 +262,20 @@ impl Item {
                 .iter()
                 .position(|message| view::is_new(message, Some(cursor)))
                 .unwrap_or(last),
-            None if self.section == Section::Opened => last,
+            None if self.section.is_browsed() => last,
             None => 0,
         }
     }
 
     fn describe(&mut self) {
+        if self.messages.is_empty() && !self.loaded {
+            self.detail = if self.unread_from.is_some() {
+                "unread".to_string()
+            } else {
+                String::new()
+            };
+            return;
+        }
         let new = self
             .messages
             .iter()
@@ -653,6 +741,12 @@ pub enum Action {
     /// Load the directory for the reply box's completion, the first time
     /// a `@` or `#` word is typed.
     LoadCandidates,
+    /// Read the recent history of a conversation listed without one;
+    /// `enter` goes on into the messages pane.
+    Preview {
+        item: usize,
+        enter: bool,
+    },
     /// Open a conversation from the picker with its recent history.
     Show {
         choice: Choice,
@@ -687,6 +781,10 @@ pub enum Wake {
     /// and the counts would not show it.
     Reload,
 }
+
+/// How many of each recent section the list shows: enough to reach the
+/// usual places, few enough to keep the list about what is new.
+const RECENT_ROWS: usize = 8;
 
 /// How long a typing notice holds without another: Slack repeats it every
 /// few seconds while someone types.
@@ -913,6 +1011,13 @@ impl State {
             }
         }
         if posted.changed {
+            // A reload rebuilds a recent one from the counts, which an
+            // edit does not move: its history is read again instead.
+            for item in &mut self.items {
+                if item.section.is_recent() && item.channel == channel {
+                    item.loaded = false;
+                }
+            }
             return if self.shows_channel(channel) {
                 Wake::Reload
             } else {
@@ -955,7 +1060,9 @@ impl State {
     }
 
     fn shows_channel(&self, channel: &str) -> bool {
-        self.items.iter().any(|item| item.channel == channel)
+        self.items
+            .iter()
+            .any(|item| item.channel == channel && !item.section.is_recent())
             || self
                 .thread
                 .as_ref()
@@ -1010,7 +1117,8 @@ impl State {
     }
 
     /// Put an opened conversation in the list, in place of an earlier
-    /// opening of the same one, and read it from its newest message.
+    /// opening of the same one or of its recent row, and read it from its
+    /// newest message.
     pub fn open_item(&mut self, item: Item) {
         let index = match self
             .items
@@ -1022,10 +1130,19 @@ impl State {
                 index
             }
             None => {
-                self.items.push(item);
-                self.items.len() - 1
+                self.items
+                    .retain(|it| !(it.section.is_recent() && it.channel == item.channel));
+                let index = self
+                    .items
+                    .iter()
+                    .position(|it| it.section.is_recent())
+                    .unwrap_or(self.items.len());
+                self.items.insert(index, item);
+                index
             }
         };
+        self.checked
+            .retain(|key, _| self.items.iter().any(|item| item.is(key)));
         self.selected = Some(index);
         self.thread = None;
         self.scroll = 0;
@@ -1048,12 +1165,17 @@ impl State {
         }
     }
 
-    /// New items after a refresh; the opened conversations stay. A refresh
-    /// comes on its own every few seconds, so it never moves you: the
-    /// selection, the focus, the highlighted message and the open thread
-    /// follow the same conversation while it is still there. Once it is
-    /// gone (read elsewhere), its neighbour is selected from the list.
-    pub fn replace_items(&mut self, items: Vec<Item>) {
+    /// New items after a refresh: the unread ones (None keeps those
+    /// listed), then the opened conversations, which stay, then the
+    /// recent ones that are listed nowhere above, `RECENT_ROWS` of each
+    /// section, each keeping the history it had. A refresh comes on its
+    /// own every few seconds, so it never moves you: the selection, the
+    /// focus, the highlighted message and the open thread follow the same
+    /// conversation while it is still there. Once it is gone (read
+    /// elsewhere), its neighbour is selected from the list.
+    pub fn replace_items(&mut self, unread: Option<Vec<Item>>, mut recent: Vec<Item>) {
+        // Channels, then people, each in the order they were visited.
+        recent.sort_by_key(|item| item.section == Section::RecentPeople);
         let previous = self.selected;
         let key = self
             .selected_item()
@@ -1071,11 +1193,35 @@ impl State {
             .thread
             .as_ref()
             .and_then(|thread| ts_at(thread.from_message));
-        let opened = std::mem::take(&mut self.items)
-            .into_iter()
-            .filter(|item| item.section == Section::Opened);
-        self.items = items;
+        let mut listed = Vec::new();
+        let mut opened = Vec::new();
+        let mut previews = BTreeMap::new();
+        for item in std::mem::take(&mut self.items) {
+            match item.section {
+                Section::Opened => opened.push(item),
+                section if section.is_recent() => {
+                    previews.insert(item.channel.clone(), item);
+                }
+                _ => listed.push(item),
+            }
+        }
+        self.items = unread.unwrap_or(listed);
         self.items.extend(opened);
+        for mut item in recent {
+            let shown = self.items.iter().filter(|it| it.section == item.section);
+            if shown.count() == RECENT_ROWS
+                || self
+                    .items
+                    .iter()
+                    .any(|it| it.channel == item.channel && it.thread_ts.is_none())
+            {
+                continue;
+            }
+            if let Some(old) = previews.remove(&item.channel) {
+                item.keep_history(old);
+            }
+            self.items.push(item);
+        }
         self.checked
             .retain(|key, _| self.items.iter().any(|item| item.is(key)));
         let found = key.and_then(|(channel, thread_ts)| {
@@ -1103,6 +1249,50 @@ impl State {
             } else {
                 self.cursor = position(cursor_ts, self.cursor);
             }
+        }
+    }
+
+    /// The selected conversation, when its history is still to be read.
+    pub fn to_preview(&self) -> Option<usize> {
+        self.selected.filter(|&index| {
+            let item = &self.items[index];
+            item.section.is_recent() && !item.loaded
+        })
+    }
+
+    /// The history of a conversation read, in place: the highlighted
+    /// message stays where it was, or the pane lands where reading
+    /// starts when `enter` asks for it.
+    pub fn preview(&mut self, index: usize, page: history::Unread, enter: bool) {
+        let selected = self.selected == Some(index);
+        let reading = selected && self.focus == Focus::Messages && self.thread.is_none();
+        let Some(item) = self.items.get_mut(index) else {
+            return;
+        };
+        let cursor_ts = reading
+            .then(|| item.messages.get(self.cursor).map(|m| m.ts.clone()))
+            .flatten();
+        item.fill(page);
+        if !selected {
+            return;
+        }
+        if enter {
+            self.thread = None;
+            self.scroll = 0;
+            self.read_from_landing();
+        } else if reading {
+            let messages = &self.items[index].messages;
+            self.cursor = cursor_ts
+                .and_then(|ts| messages.iter().position(|message| message.ts == ts))
+                .unwrap_or_else(|| self.items[index].landing());
+        }
+    }
+
+    /// A conversation read without leaving the list: a recent one.
+    pub fn read_in_place(&mut self, index: usize) {
+        if let Some(item) = self.items.get_mut(index) {
+            item.unread_from = None;
+            item.describe();
         }
     }
 
@@ -1200,6 +1390,8 @@ impl State {
                 Action::None
             }
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => self.deeper(),
+            KeyCode::Tab => self.jump(true),
+            KeyCode::BackTab => self.jump(false),
             KeyCode::Char('j') | KeyCode::Down => self.step(1),
             KeyCode::Char('k') | KeyCode::Up => self.step(-1),
             KeyCode::Char('g') if after_g => self.step(isize::MIN),
@@ -1324,6 +1516,11 @@ impl State {
     fn deeper(&mut self) -> Action {
         match (self.focus, &self.thread) {
             (Focus::List, _) => {
+                if let Some(item) = self.to_preview()
+                    && self.items[item].messages.is_empty()
+                {
+                    return Action::Preview { item, enter: true };
+                }
                 self.read_from_landing();
                 Action::None
             }
@@ -1663,6 +1860,32 @@ impl State {
         }
     }
 
+    /// Tab, Shift-Tab: the first conversation of the next section, of
+    /// the previous one, from the list or from the pane.
+    fn jump(&mut self, forward: bool) -> Action {
+        let Some(current) = self.selected else {
+            return Action::None;
+        };
+        let start = |mut index: usize| {
+            let section = self.items[index].section;
+            while index > 0 && self.items[index - 1].section == section {
+                index -= 1;
+            }
+            index
+        };
+        let section = self.items[current].section;
+        let target = if forward {
+            (current..self.items.len()).find(|&index| self.items[index].section != section)
+        } else {
+            start(current).checked_sub(1).map(start)
+        };
+        if let Some(target) = target {
+            self.back_to_list();
+            self.selected = Some(target);
+        }
+        Action::None
+    }
+
     fn select(&mut self, step: isize) {
         let Some(current) = self.selected else {
             return;
@@ -1689,7 +1912,6 @@ fn link_action(url: String, copy: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counts::Kind;
 
     #[test]
     fn a_thread_is_read_whole_from_its_first_new_reply() {
@@ -1768,7 +1990,14 @@ mod tests {
             has_more: false,
             latest: Some("1.000200".to_string()),
             unread_from: None,
+            loaded: true,
+            muted: false,
         }
+    }
+
+    /// A refresh with these unread items and no recent ones.
+    fn refresh(state: &mut State, items: Vec<Item>) {
+        state.replace_items(Some(items), Vec::new());
     }
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -2023,7 +2252,10 @@ mod tests {
         // A message that came in after x is not marked: it was never seen.
         let mut d1 = item(Section::DirectMessages, "D1", None);
         d1.latest = Some("1.000300".to_string());
-        state.replace_items(vec![d1, item(Section::Threads, "C2", Some("2.000100"))]);
+        refresh(
+            &mut state,
+            vec![d1, item(Section::Threads, "C2", Some("2.000100"))],
+        );
         assert_eq!(
             state.key(press(KeyCode::Char('e'))),
             Action::MarkRead(vec![mark(0), mark(1)])
@@ -2038,7 +2270,7 @@ mod tests {
         state.key(press(KeyCode::Esc));
         assert!(state.checked.is_empty(), "Esc unselects everything");
         state.key(press(KeyCode::Char('x')));
-        state.replace_items(vec![item(Section::DirectMessages, "D1", None)]);
+        refresh(&mut state, vec![item(Section::DirectMessages, "D1", None)]);
         assert!(
             state.checked.is_empty(),
             "gone from the list, gone from the selection"
@@ -2054,10 +2286,13 @@ mod tests {
         let mut state = state();
         state.key(press(KeyCode::Char('j')));
         state.key(press(KeyCode::Char('l')));
-        state.replace_items(vec![
-            item(Section::Mentions, "C1", None),
-            item(Section::Threads, "C2", Some("2.000100")),
-        ]);
+        refresh(
+            &mut state,
+            vec![
+                item(Section::Mentions, "C1", None),
+                item(Section::Threads, "C2", Some("2.000100")),
+            ],
+        );
         assert_eq!(state.selected, Some(0), "C1 is now first");
         assert_eq!(state.focus, Focus::Messages, "a refresh keeps the focus");
         state.remove(0);
@@ -2080,7 +2315,7 @@ mod tests {
         // Two new messages, the oldest one gone from the page.
         let mut d1 = item(Section::DirectMessages, "D1", None);
         d1.messages = ["1.000200", "1.000300", "1.000400"].map(message).into();
-        state.replace_items(vec![d1, item(Section::Mentions, "C1", None)]);
+        refresh(&mut state, vec![d1, item(Section::Mentions, "C1", None)]);
         assert_eq!(
             (state.focus, state.cursor),
             (Focus::Messages, 0),
@@ -2098,20 +2333,23 @@ mod tests {
         state.cursor = 1;
         let mut d1 = item(Section::DirectMessages, "D1", None);
         d1.messages = ["1.000300", "1.000400", "1.000500"].map(message).into();
-        state.replace_items(vec![d1]);
+        refresh(&mut state, vec![d1]);
         assert_eq!(state.thread.as_ref().map(|t| t.from_message), Some(0));
         assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
         state.key(press(KeyCode::Char('h')));
         assert_eq!(state.cursor, 0, "back on the message it was opened from");
 
         // Read elsewhere: the neighbour, from the list.
-        state.replace_items(vec![
-            item(Section::Mentions, "C1", None),
-            item(Section::Channels, "C3", None),
-        ]);
+        refresh(
+            &mut state,
+            vec![
+                item(Section::Mentions, "C1", None),
+                item(Section::Channels, "C3", None),
+            ],
+        );
         assert_eq!((state.selected, state.focus), (Some(0), Focus::List));
         state.key(press(KeyCode::Char('j')));
-        state.replace_items(vec![item(Section::Mentions, "C1", None)]);
+        refresh(&mut state, vec![item(Section::Mentions, "C1", None)]);
         assert_eq!(state.selected, Some(0));
     }
 
@@ -2874,7 +3112,7 @@ mod tests {
         assert_eq!(state.items[3].detail, "1 message");
         assert_eq!(state.cursor, 0, "nothing new: on the newest message");
 
-        state.replace_items(vec![item(Section::Mentions, "C1", None)]);
+        refresh(&mut state, vec![item(Section::Mentions, "C1", None)]);
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.items[1].section, Section::Opened);
         assert_eq!(state.selected, Some(1), "still on the opened one");
@@ -3107,6 +3345,167 @@ mod tests {
             },
             "the highlighted channel yields to the marks"
         );
+    }
+
+    fn visited(id: &str, kind: Kind, latest: &str) -> Item {
+        let conversation = Conversation {
+            id: id.to_string(),
+            kind,
+            has_unreads: false,
+            mention_count: 0,
+            last_read: Some(latest.to_string()),
+            latest: Some(latest.to_string()),
+            muted: false,
+        };
+        Item::recent(&conversation, id.to_string())
+    }
+
+    fn page(ts: &[&str]) -> history::Unread {
+        history::Unread {
+            messages: ts.iter().map(|ts| message(ts)).collect(),
+            has_more: false,
+        }
+    }
+
+    fn sections(state: &State) -> Vec<(Section, &str)> {
+        state
+            .items
+            .iter()
+            .map(|item| (item.section, item.channel.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_recent_conversations_follow_what_is_listed_above_them() {
+        let mut state = State::new(Vec::new(), None);
+        assert!(state.selected.is_none());
+        let recent = || {
+            let mut recent = vec![
+                visited("C1", Kind::Channel, "1.1"),
+                visited("D9", Kind::Im, "9.1"),
+                visited("C7", Kind::Channel, "7.1"),
+            ];
+            recent.extend((10..20).map(|n| visited(&format!("C{n}"), Kind::Channel, "1.1")));
+            recent
+        };
+        state.replace_items(Some(vec![item(Section::Mentions, "C1", None)]), recent());
+        assert_eq!(state.selected, Some(0));
+        state.open_item(Item::opened(
+            "C7".to_string(),
+            "#c7".to_string(),
+            page(&["7.1"]),
+            None,
+        ));
+        state.replace_items(None, recent());
+        let listed = sections(&state);
+        assert_eq!(
+            &listed[..4],
+            [
+                (Section::Mentions, "C1"),
+                (Section::Opened, "C7"),
+                (Section::RecentChannels, "C10"),
+                (Section::RecentChannels, "C11"),
+            ],
+            "C1 is listed for its mention and C7 was opened: neither shows twice"
+        );
+        let channels = listed
+            .iter()
+            .filter(|(section, _)| *section == Section::RecentChannels)
+            .count();
+        assert_eq!(channels, RECENT_ROWS);
+        assert_eq!(listed.last(), Some(&(Section::RecentPeople, "D9")));
+    }
+
+    #[test]
+    fn a_recent_history_is_read_once_and_kept_while_nothing_came_in() {
+        let mut state = State::new(Vec::new(), None);
+        state.replace_items(Some(Vec::new()), vec![visited("C1", Kind::Channel, "1.2")]);
+        assert_eq!(state.to_preview(), Some(0));
+        assert_eq!(state.pane_messages().len(), 0);
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Preview {
+                item: 0,
+                enter: true
+            },
+            "Enter does not wait for the cursor to rest"
+        );
+        state.preview(0, page(&["1.1", "1.2"]), true);
+        assert_eq!(state.to_preview(), None);
+        assert_eq!(state.focus, Focus::Messages);
+        assert_eq!(state.cursor, 1, "read from its newest message");
+
+        state.replace_items(None, vec![visited("C1", Kind::Channel, "1.2")]);
+        assert_eq!(state.to_preview(), None, "nothing came in: kept as read");
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+
+        state.replace_items(None, vec![visited("C1", Kind::Channel, "1.3")]);
+        assert_eq!(state.to_preview(), Some(0), "a message came in: read again");
+        assert_eq!(
+            state.pane_messages().len(),
+            2,
+            "the old history shows meanwhile"
+        );
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+        state.preview(0, page(&["1.1", "1.2", "1.3"]), false);
+        assert_eq!(state.cursor, 1, "the highlighted message stays");
+
+        let edit = Event::Message(Posted {
+            channel: "C1".to_string(),
+            ts: "1.2".to_string(),
+            thread_ts: None,
+            user: Some("U2".to_string()),
+            changed: true,
+            broadcast: false,
+        });
+        assert_eq!(
+            state.hear(edit, Instant::now()),
+            Wake::Nothing,
+            "no reload, which would not read it again"
+        );
+        assert_eq!(state.to_preview(), Some(0), "read again instead");
+    }
+
+    #[test]
+    fn tab_moves_from_section_to_section() {
+        let mut state = State::new(Vec::new(), None);
+        state.replace_items(
+            Some(vec![
+                item(Section::DirectMessages, "D1", None),
+                item(Section::DirectMessages, "D2", None),
+                item(Section::Mentions, "C1", None),
+            ]),
+            vec![
+                visited("C5", Kind::Channel, "5.1"),
+                visited("C6", Kind::Channel, "6.1"),
+                visited("D5", Kind::Im, "5.1"),
+            ],
+        );
+        let channel = |state: &State| state.selected_item().unwrap().channel.clone();
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(channel(&state), "D2");
+        for expected in ["C1", "C5", "D5", "D5"] {
+            state.key(press(KeyCode::Tab));
+            assert_eq!(channel(&state), expected);
+        }
+        state.key(press(KeyCode::Enter));
+        state.key(press(KeyCode::BackTab));
+        assert_eq!(
+            channel(&state),
+            "C5",
+            "back from the pane, to the section above"
+        );
+        assert_eq!(state.focus, Focus::List);
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::BackTab));
+        assert_eq!(
+            channel(&state),
+            "C1",
+            "from within a section, the one above"
+        );
+        state.key(press(KeyCode::BackTab));
+        state.key(press(KeyCode::BackTab));
+        assert_eq!(channel(&state), "D1");
     }
 
     #[test]

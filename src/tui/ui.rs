@@ -14,8 +14,8 @@ use crate::history::Message;
 use crate::names::Names;
 use crate::{emoji, mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  Enter messages  r reply  e mark read  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
-const OPENED_HINTS: &str = "j/k move  Enter messages  r reply  e close  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
+const LIST_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e mark read  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
+const OPENED_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e close  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
 const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  r reply to it  R react  u open link  y copy link  e mark read  O in Slack  h back  q quit";
 const THREAD_HINTS: &str = "j/k move  r reply in the thread  R react  u open link  y copy link  O in Slack  h back  q quit";
 const CHECKED_HINTS: &str =
@@ -26,6 +26,7 @@ const HELP: &[&str] = &[
     "l, Enter, Right deeper: the messages, then the highlighted message's thread",
     "h, Left, Esc    back: close the thread, leave the messages; Esc at the list unselects",
     "gg, G           the first, the last (Home, End too)",
+    "Tab, Shift-Tab  the next section of the list, the previous one",
     "Ctrl-D, Ctrl-U  half a screen down, up; Ctrl-F, Ctrl-B, PgDn, PgUp a whole one",
     "r               reply: to the conversation, to the highlighted message, or in the open thread",
     "s               a message to the conversation, wherever you are in it",
@@ -79,9 +80,14 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
             Row::Item(index) => {
                 let item = &state.items[*index];
                 let tick = if state.is_checked(item) { "✓ " } else { "  " };
+                let title = if item.muted {
+                    Style::new().dim()
+                } else {
+                    Style::new()
+                };
                 let mut spans = vec![
                     Span::raw(tick),
-                    Span::raw(item.title.as_str()),
+                    Span::styled(item.title.as_str(), title),
                     Span::raw("  "),
                     Span::styled(item.detail.as_str(), Style::new().dim()),
                 ];
@@ -95,9 +101,15 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
             }
         })
         .collect();
+    // What needs you, and what was opened: the recent ones are always there.
+    let listed = state
+        .items
+        .iter()
+        .filter(|item| !item.section.is_recent())
+        .count();
     let title = match state.checked.len() {
-        0 => format!(" slack · {} ", state.items.len()),
-        n => format!(" slack · {} · {n} selected ", state.items.len()),
+        0 => format!(" slack · {listed} "),
+        n => format!(" slack · {listed} · {n} selected "),
     };
     let highlight = if state.focus == Focus::List {
         Style::new().add_modifier(Modifier::REVERSED)
@@ -182,7 +194,11 @@ fn draw_messages(
             )
         }
         (None, Some(item)) => (
-            format!(" {} · {} ", item.title, item.detail),
+            if item.detail.is_empty() {
+                format!(" {} ", item.title)
+            } else {
+                format!(" {} · {} ", item.title, item.detail)
+            },
             item.has_more,
             false,
             item.unread_from.as_deref(),
@@ -220,6 +236,14 @@ fn draw_messages(
     let indent = " ".repeat(width + 2);
 
     let mut lines: Vec<Line> = Vec::new();
+    if !in_thread
+        && messages.is_empty()
+        && state
+            .selected_item()
+            .is_some_and(|item| item.section.is_recent() && !item.loaded)
+    {
+        lines.push(Line::from("Loading…").dim());
+    }
     if has_more && history {
         lines.push(Line::from("earlier messages not shown").dim());
     }
@@ -778,6 +802,8 @@ mod tests {
             messages,
             has_more: false,
             unread_from: first_new.map(|n| ts(n - 1)),
+            loaded: true,
+            muted: false,
         };
         State::new(vec![item], None)
     }
