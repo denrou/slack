@@ -249,10 +249,7 @@ fn draw_hit(frame: &mut Frame, area: Rect, search: &Search, names: &Names, now: 
     let mut title = vec![names.channel_label(&hit.channel)];
     title.extend(author(&hit.message, names));
     title.push(view::format_ts(&hit.message.ts, now));
-    let mut lines: Vec<Line> = plain_text(&hit.message, names)
-        .lines()
-        .map(|line| Line::from(line.to_string()))
-        .collect();
+    let mut lines = message_lines(&hit.message, names);
     let notes = hit
         .message
         .files
@@ -287,12 +284,65 @@ fn author(message: &Message, names: &Names) -> Option<String> {
 fn plain_text(message: &Message, names: &Names) -> String {
     let user = |id: &str| names.user_name(id);
     let channel = |id: &str| names.channel_name(id);
-    mrkdwn::render(
-        &message.text,
-        &user,
-        &channel,
-        &crate::style::Style::plain(),
-    )
+    mrkdwn::strip(&message.text, &user, &channel)
+}
+
+/// A message's text as lines, its markup styled.
+fn message_lines(message: &Message, names: &Names) -> Vec<Line<'static>> {
+    let user = |id: &str| names.user_name(id);
+    let channel = |id: &str| names.channel_name(id);
+    let mut lines = styled_lines(&mrkdwn::pieces(&message.text, &user, &channel), false);
+    if lines.len() > 1 && lines.last().is_some_and(|line| line.spans.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Text pieces as lines of spans. A draft keeps its markers as typed,
+/// dimmed, so what is deleted is what is seen.
+fn styled_lines(pieces: &[mrkdwn::Piece], draft: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::default()];
+    for piece in pieces {
+        let (text, style) = match piece {
+            mrkdwn::Piece::Text(text, look) => (text, look_style(*look)),
+            mrkdwn::Piece::Marker { typed, .. } if draft => (typed, Style::new().dim()),
+            mrkdwn::Piece::Marker { shown, .. } => (shown, Style::new().dim()),
+        };
+        for (at, part) in text.split('\n').enumerate() {
+            if at > 0 {
+                lines.push(Line::default());
+            }
+            if !part.is_empty()
+                && let Some(line) = lines.last_mut()
+            {
+                line.push_span(Span::styled(part.to_string(), style));
+            }
+        }
+    }
+    lines
+}
+
+/// The pane's colours: names cyan and mentions yellow, as in its headers.
+fn look_style(look: mrkdwn::Look) -> Style {
+    let mut style = match look.kind {
+        mrkdwn::Kind::Text => Style::new(),
+        mrkdwn::Kind::Name => Style::new().cyan(),
+        mrkdwn::Kind::Mention => Style::new().yellow().bold(),
+        mrkdwn::Kind::Link => Style::new().blue().underlined(),
+    };
+    if look.code {
+        style = style.magenta();
+    }
+    if look.bold {
+        style = style.bold();
+    }
+    if look.italic {
+        style = style.italic();
+    }
+    if look.strike {
+        style = style.crossed_out();
+    }
+    style
 }
 
 fn draw_messages(
@@ -348,9 +398,6 @@ fn draw_messages(
         (None, item) => item.and_then(|item| item.thread_ts.as_deref()),
     };
     let messages = state.pane_messages();
-    let user = |id: &str| names.user_name(id);
-    let channel = |id: &str| names.channel_name(id);
-    let plain = crate::style::Style::plain();
     let times: Vec<String> = messages
         .iter()
         .map(|m| view::format_ts(&m.ts, now))
@@ -402,9 +449,8 @@ fn draw_messages(
             spans.push(Span::styled(author, Style::new().cyan()));
             spans.push(Span::raw(": "));
         }
-        let text = mrkdwn::render(&message.text, &user, &channel, &plain);
-        let mut text_lines = text.lines();
-        spans.push(Span::raw(text_lines.next().unwrap_or("").to_string()));
+        let mut text_lines = message_lines(message, names).into_iter();
+        spans.extend(text_lines.next().map(|line| line.spans).unwrap_or_default());
         let mut notes = Vec::new();
         if index == 0 && root_ts == Some(message.ts.as_str()) {
             notes.push("root".to_string());
@@ -430,10 +476,9 @@ fn draw_messages(
         };
         lines.push(Line::from(spans).style(style));
         for rest in text_lines {
-            lines.push(
-                Line::from(vec![Span::raw(indent.clone()), Span::raw(rest.to_string())])
-                    .style(style),
-            );
+            let mut spans = vec![Span::raw(indent.clone())];
+            spans.extend(rest.spans);
+            lines.push(Line::from(spans).style(style));
         }
         // Under the message, as the app has them; yours stand out, since
         // `R` on one of them takes it back.
@@ -703,7 +748,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 }
                 None => format!("{title} · Enter sends, Ctrl-J a new line, Esc cancels "),
             };
-            let mut lines: Vec<Line> = text.split('\n').map(Line::from).collect();
+            let mut lines = styled_lines(&mrkdwn::draft(text), true);
             if let Some(last) = lines.last_mut() {
                 last.push_span(Span::styled("▏", Style::new().dim()));
             }
@@ -887,12 +932,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
 fn describe(message: &Message, names: &Names) -> String {
     let user = |id: &str| names.user_name(id);
     let channel = |id: &str| names.channel_name(id);
-    let text = mrkdwn::render(
-        &message.text,
-        &user,
-        &channel,
-        &crate::style::Style::plain(),
-    );
+    let text = mrkdwn::strip(&message.text, &user, &channel);
     let author = match (&message.user, &message.bot) {
         (Some(user), _) => names.user_label(user),
         (None, Some(bot)) => bot.clone(),
@@ -972,6 +1012,40 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    /// The cell where `text` starts on the first row showing it.
+    fn find(buffer: &Buffer, text: &str) -> Option<(u16, u16)> {
+        (0..buffer.area.height).find_map(|y| {
+            let row = row(buffer, y);
+            let at = row.find(text)?;
+            Some((u16::try_from(row[..at].chars().count()).ok()?, y))
+        })
+    }
+
+    #[test]
+    fn the_pane_styles_the_markup_and_hides_its_markers() {
+        let state = history(&["*done* with `code`\n&gt; quoted"], None);
+        let (buffer, _) = render(&state, 100, 12);
+        let (x, y) = find(&buffer, "done with code").expect("the text, markers gone");
+        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(x + 5, y)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(x + 10, y)].fg, ratatui::style::Color::Magenta);
+        let (_, quote) = find(&buffer, "▎ quoted").expect("the quote, with its bar");
+        assert_eq!(quote, y + 1);
+    }
+
+    #[test]
+    fn the_reply_box_styles_the_markup_and_keeps_its_markers() {
+        let mut state = history(&["hello"], None);
+        let mut draft = Draft::new(None);
+        draft.text = "say *hi*".to_string();
+        state.mode = Mode::Compose(draft);
+        let (buffer, _) = render(&state, 100, 12);
+        let (x, y) = find(&buffer, "say *hi*").expect("the draft as typed");
+        assert!(buffer[(x + 4, y)].modifier.contains(Modifier::DIM));
+        assert!(buffer[(x + 5, y)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]

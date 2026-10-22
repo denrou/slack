@@ -13,7 +13,6 @@ use crate::mrkdwn::{self, Link};
 use crate::names::Names;
 use crate::rtm::{Event, Posted};
 use crate::search::{Found, Hit};
-use crate::style::Style;
 use crate::view::{self, Entry, View};
 use crate::{directory, emoji, threads};
 
@@ -133,7 +132,7 @@ impl Item {
     fn thread(thread: threads::Thread, names: &Names) -> Item {
         let user = |id: &str| names.user_name(id);
         let channel = |id: &str| names.channel_name(id);
-        let root = mrkdwn::render(&thread.root.text, &user, &channel, &Style::plain());
+        let root = mrkdwn::strip(&thread.root.text, &user, &channel);
         // The read part ends just before the first reply the thread view
         // calls unread, the view that listed the thread. A history cut by
         // the page cap misses its newest replies, the unread ones: the new

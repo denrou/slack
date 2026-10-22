@@ -42,7 +42,6 @@ use crate::history::{self, Message};
 use crate::names::Names;
 use crate::rtm::{self, Posted, Signal};
 use crate::search::{self, Found, Hit};
-use crate::style::Style;
 use crate::{
     counts, emoji, lastview, mention, mrkdwn, notify, react, read, replies, target, view, warn,
 };
@@ -790,12 +789,9 @@ impl App<'_> {
         }
         let _ = self.names.resolve_users(self.client, people);
         let names = &*self.names;
-        let text = mrkdwn::render(
-            text,
-            &|id| names.user_name(id),
-            &|id| names.channel_name(id),
-            &Style::plain(),
-        );
+        let text = mrkdwn::strip(text, &|id| names.user_name(id), &|id| {
+            names.channel_name(id)
+        });
         let sender = posted
             .user
             .as_deref()
@@ -1113,7 +1109,7 @@ impl App<'_> {
         self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         let user = |id: &str| self.names.user_name(id);
         let chan = |id: &str| self.names.channel_name(id);
-        let root = mrkdwn::render(&fetched.root.text, &user, &chan, &Style::plain());
+        let root = mrkdwn::strip(&fetched.root.text, &user, &chan);
         let title = format!(
             "{} › {}",
             self.names.channel_label(&channel),
