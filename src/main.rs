@@ -19,6 +19,7 @@ mod react;
 mod read;
 mod replies;
 mod rtm;
+mod search;
 mod send;
 mod store;
 mod style;
@@ -135,6 +136,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Search the messages, newest first; Slack's operators work (`in:#dev from:@jane after:2026-10-01`)
+    Search {
+        /// What to look for, Slack's search syntax
+        #[arg(required = true)]
+        query: Vec<String>,
+        /// How many matches, the newest ones
+        #[arg(short = 'n', long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+        /// Disable colors
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Show the recent messages of a channel or a person
     Show {
         /// `#channel`, `@person` or a conversation id
@@ -183,6 +199,12 @@ fn main() -> ExitCode {
         }) => commands::thread(&thread, json, no_color),
         Some(Command::Channels { filter, json }) => commands::channels(&filter.join(" "), json),
         Some(Command::People { filter, json }) => commands::people(&filter.join(" "), json),
+        Some(Command::Search {
+            query,
+            limit,
+            json,
+            no_color,
+        }) => commands::search(&query.join(" "), usize::from(limit), json, no_color),
         Some(Command::Show {
             target,
             limit,

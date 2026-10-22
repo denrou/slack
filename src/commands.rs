@@ -19,7 +19,8 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, history, lastview, mrkdwn, react, read, replies, send, target, tui, view,
+    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, target, tui,
+    view,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -320,6 +321,71 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
         }
         Ok(())
     })
+}
+
+pub fn search(query: &str, limit: usize, json: bool, no_color: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let mut names = Names::load();
+    let found = search::fetch(&client, query, limit).and_then(|found| {
+        search::name(&client, &mut names, &found.hits)?;
+        Ok(found)
+    });
+    names.save();
+    let found = found?;
+    if json {
+        let mut matches = Vec::with_capacity(found.hits.len());
+        for hit in &found.hits {
+            let mut value = serde_json::to_value(hit)?;
+            value["name"] = json!(names.channel_label(&hit.channel));
+            matches.push(value);
+        }
+        return print_json(&json!({
+            "query": query,
+            "total": found.total,
+            "matches": matches,
+        }));
+    }
+    if found.hits.is_empty() {
+        println!("Nothing matches `{query}`.");
+        return Ok(());
+    }
+    let style = Style::detect(no_color);
+    let now = jiff::Zoned::now();
+    let me = workspace.user_id.as_deref();
+    to_stdout(|out| {
+        for hit in &found.hits {
+            writeln!(out, "{}", style.bold(&names.channel_label(&hit.channel)))?;
+            let list = MessageList {
+                messages: std::slice::from_ref(&hit.message),
+                channel: &hit.channel,
+                has_more: false,
+                show_author: true,
+                scope: Scope::Unread,
+                unread_from: None,
+            };
+            view::render_messages(&list, &Refs::none(), &names, &style, me, &now, out)?;
+            // Under the text, past the time, as `render_messages` indents it.
+            let indent = view::format_ts(&hit.message.ts, &now).chars().count() + 6;
+            writeln!(out, "{}{}", " ".repeat(indent), style.dim(&hit.permalink))?;
+        }
+        Ok(())
+    })?;
+    let shown = found.hits.len() as u64;
+    if found.total > shown {
+        // Beside the output, as the muted note of the view: a pipe gets the matches alone.
+        eprintln!(
+            "{}",
+            style.dim(&format!(
+                "the newest {shown} of {} matches; -n asks for more (up to {}), Slack's operators \
+                 narrow it (in:#channel, from:@person, after:2026-10-01)",
+                found.total,
+                search::MAX_COUNT
+            ))
+        );
+    }
+    Ok(())
 }
 
 pub fn show(spec: &str, limit: usize, json: bool, no_color: bool) -> Result<()> {

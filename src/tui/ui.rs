@@ -8,14 +8,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
-    Completion, Draft, Focus, Mode, Picker, Row, Section, State, Viewport, row_of, rows,
+    Completion, Draft, Focus, Mode, Picker, Row, Search, Section, State, Viewport, row_of, rows,
 };
 use crate::history::Message;
 use crate::names::Names;
 use crate::{emoji, mrkdwn, view};
 
-const LIST_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e mark read  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
-const OPENED_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e close  x select  c compose  o open  O in Slack  Ctrl-R refresh  ? keys  q quit";
+const LIST_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e mark read  x select  c compose  o open  / search  O in Slack  Ctrl-R refresh  ? keys  q quit";
+const OPENED_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e close  x select  c compose  o open  / search  O in Slack  Ctrl-R refresh  ? keys  q quit";
 const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  r reply to it  R react  u open link  y copy link  e mark read  O in Slack  h back  q quit";
 const THREAD_HINTS: &str = "j/k move  r reply in the thread  R react  u open link  y copy link  O in Slack  h back  q quit";
 const CHECKED_HINTS: &str =
@@ -32,6 +32,7 @@ const HELP: &[&str] = &[
     "s               a message to the conversation, wherever you are in it",
     "c               compose: pick a channel or people (Tab marks several as you type), then write",
     "o               open a channel or group you are in, or anyone: type to filter, Enter opens; m in the list shows the muted",
+    "/               search Slack (in:#channel, from:@person, after:2026-10-01 work): Enter searches, then opens the match in its conversation; / again brings the last search back",
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "Ctrl-J          a new line in the reply box (Ctrl-Enter, Shift-Enter too where the terminal reports them)",
     "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
@@ -56,17 +57,27 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Vie
         Mode::Help => HELP.len() as u16 + 2,
         Mode::Links { links, .. } => links.len() as u16 + 2,
         Mode::React(reacting) => state.emoji_choices(&reacting.query).len() as u16 + 3,
-        Mode::Browse | Mode::Pick(_) => 1,
+        Mode::Browse | Mode::Pick(_) | Mode::Search(_) => 1,
     };
     let [main, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_height)])
         .areas(frame.area());
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(main);
-    match &state.mode {
-        Mode::Pick(picker) => draw_picker(frame, left, picker),
-        _ => draw_list(frame, left, state),
-    }
-    let viewport = draw_messages(frame, right, state, names, now);
+    let viewport = match &state.mode {
+        Mode::Search(search) => {
+            draw_search(frame, left, search, names, now);
+            draw_hit(frame, right, search, names, now);
+            Viewport::default()
+        }
+        Mode::Pick(picker) => {
+            draw_picker(frame, left, picker);
+            draw_messages(frame, right, state, names, now)
+        }
+        _ => {
+            draw_list(frame, left, state);
+            draw_messages(frame, right, state, names, now)
+        }
+    };
     draw_bottom(frame, bottom, state, names);
     viewport
 }
@@ -172,6 +183,118 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+/// The search takes the list's place, as the picker does: the query in
+/// the title, each hit on two lines below (where, who, when, then its
+/// first line), highlighted as the picker's choices are.
+fn draw_search(frame: &mut Frame, area: Rect, search: &Search, names: &Names, now: &Zoned) {
+    let title = if search.typing {
+        format!(" search › {}▏ ", search.query)
+    } else {
+        format!(" search › {} ", search.query)
+    };
+    let block = Block::bordered().title(title);
+    if search.searched.is_some() && search.hits.is_empty() {
+        frame.render_widget(Paragraph::new("Nothing matches.").dim().block(block), area);
+        return;
+    }
+    let lines: Vec<ListItem> = search
+        .hits
+        .iter()
+        .map(|hit| {
+            let mut head = vec![
+                Span::raw(names.channel_label(&hit.channel)),
+                Span::raw("  "),
+            ];
+            if let Some(author) = author(&hit.message, names) {
+                head.push(Span::styled(author, Style::new().cyan()));
+                head.push(Span::raw("  "));
+            }
+            head.push(Span::styled(
+                view::format_ts(&hit.message.ts, now),
+                Style::new().dim(),
+            ));
+            if hit.message.is_reply() {
+                head.push(Span::styled("  in thread", Style::new().dim()));
+            }
+            // A bot's post is often an attachment alone.
+            let message = &hit.message;
+            let text = Some(plain_text(message, names))
+                .filter(|text| !text.trim().is_empty())
+                .or_else(|| message.attachments.first().cloned())
+                .or_else(|| message.files.first().cloned())
+                .unwrap_or_default();
+            ListItem::new(vec![
+                Line::from(head),
+                Line::from(format!("  {}", view::excerpt(&text, 200))),
+            ])
+        })
+        .collect();
+    let highlight = if search.typing {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().add_modifier(Modifier::REVERSED)
+    };
+    let list = List::new(lines).block(block).highlight_style(highlight);
+    let selected = (!search.hits.is_empty()).then(|| search.selected.min(search.hits.len() - 1));
+    let mut list_state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+/// The highlighted hit whole, in the messages pane, before it is opened.
+fn draw_hit(frame: &mut Frame, area: Rect, search: &Search, names: &Names, now: &Zoned) {
+    let Some(hit) = search.hits.get(search.selected) else {
+        frame.render_widget(Block::bordered(), area);
+        return;
+    };
+    let mut title = vec![names.channel_label(&hit.channel)];
+    title.extend(author(&hit.message, names));
+    title.push(view::format_ts(&hit.message.ts, now));
+    let mut lines: Vec<Line> = plain_text(&hit.message, names)
+        .lines()
+        .map(|line| Line::from(line.to_string()))
+        .collect();
+    let notes = hit
+        .message
+        .files
+        .iter()
+        .map(|file| format!("file: {file}"))
+        .chain(
+            hit.message
+                .attachments
+                .iter()
+                .map(|a| format!("attachment: {a}")),
+        );
+    for note in notes {
+        lines.push(Line::from(note).dim());
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(format!(" {} ", title.join(" · ")))),
+        area,
+    );
+}
+
+/// Who wrote a message, as the pane names them.
+fn author(message: &Message, names: &Names) -> Option<String> {
+    match (&message.user, &message.bot) {
+        (Some(user), _) => Some(names.user_label(user)),
+        (None, Some(bot)) => Some(format!("{bot} (bot)")),
+        (None, None) => None,
+    }
+}
+
+fn plain_text(message: &Message, names: &Names) -> String {
+    let user = |id: &str| names.user_name(id);
+    let channel = |id: &str| names.channel_name(id);
+    mrkdwn::render(
+        &message.text,
+        &user,
+        &channel,
+        &crate::style::Style::plain(),
+    )
+}
+
 fn draw_messages(
     frame: &mut Frame,
     area: Rect,
@@ -270,12 +393,7 @@ fn draw_messages(
             Span::styled(format!("{time:>width$}"), time_style),
             Span::raw("  "),
         ];
-        let author = match (&message.user, &message.bot) {
-            (Some(user), _) => Some(names.user_label(user)),
-            (None, Some(bot)) => Some(format!("{bot} (bot)")),
-            (None, None) => None,
-        };
-        if let Some(author) = author {
+        if let Some(author) = author(message, names) {
             spans.push(Span::styled(author, Style::new().cyan()));
             spans.push(Span::raw(": "));
         }
@@ -719,6 +837,30 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
             );
             frame.render_widget(Paragraph::new(text).dim(), area);
         }
+        Mode::Search(search) => {
+            let found = match &search.searched {
+                Some(searched) if !search.hits.is_empty() => {
+                    format!(
+                        "{} of {} for `{searched}` · ",
+                        search.hits.len(),
+                        search.total
+                    )
+                }
+                _ => String::new(),
+            };
+            let keys = if !search.typing {
+                "j/k move  Enter open it  O in Slack  y copy link  / edit the search  Esc close"
+            } else if search.enter_hits() {
+                "Ctrl-U clears for a new search  Enter to the matches  Esc close"
+            } else {
+                "type a query (in:#channel from:@person after:2026-10-01)  Enter search  Esc close"
+            };
+            let text = match &state.status {
+                Some(status) => status.clone(),
+                None => format!("{found}{keys}"),
+            };
+            frame.render_widget(Paragraph::new(text).dim(), area);
+        }
         Mode::Browse => {
             let opened = state
                 .selected_item()
@@ -1083,5 +1225,66 @@ mod tests {
         assert!(!reversed(&buffer, first - 1));
         assert!(!reversed(&buffer, separator));
         assert!(!reversed(&buffer, separator + 1));
+    }
+
+    #[test]
+    fn the_search_lists_its_hits_and_shows_the_highlighted_one_whole() {
+        let mut state = history(&["hello"], None);
+        let mut reply = message(&ts(2), "the deploy failed\nthen it worked");
+        reply.thread_ts = Some(ts(1));
+        let hits = vec![
+            crate::search::Hit {
+                channel: "C1".to_string(),
+                message: message(&ts(3), "deploy done"),
+                permalink: String::new(),
+            },
+            crate::search::Hit {
+                channel: "C2".to_string(),
+                message: reply,
+                permalink: String::new(),
+            },
+        ];
+        state.mode = Mode::Search(Search {
+            query: "deploy".to_string(),
+            searched: Some("deploy".to_string()),
+            hits,
+            total: 7,
+            selected: 1,
+            typing: false,
+        });
+        let (buffer, _) = render(&state, 100, 12);
+        let rows: Vec<String> = (0..12).map(|y| row(&buffer, y)).collect();
+        assert!(rows[0].contains("search › deploy"), "{}", rows[0]);
+        assert!(
+            rows[1].contains("C1") && rows[2].contains("deploy done"),
+            "{}",
+            rows[1]
+        );
+        assert!(
+            rows[3].contains("C2") && rows[3].contains("in thread"),
+            "{}",
+            rows[3]
+        );
+        assert!(
+            has(&buffer, 1, 3, Modifier::REVERSED) && has(&buffer, 1, 4, Modifier::REVERSED),
+            "the hit is highlighted, both its lines"
+        );
+        assert!(!has(&buffer, 1, 1, Modifier::REVERSED));
+        assert!(
+            rows[2].contains("then it worked"),
+            "the pane has it whole: {}",
+            rows[2]
+        );
+        assert!(rows[11].contains("2 of 7 for `deploy`"), "{}", rows[11]);
+
+        state.mode = Mode::Search(Search {
+            query: "zzz".to_string(),
+            searched: Some("zzz".to_string()),
+            typing: true,
+            ..Search::default()
+        });
+        let (buffer, _) = render(&state, 100, 12);
+        assert!(row(&buffer, 0).contains("search › zzz▏"));
+        assert!(row(&buffer, 1).contains("Nothing matches."));
     }
 }

@@ -15,7 +15,7 @@ const METHOD: &str = "conversations.history";
 /// Joins and leaves are not something to read.
 const NOISE: &[&str] = &["channel_join", "channel_leave", "group_join", "group_leave"];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Message {
     pub ts: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,6 +122,36 @@ pub fn fetch(
         params.push(("oldest", cursor));
     }
     parse(&client.call(METHOD, &params)?, last_read)
+}
+
+/// The messages around one, `side` on each side: the page up to it, and
+/// the page after it, since with `oldest` alone Slack answers the
+/// messages right after it rather than the newest (seen live on
+/// 2026-10-21). `has_more` says older ones exist.
+pub fn around(client: &Client, channel: &str, ts: &str, side: usize) -> Result<Unread, api::Error> {
+    let before = (side + 1).to_string();
+    let after = side.to_string();
+    let (older, newer) = std::thread::scope(|scope| {
+        let newer = scope.spawn(|| {
+            let params = [("channel", channel), ("oldest", ts), ("limit", &after)];
+            client.call(METHOD, &params)
+        });
+        let params = [
+            ("channel", channel),
+            ("latest", ts),
+            ("inclusive", "true"),
+            ("limit", &before),
+        ];
+        let older = client.call(METHOD, &params);
+        // A panic in the other call is a bug, not a condition to handle.
+        (older, newer.join().expect("the history thread panicked"))
+    });
+    let mut page = parse(&older?, None)?;
+    let newer = parse(&newer?, Some(ts))?;
+    page.messages.extend(newer.messages);
+    page.messages.sort_by(|a, b| compare_ts(&a.ts, &b.ts));
+    page.messages.dedup_by(|a, b| a.ts == b.ts);
+    Ok(page)
 }
 
 /// Whether a read cursor can be sent as `oldest`: a conversation never

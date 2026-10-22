@@ -12,6 +12,7 @@ use crate::history::{self, Message, compare_ts};
 use crate::mrkdwn::{self, Link};
 use crate::names::Names;
 use crate::rtm::{Event, Posted};
+use crate::search::{Found, Hit};
 use crate::style::Style;
 use crate::view::{self, Entry, View};
 use crate::{directory, emoji, threads};
@@ -198,6 +199,13 @@ impl Item {
             muted: false,
         };
         item.fill(page);
+        item
+    }
+
+    /// A conversation opened at a search hit, with the messages around it.
+    pub fn around(channel: String, title: String, page: history::Unread) -> Item {
+        let mut item = Item::opened(channel, title, page, None);
+        item.detail = format!("{} messages around the match", item.messages.len());
         item
     }
 
@@ -560,6 +568,39 @@ impl Draft {
     }
 }
 
+/// The search of `/`: the query line, then what Slack found for it. It
+/// outlives its mode, so `/` comes back to the last one.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Search {
+    pub query: String,
+    /// The query the hits were found for; None before the first search.
+    pub searched: Option<String>,
+    pub hits: Vec<Hit>,
+    /// Every match Slack counts, beyond the page.
+    pub total: u64,
+    /// Index into `hits`.
+    pub selected: usize,
+    /// The keys go to the query line rather than to the hits.
+    pub typing: bool,
+}
+
+impl Search {
+    /// What is typed is what the hits are for: Enter goes to them
+    /// rather than asking Slack again.
+    pub fn enter_hits(&self) -> bool {
+        !self.hits.is_empty() && self.searched.as_deref() == Some(self.query.trim())
+    }
+
+    fn step(&mut self, step: isize) {
+        let last = self.hits.len().saturating_sub(1) as isize;
+        self.selected = (self.selected as isize).saturating_add(step).clamp(0, last) as usize;
+    }
+
+    fn highlighted(&self) -> Option<&Hit> {
+        self.hits.get(self.selected)
+    }
+}
+
 /// The emoji prompt of `R`, over the highlighted message.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Reacting {
@@ -689,6 +730,7 @@ pub enum Mode {
     Help,
     Pick(Picker),
     React(Reacting),
+    Search(Search),
     /// Which link of the highlighted message: a digit picks one, to
     /// open it or to copy it.
     Links {
@@ -768,6 +810,12 @@ pub enum Action {
         name: String,
         add: bool,
     },
+    /// Ask Slack's search, the search mode staying open for the hits.
+    Search {
+        query: String,
+    },
+    /// Open the conversation of a hit at it, in its thread for a reply.
+    ShowHit(Hit),
 }
 
 /// What an event from Slack's socket asks of the screen, the strongest
@@ -839,6 +887,8 @@ pub struct State {
     pub cursor: usize,
     pub thread: Option<ThreadPane>,
     pub typing: Typing,
+    /// The search `/` brings back once it is closed or a hit is opened.
+    pub last_search: Option<Search>,
 }
 
 impl State {
@@ -860,6 +910,7 @@ impl State {
             frequent_emoji: Vec::new(),
             checked: BTreeMap::new(),
             typing: BTreeMap::new(),
+            last_search: None,
         }
     }
 
@@ -1149,6 +1200,25 @@ impl State {
         self.read_from_landing();
     }
 
+    /// What Slack found for a query, in the search mode it was asked from.
+    pub fn found(&mut self, query: String, found: Found) {
+        if let Mode::Search(search) = &mut self.mode {
+            search.searched = Some(query);
+            search.total = found.total;
+            search.hits = found.hits;
+            search.selected = 0;
+            search.typing = search.hits.is_empty();
+        }
+    }
+
+    /// The pane focused on this message, when it shows it.
+    pub fn highlight(&mut self, ts: &str) {
+        if let Some(at) = self.pane_messages().iter().position(|m| m.ts == ts) {
+            self.focus = Focus::Messages;
+            self.cursor = at;
+        }
+    }
+
     /// The pane focused where reading starts (`Item::landing`), or the
     /// list when there is nothing to read.
     pub fn read_from_landing(&mut self) {
@@ -1327,6 +1397,7 @@ impl State {
             Mode::Help => Action::None,
             Mode::Pick(picker) => self.pick(picker, key),
             Mode::React(reacting) => self.react(reacting, key),
+            Mode::Search(search) => self.search(search, key),
             Mode::Links { links, copy } => self.choose_link(links, copy, key),
         }
     }
@@ -1355,6 +1426,12 @@ impl State {
                     .extend(pasted.chars().filter(|c| !c.is_whitespace()));
                 reacting.pick = 0;
                 self.mode = Mode::React(reacting);
+            }
+            Mode::Search(mut search) if search.typing => {
+                search
+                    .query
+                    .extend(pasted.chars().filter(|c| !c.is_control()));
+                self.mode = Mode::Search(search);
             }
             other => self.mode = other,
         }
@@ -1418,6 +1495,12 @@ impl State {
             }
             KeyCode::Char('c') => Action::OpenPicker { compose: true },
             KeyCode::Char('o') => Action::OpenPicker { compose: false },
+            KeyCode::Char('/') => {
+                let mut search = self.last_search.take().unwrap_or_default();
+                search.typing = true;
+                self.mode = Mode::Search(search);
+                Action::None
+            }
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
                 Action::None
@@ -1691,6 +1774,75 @@ impl State {
             _ => {}
         }
         self.mode = Mode::Pick(picker);
+        Action::None
+    }
+
+    /// The search opens in its query line, the last search's query and
+    /// hits still there, where Enter asks Slack (Ctrl-U clears the line
+    /// for a new query) or, the query unchanged, goes to the hits. There
+    /// `j`/`k` move, Enter or `l` opens the hit in its conversation, `O`
+    /// opens it in Slack and `y` copies its link, `/` goes back to the
+    /// query, Esc or `h` closes, `q` quits as everywhere. The arrows and
+    /// Ctrl-n/p move in both. Closing keeps the search for the next `/`.
+    fn search(&mut self, mut search: Search, key: KeyEvent) -> Action {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let after_g = std::mem::take(&mut self.pending_g);
+        let to_hits = |search: &mut Search| search.typing = search.hits.is_empty();
+        if search.typing {
+            if let Some(cut) = Cut::of(key) {
+                cut.apply(&mut search.query);
+                self.mode = Mode::Search(search);
+                return Action::None;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    self.last_search = Some(search);
+                    return Action::None;
+                }
+                KeyCode::Enter if search.enter_hits() => to_hits(&mut search),
+                KeyCode::Enter if !search.query.trim().is_empty() => {
+                    let query = search.query.trim().to_string();
+                    self.mode = Mode::Search(search);
+                    return Action::Search { query };
+                }
+                KeyCode::Down => to_hits(&mut search),
+                KeyCode::Char('n') if control => to_hits(&mut search),
+                KeyCode::Char(c) if !control => search.query.push(c),
+                _ => {}
+            }
+            self.mode = Mode::Search(search);
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => search.step(1),
+            KeyCode::Up | KeyCode::Char('k') => search.step(-1),
+            KeyCode::Char('n') if control => search.step(1),
+            KeyCode::Char('p') if control => search.step(-1),
+            KeyCode::Char('g') if after_g => search.step(isize::MIN),
+            KeyCode::Char('g') => self.pending_g = true,
+            KeyCode::Home => search.step(isize::MIN),
+            KeyCode::Char('G') | KeyCode::End => search.step(isize::MAX),
+            KeyCode::Char('/') => search.typing = true,
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                if let Some(hit) = search.highlighted().cloned() {
+                    self.last_search = Some(search);
+                    return Action::ShowHit(hit);
+                }
+            }
+            KeyCode::Char(c @ ('O' | 'y')) => {
+                if let Some(url) = search.highlighted().map(|hit| hit.permalink.clone()) {
+                    self.mode = Mode::Search(search);
+                    return link_action(url, c == 'y');
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => {
+                self.last_search = Some(search);
+                return Action::None;
+            }
+            KeyCode::Char('q') => return Action::Quit,
+            _ => {}
+        }
+        self.mode = Mode::Search(search);
         Action::None
     }
 
@@ -3659,5 +3811,127 @@ mod tests {
         assert_eq!(state.typists("C2", Some("2.000100")), ["U2"]);
         state.forget_typing(start + TYPING_FOR);
         assert!(state.typing.is_empty(), "not repeated");
+    }
+
+    fn hit(channel: &str, ts: &str, thread_ts: Option<&str>) -> Hit {
+        let mut message = message(ts);
+        message.thread_ts = thread_ts.map(str::to_string);
+        Hit {
+            channel: channel.to_string(),
+            message,
+            permalink: format!(
+                "https://acme.slack.com/archives/{channel}/p{}",
+                ts.replace('.', "")
+            ),
+        }
+    }
+
+    fn typed(state: &mut State, text: &str) {
+        for c in text.chars() {
+            state.key(press(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn slash_searches_and_enter_opens_a_hit_keeping_the_search_for_later() {
+        let mut state = state();
+        assert_eq!(state.key(press(KeyCode::Char('/'))), Action::None);
+        assert!(matches!(&state.mode, Mode::Search(s) if s.typing && s.query.is_empty()));
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::None,
+            "nothing to search"
+        );
+        typed(&mut state, "deploy in:#dev");
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Search {
+                query: "deploy in:#dev".to_string()
+            }
+        );
+        let hits = vec![
+            hit("C5", "3.000100", None),
+            hit("C6", "2.000200", Some("2.000100")),
+        ];
+        state.found(
+            "deploy in:#dev".to_string(),
+            Found {
+                total: 40,
+                hits: hits.clone(),
+            },
+        );
+        assert!(matches!(&state.mode, Mode::Search(s) if !s.typing && s.total == 40));
+        state.key(press(KeyCode::Char('j')));
+        assert_eq!(
+            state.key(press(KeyCode::Char('y'))),
+            Action::CopyLink(hits[1].permalink.clone())
+        );
+        assert!(
+            matches!(&state.mode, Mode::Search(_)),
+            "copying keeps it open"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::ShowHit(hits[1].clone())
+        );
+        assert_eq!(state.mode, Mode::Browse);
+
+        // `/` brings it back in its query line; unchanged, Enter goes to
+        // the hits without asking Slack again.
+        state.key(press(KeyCode::Char('/')));
+        assert!(matches!(&state.mode, Mode::Search(s) if s.typing && s.selected == 1));
+        assert_eq!(state.key(press(KeyCode::Enter)), Action::None);
+        assert!(matches!(&state.mode, Mode::Search(s) if !s.typing));
+        state.key(press(KeyCode::Char('/')));
+        state.key(control('u'));
+        typed(&mut state, "other");
+        assert_eq!(
+            state.key(press(KeyCode::Enter)),
+            Action::Search {
+                query: "other".to_string()
+            }
+        );
+        state.found(
+            "other".to_string(),
+            Found {
+                total: 0,
+                hits: Vec::new(),
+            },
+        );
+        assert!(
+            matches!(&state.mode, Mode::Search(s) if s.typing),
+            "no match leaves the keys in the query line"
+        );
+        assert_eq!(state.key(press(KeyCode::Esc)), Action::None);
+        assert_eq!(state.mode, Mode::Browse);
+        assert!(
+            state
+                .last_search
+                .as_ref()
+                .is_some_and(|s| s.query == "other")
+        );
+    }
+
+    #[test]
+    fn a_hit_opens_around_itself_with_the_cursor_on_it() {
+        let mut state = state();
+        let page = history::Unread {
+            messages: vec![
+                message("1.000100"),
+                message("1.000200"),
+                message("1.000300"),
+            ],
+            has_more: true,
+        };
+        state.open_item(Item::around("C9".to_string(), "#dev".to_string(), page));
+        state.highlight("1.000200");
+        let item = state.selected_item().unwrap();
+        assert_eq!(
+            (item.section, item.detail.as_str()),
+            (Section::Opened, "3 messages around the match")
+        );
+        assert_eq!((state.focus, state.cursor), (Focus::Messages, 1));
+        state.highlight("9.000000");
+        assert_eq!(state.cursor, 1, "a message not shown moves nothing");
     }
 }

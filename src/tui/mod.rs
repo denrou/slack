@@ -39,6 +39,7 @@ use crate::directory::{self, Listed};
 use crate::history::{self, Message};
 use crate::names::Names;
 use crate::rtm::{self, Signal};
+use crate::search::{self, Found, Hit};
 use crate::style::Style;
 use crate::{counts, emoji, lastview, mention, mrkdwn, react, read, replies, target, view, warn};
 
@@ -215,6 +216,11 @@ fn recent(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Ite
 /// How long the cursor rests on a recent conversation before its history
 /// is read: moving through the list with `j` reads none of them.
 const PREVIEW_AFTER: Duration = Duration::from_millis(300);
+/// The hits of one search: a screenful of lists, and one call.
+const SEARCH_HITS: usize = 50;
+/// The messages read on each side of a hit when it is opened.
+const AROUND_HIT: usize = 25;
+
 /// The longest wait for a key, so the screen redraws and polls.
 const TICK: Duration = Duration::from_millis(250);
 
@@ -603,6 +609,28 @@ impl App<'_> {
                     Err(err) => self.fail(err),
                 }
             }
+            Action::Search { query } => {
+                self.busy(terminal, "Searching…")?;
+                match self.search(&query) {
+                    Ok(found) => {
+                        self.state.status = found.hits.is_empty().then(|| "Nothing matches".into());
+                        self.state.found(query, found);
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
+                }
+            }
+            Action::ShowHit(hit) => {
+                let label = self.names.channel_label(&hit.channel);
+                self.busy(terminal, &format!("Loading {label}…"))?;
+                match self.show_hit(&hit) {
+                    Ok(()) => {
+                        self.state.status = None;
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
+                }
+            }
             Action::ShowGroup { users, compose } => {
                 self.busy(terminal, "Opening the group message…")?;
                 match self.show_group(&users) {
@@ -923,6 +951,17 @@ impl App<'_> {
             .ok_or_else(|| anyhow!("no message is highlighted"))?;
         let thread_ts = msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone());
         let channel = it.channel.clone();
+        self.thread_pane(channel, thread_ts, message)
+    }
+
+    /// A thread read whole for the pane; `from_message` is where `h` puts
+    /// the cursor back in the conversation.
+    fn thread_pane(
+        &mut self,
+        channel: String,
+        thread_ts: String,
+        from_message: usize,
+    ) -> Result<ThreadPane> {
         let fetched = replies::fetch(self.client, &channel, &thread_ts)?;
         self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         let user = |id: &str| self.names.user_name(id);
@@ -940,7 +979,7 @@ impl App<'_> {
             title,
             messages: fetched.into_messages(),
             has_more,
-            from_message: message,
+            from_message,
         })
     }
 
@@ -1120,6 +1159,33 @@ impl App<'_> {
             people.extend(view::mentioned_users(&message.text));
         }
         self.names.resolve_users(self.client, people)?;
+        Ok(())
+    }
+
+    /// What Slack finds for the query, its places and people named.
+    fn search(&mut self, query: &str) -> Result<Found> {
+        let found = search::fetch(self.client, query, SEARCH_HITS)?;
+        search::name(self.client, self.names, &found.hits)?;
+        Ok(found)
+    }
+
+    /// The hit's conversation in the list, read around it with the cursor
+    /// on it; a reply opens its thread on top, the cursor on the reply.
+    fn show_hit(&mut self, hit: &Hit) -> Result<()> {
+        let anchor = hit.anchor().to_string();
+        let page = history::around(self.client, &hit.channel, &anchor, AROUND_HIT)?;
+        self.resolve_people(page.messages.iter())?;
+        self.names
+            .resolve_channels(self.client, [hit.channel.clone()])?;
+        let title = self.names.channel_label(&hit.channel);
+        self.state
+            .open_item(Item::around(hit.channel.clone(), title, page));
+        self.state.highlight(&anchor);
+        if hit.message.is_reply() {
+            let pane = self.thread_pane(hit.channel.clone(), anchor, self.state.cursor)?;
+            self.state.open_thread(pane);
+            self.state.highlight(&hit.message.ts);
+        }
         Ok(())
     }
 

@@ -727,7 +727,8 @@ pub(crate) fn excerpt(text: &str, max: usize) -> String {
     }
 }
 
-/// Local time, with the day when it is not today.
+/// Local time, with the day when it is not today, and the year without
+/// the time when it is not this year (a search reaches that far).
 pub(crate) fn format_ts(ts: &str, now: &Zoned) -> String {
     let Some(seconds) = ts.split('.').next().and_then(|s| s.parse::<i64>().ok()) else {
         return ts.to_string();
@@ -740,6 +741,8 @@ pub(crate) fn format_ts(ts: &str, now: &Zoned) -> String {
         "%H:%M"
     } else if now.timestamp().as_second() - seconds < 6 * 86_400 {
         "%a %H:%M"
+    } else if zoned.year() != now.year() {
+        "%d %b %Y"
     } else {
         "%d %b %H:%M"
     };
@@ -1067,5 +1070,18 @@ mod tests {
             ..empty_view()
         };
         assert_eq!(rendered(&view), "All caught up.\n");
+    }
+
+    #[test]
+    fn a_time_says_the_day_and_the_year_when_they_are_not_today_s() {
+        let now: Zoned = "2026-10-21T12:00:00+00:00[UTC]".parse().unwrap();
+        let at = |time: &str| {
+            let zoned: Zoned = format!("{time}+00:00[UTC]").parse().unwrap();
+            format!("{}.000100", zoned.timestamp().as_second())
+        };
+        assert_eq!(format_ts(&at("2026-10-21T08:05:00"), &now), "08:05");
+        assert_eq!(format_ts(&at("2026-10-19T08:05:00"), &now), "Mon 08:05");
+        assert_eq!(format_ts(&at("2026-03-02T08:05:00"), &now), "02 Mar 08:05");
+        assert_eq!(format_ts(&at("2024-03-02T08:05:00"), &now), "02 Mar 2024");
     }
 }
