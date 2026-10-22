@@ -4,7 +4,7 @@ How `slack` is put together, for a first read of the code. README.md says what t
 
 ## Shape
 
-One crate, one binary, blocking I/O throughout: a run is a handful of HTTP calls (`ureq`), the login holds one WebSocket (`tungstenite`), and the few lookups that run side by side go through `std::thread::scope` (`par.rs`, eight threads at most). No async runtime, deliberately: switching later would cost `api.rs` and `auth/cdp.rs`, not the pure modules.
+One crate, one binary, blocking I/O throughout: a run is a handful of HTTP calls (`ureq`), the login holds one WebSocket (`tungstenite`) and the screen another, on a thread of its own, and the few lookups that run side by side go through `std::thread::scope` (`par.rs`, eight threads at most). No async runtime, deliberately: switching later would cost `api.rs` and `auth/cdp.rs`, not the pure modules.
 
 Each module knows one thing, and the dependencies point down this list:
 
