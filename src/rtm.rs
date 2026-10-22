@@ -98,6 +98,15 @@ impl Event {
                 let posted = match subtype {
                     Some("message_changed") => {
                         let message = frame.get("message")?;
+                        // A link's preview, or a bot's attachments: a full
+                        // reload each would be too many, the next shows it.
+                        let same_text = frame
+                            .get("previous_message")
+                            .and_then(|previous| previous.get("text"))
+                            .is_some_and(|before| Some(before) == message.get("text"));
+                        if same_text {
+                            return None;
+                        }
                         Posted {
                             channel,
                             ts: text(message, "ts")?,
@@ -309,6 +318,13 @@ mod tests {
         let mut expected = posted("C1", "3.0", Some("2.0"), "U1");
         expected.changed = true;
         assert_eq!(Event::parse(&edit), Some(Event::Message(expected)));
+
+        let unfurl = json!({
+            "type": "message", "subtype": "message_changed", "channel": "C1", "ts": "9.0",
+            "message": {"user": "U1", "text": "see https://x.y", "ts": "3.0", "attachments": [{}]},
+            "previous_message": {"user": "U1", "text": "see https://x.y", "ts": "3.0"}
+        });
+        assert_eq!(Event::parse(&unfurl), None, "the same text: a preview");
 
         let deletion = json!({
             "type": "message", "subtype": "message_deleted", "channel": "C1", "ts": "9.0",

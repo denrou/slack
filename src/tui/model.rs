@@ -1073,7 +1073,7 @@ impl State {
                     item.loaded = false;
                 }
             }
-            return if self.shows_channel(channel) {
+            return if self.reloads_message(channel, &posted.ts) {
                 Wake::Reload
             } else {
                 Wake::Nothing
@@ -1114,14 +1114,16 @@ impl State {
             .collect()
     }
 
-    fn shows_channel(&self, channel: &str) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.channel == channel && !item.section.is_recent())
-            || self
-                .thread
-                .as_ref()
-                .is_some_and(|thread| thread.channel == channel)
+    /// The message is on the screen where a reload reads it again: an
+    /// opened conversation keeps the history it was opened with.
+    fn reloads_message(&self, channel: &str, ts: &str) -> bool {
+        let has = |messages: &[Message]| messages.iter().any(|message| message.ts == ts);
+        self.items.iter().any(|item| {
+            item.channel == channel && !item.section.is_browsed() && has(&item.messages)
+        }) || self
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.channel == channel && has(&thread.messages))
     }
 
     /// A thread listed, or open in the pane: shown whole, so a new reply
@@ -3764,6 +3766,15 @@ mod tests {
             state.hear_now(Event::Message(edit)),
             Wake::Nothing,
             "an edit elsewhere"
+        );
+        let Event::Message(mut edit) = posted("D1", "0.5", None, "U1") else {
+            unreachable!()
+        };
+        edit.changed = true;
+        assert_eq!(
+            state.hear_now(Event::Message(edit)),
+            Wake::Nothing,
+            "an edit to a message the screen does not show"
         );
 
         let reaction = |user: &str, add: bool| Event::Reaction {
