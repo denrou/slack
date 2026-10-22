@@ -806,7 +806,9 @@ impl App<'_> {
             .names
             .resolve_channels(self.client, [posted.channel.clone()]);
         let channel = self.names.channel(&posted.channel);
-        let im = channel.is_some_and(|c| c.is_im);
+        // A DM whose lookup failed is still a DM: only an IM's id starts
+        // with D, and a missed DM is worse than a misnamed one.
+        let im = channel.map_or(posted.channel.starts_with('D'), |c| c.is_im);
         let direct = im || channel.is_some_and(|c| c.is_mpim);
         let muted = self.muted.contains(&posted.channel);
         if !notify::aimed(posted, me, direct, muted) {
