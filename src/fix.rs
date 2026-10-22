@@ -6,7 +6,7 @@
 
 use std::env;
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,17 +43,24 @@ pub fn cleaned(output: &str) -> Option<String> {
 
 /// Run `command` through `sh -c` on the draft and return its correction.
 pub fn run(command: &str, draft: &str) -> Result<String> {
-    let mut child = Command::new("sh")
-        .arg("-c")
+    run_within(command, draft, TIMEOUT)
+}
+
+fn run_within(command: &str, draft: &str, timeout: Duration) -> Result<String> {
+    let mut sh = Command::new("sh");
+    sh.arg("-c")
         .arg(command)
         // Deliberate: an agent CLI such as `claude -p` reads the project
         // files of the directory it starts in, wherever the screen was opened.
         .current_dir(env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("cannot start the fix command")?;
+        .stderr(Stdio::piped());
+    // A group of its own, so a timeout kills what `sh` started too, and a
+    // runner that reads the terminal is stopped rather than given our keys.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut sh, 0);
+    let mut child = sh.spawn().context("cannot start the fix command")?;
     // Each pipe has its own thread: a command that writes before it has
     // read all of its stdin would otherwise block on a full pipe, and us
     // with it.
@@ -66,17 +73,16 @@ pub fn run(command: &str, draft: &str) -> Result<String> {
     let writer = thread::spawn(move || stdin.write_all(prompt.as_bytes()));
     let output = thread::spawn(move || read_all(stdout));
     let errors = thread::spawn(move || read_all(stderr));
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_group(&mut child);
             bail!(
                 "the fix command gave no answer in {} seconds",
-                TIMEOUT.as_secs()
+                timeout.as_secs()
             );
         }
         thread::sleep(Duration::from_millis(50));
@@ -94,6 +100,19 @@ pub fn run(command: &str, draft: &str) -> Result<String> {
         }
     }
     cleaned(&output).context("the fix command printed nothing")
+}
+
+/// Kill the command and what it started: a pipeline or a wrapper script
+/// leaves the runner outside `sh`, still running and still spending.
+fn kill_group(child: &mut Child) {
+    #[cfg(unix)]
+    let _ = Command::new("kill")
+        .args(["-KILL", &format!("-{}", child.id())])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The whole of a pipe, lossy: a stray byte must not cost the answer.
@@ -140,5 +159,30 @@ mod tests {
     fn an_empty_answer_is_an_error() {
         let err = run("cat >/dev/null", "x").unwrap_err();
         assert_eq!(err.to_string(), "the fix command printed nothing");
+    }
+
+    #[test]
+    fn a_command_past_its_time_is_killed_with_what_it_started() {
+        let pid_file = env::temp_dir().join(format!("slack-fix-test-{}", std::process::id()));
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let started = Instant::now();
+        let err = run_within(&command, "x", Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("gave no answer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let _ = std::fs::remove_file(&pid_file);
+        // The orphan is reaped by init, which can take a moment.
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let until = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "sleep {} outlived the timeout", pid.trim());
     }
 }
