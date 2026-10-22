@@ -79,6 +79,8 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 The screen keeps itself current: it listens to Slack's real-time socket, as the app does, and reloads when a message, a reply, an edit or a read moved what it shows, leaving you where you were (the selection, the highlighted message, the open thread). Someone typing puts a `✎` after the conversation in the list and their name under the messages. It waits while the reply box, the picker or a prompt is open, so nothing moves under what you are typing. Should the socket drop, the screen asks Slack every 15 seconds whether anything moved until it is back, and every 2 minutes beside it in case it stops sending something.
 
+In WezTerm and Ghostty the screen also notifies you when a message aimed at you arrives while the terminal is in the background: a DM or a group message, unless muted, or a mention of you, `@here` and `@channel` included outside a muted channel. The terminal posts the notification (`OSC 777`), and clicking it brings you back. Nothing is posted while you are looking at the screen, which already shows the message, nor while the socket is down. Other terminals get no notification: they would drop the sequence without a word.
+
 | Key               | Action                                                                                                                            |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `j`/`k`, arrows   | Move through the list, or through the messages                                                                                    |
@@ -132,7 +134,7 @@ Security notes, the short version:
 
 `slack --count` makes two API calls side by side, prints one number and exits non-zero when the fetch fails, so a poller can tell "nothing" from "broken". The number is the unread conversations (DMs, group messages and channels with something new, muted ones excepted unless you were mentioned) plus one when followed threads have unread replies.
 
-`slack --count --json` prints `{"unread": 3, "me": 2}` from the same two calls, laid out over lines like every `--json` output, so read it with `jq` rather than line by line: `unread` is that number, `me` the messages aimed at you (the unread messages of DMs and group messages, the mentions in channels and in followed threads), for a bar that shows the urgent part apart.
+`slack --count --json` prints `{"unread": 3, "me": 2, "notifying": false}` from the same two calls, laid out over lines like every `--json` output, so read it with `jq` rather than line by line: `unread` is that number, `me` the messages aimed at you (the unread messages of DMs and group messages, the mentions in channels and in followed threads), for a bar that shows the urgent part apart. `notifying` is true while a screen is open with its socket up and posts the notifications above, so a status bar that notifies on its own when `me` goes up can keep quiet meanwhile and take over once the screen is closed.
 
 ## For an agent
 

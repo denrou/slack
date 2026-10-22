@@ -81,6 +81,9 @@ pub struct Posted {
     pub user: Option<String>,
     /// An edit or a deletion rather than a new message.
     pub changed: bool,
+    /// A new message's markup, for its notification; None for an edit or
+    /// a deletion, which notify of nothing.
+    pub text: Option<String>,
 }
 
 impl Posted {
@@ -119,6 +122,7 @@ impl Event {
                             thread_ts: text(message, "thread_ts"),
                             user: text(message, "user"),
                             changed: true,
+                            text: None,
                         }
                     }
                     Some("message_deleted") => {
@@ -129,6 +133,7 @@ impl Event {
                             thread_ts: previous.and_then(|message| text(message, "thread_ts")),
                             user: previous.and_then(|message| text(message, "user")),
                             changed: true,
+                            text: None,
                         }
                     }
                     // The root's new reply count; the reply comes on its own.
@@ -139,6 +144,7 @@ impl Event {
                         thread_ts: text(frame, "thread_ts"),
                         user: text(frame, "user"),
                         changed: false,
+                        text: text(frame, "text"),
                     },
                 };
                 Some(Event::Message(posted))
@@ -291,6 +297,7 @@ mod tests {
             thread_ts: thread_ts.map(str::to_string),
             user: Some(user.to_string()),
             changed: false,
+            text: None,
         }
     }
 
@@ -298,10 +305,9 @@ mod tests {
     fn a_message_is_read_with_its_thread() {
         let frame =
             json!({"type": "message", "channel": "C1", "user": "U1", "text": "hi", "ts": "2.0"});
-        assert_eq!(
-            Event::parse(&frame),
-            Some(Event::Message(posted("C1", "2.0", None, "U1")))
-        );
+        let mut expected = posted("C1", "2.0", None, "U1");
+        expected.text = Some("hi".to_string());
+        assert_eq!(Event::parse(&frame), Some(Event::Message(expected)));
 
         let reply = json!({"type": "message", "channel": "C1", "user": "U1", "ts": "3.0", "thread_ts": "2.0"});
         let Some(Event::Message(reply)) = Event::parse(&reply) else {

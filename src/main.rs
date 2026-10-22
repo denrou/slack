@@ -12,6 +12,7 @@ mod lastview;
 mod mention;
 mod mrkdwn;
 mod names;
+mod notify;
 mod par;
 mod paths;
 mod prefs;
@@ -42,7 +43,7 @@ struct Cli {
     /// Print only the number of conversations, for a status bar
     #[arg(long)]
     count: bool,
-    /// With --count: the conversations and the messages aimed at you, as JSON
+    /// With --count: the conversations, the messages aimed at you and whether the screen notifies of them, as JSON
     #[arg(long, requires = "count")]
     json: bool,
     #[command(subcommand)]

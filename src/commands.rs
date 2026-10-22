@@ -19,8 +19,8 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, target, tui,
-    view,
+    counts, directory, history, lastview, mrkdwn, notify, react, read, replies, search, send,
+    target, tui, view,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -70,6 +70,7 @@ pub fn count(json: bool) -> Result<()> {
         return print_json(&json!({
             "unread": counts.unread_count(),
             "me": counts.me_count(),
+            "notifying": notify::covered(),
         }));
     }
     println!("{}", counts.unread_count());

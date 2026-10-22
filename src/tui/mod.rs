@@ -11,6 +11,7 @@ mod model;
 mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -23,8 +24,9 @@ use anyhow::{Context, Result, anyhow};
 use jiff::Zoned;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::{execute, terminal};
 use serde_json::Value;
@@ -38,10 +40,12 @@ use crate::counts::{Conversation, Counts, Kind};
 use crate::directory::{self, Listed};
 use crate::history::{self, Message};
 use crate::names::Names;
-use crate::rtm::{self, Signal};
+use crate::rtm::{self, Posted, Signal};
 use crate::search::{self, Found, Hit};
 use crate::style::Style;
-use crate::{counts, emoji, lastview, mention, mrkdwn, react, read, replies, target, view, warn};
+use crate::{
+    counts, emoji, lastview, mention, mrkdwn, notify, react, read, replies, target, view, warn,
+};
 
 pub fn run(
     client: &Client,
@@ -74,6 +78,7 @@ fn screen(
     state.replace_items(Some(items), recent);
     let live = Arc::new(AtomicBool::new(false));
     let (nudges, nudged) = mpsc::channel();
+    let term_program = env::var("TERM_PROGRAM").ok();
     let mut app = App {
         client,
         names,
@@ -85,8 +90,13 @@ fn screen(
         visited: Visited::of(&counts),
         resting: None,
         polls: poll(client.clone(), Arc::clone(&live), nudged),
-        signals: rtm::listen(client.clone(), live),
+        signals: rtm::listen(client.clone(), Arc::clone(&live)),
         nudges,
+        live,
+        notifies: me.is_some() && notify::supported(term_program.as_deref()),
+        focused: true,
+        beat: None,
+        muted: muted(&counts),
         written: Instant::now(),
         poll_error: None,
         owed: false,
@@ -95,6 +105,9 @@ fn screen(
     let mut terminal = ratatui::init();
     let modes = Modes::ask();
     let result = app.run(&mut terminal);
+    if app.beat.is_some() {
+        notify::stop();
+    }
     drop(modes);
     ratatui::restore();
     result
@@ -114,6 +127,9 @@ impl Modes {
         // of as keystrokes that would send the first line and act on the
         // rest. A terminal without the feature ignores the sequence.
         let _ = execute!(io::stdout(), EnableBracketedPaste);
+        // Whether you are looking at the screen, which then notifies of
+        // nothing: it shows the message already.
+        let _ = execute!(io::stdout(), EnableFocusChange);
         // Ctrl-Enter and Shift-Enter are plain Enter to a terminal that
         // does not speak the kitty keyboard protocol, so it is asked for
         // where spoken; a terminal that answers the query with nothing
@@ -134,6 +150,7 @@ impl Drop for Modes {
         if self.enhanced {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         }
+        let _ = execute!(io::stdout(), DisableFocusChange);
         let _ = execute!(io::stdout(), DisableBracketedPaste);
     }
 }
@@ -319,6 +336,16 @@ impl Pulse {
     }
 }
 
+/// The conversations muted in Slack, for the notifications' rule.
+fn muted(counts: &Counts) -> BTreeSet<String> {
+    counts
+        .conversations
+        .iter()
+        .filter(|c| c.muted)
+        .map(|c| c.id.clone())
+        .collect()
+}
+
 /// What the recent sections are built from: the conversations visited
 /// last, in order, with what the list shows of each. Apart from `Pulse`,
 /// since a change here rebuilds the sections without reading anything.
@@ -365,11 +392,22 @@ struct App<'a> {
     /// A reload the socket asked for and no poll has done yet: a poll that
     /// fails would otherwise drop it, and the counts may never show why.
     owed: bool,
+    /// The socket is up: what is aimed at you is heard as it comes.
+    live: Arc<AtomicBool>,
+    /// The terminal posts notifications and you are known, so the screen
+    /// notifies while the socket is up.
+    notifies: bool,
+    /// The terminal has the focus; a terminal that never says assumes so.
+    focused: bool,
+    /// When the heartbeat was last written, None while there is none.
+    beat: Option<Instant>,
+    muted: BTreeSet<String>,
 }
 
 impl App<'_> {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
+            self.keep_beat();
             self.heard();
             self.draw(terminal)?;
             let wait = match self.preview_wait() {
@@ -389,6 +427,14 @@ impl App<'_> {
             let action = match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => self.state.key(key),
                 Event::Paste(text) => self.state.paste(&text),
+                Event::FocusGained => {
+                    self.focused = true;
+                    continue;
+                }
+                Event::FocusLost => {
+                    self.focused = false;
+                    continue;
+                }
                 _ => continue, // a resize redraws on the next pass
             };
             if action == Action::Quit {
@@ -669,7 +715,8 @@ impl App<'_> {
         let now = Instant::now();
         self.state.forget_typing(now);
         let mut wake = Wake::Nothing;
-        for signal in self.signals.try_iter() {
+        let signals: Vec<Signal> = self.signals.try_iter().collect();
+        for signal in signals {
             let asked = match signal {
                 Signal::Up { again: true } => Wake::Reload,
                 Signal::Up { again: false } | Signal::Down => Wake::Check,
@@ -680,7 +727,12 @@ impl App<'_> {
                     ));
                     Wake::Nothing
                 }
-                Signal::Event(event) => self.state.hear(event, now),
+                Signal::Event(event) => {
+                    if let rtm::Event::Message(posted) = &event {
+                        self.notify(posted);
+                    }
+                    self.state.hear(event, now)
+                }
             };
             wake = wake.max(asked);
         }
@@ -688,6 +740,77 @@ impl App<'_> {
             // The poll outlives no screen: an error here means quitting.
             let _ = self.nudges.send(wake == Wake::Reload);
         }
+    }
+
+    /// The heartbeat follows the socket: written while it is up, removed
+    /// once it drops, so the fallback takes over at once.
+    fn keep_beat(&mut self) {
+        if !self.notifies {
+            return;
+        }
+        let live = self.live.load(Ordering::Relaxed);
+        match self.beat {
+            Some(at) if live && at.elapsed() < notify::BEAT_EVERY => {}
+            // Deliberate: a heartbeat that cannot be written leaves the
+            // fallback notifying too, and twice is better than never.
+            _ if live => self.beat = notify::beat().ok().map(|()| Instant::now()),
+            Some(_) => {
+                notify::stop();
+                self.beat = None;
+            }
+            None => {}
+        }
+    }
+
+    /// A notification for a message aimed at you while you are elsewhere.
+    /// The names it needs are looked up on a miss; a lookup that fails
+    /// leaves an id, and the poll reports a dead session.
+    fn notify(&mut self, posted: &Posted) {
+        let Some(me) = self.state.me.as_deref() else {
+            return;
+        };
+        if !self.notifies || self.focused || posted.changed || posted.user.as_deref() == Some(me) {
+            return;
+        }
+        let _ = self
+            .names
+            .resolve_channels(self.client, [posted.channel.clone()]);
+        let channel = self.names.channel(&posted.channel);
+        let im = channel.is_some_and(|c| c.is_im);
+        let direct = im || channel.is_some_and(|c| c.is_mpim);
+        let muted = self.muted.contains(&posted.channel);
+        if !notify::aimed(posted, me, direct, muted) {
+            return;
+        }
+        let text = posted.text.as_deref().unwrap_or_default();
+        let mut people = view::mentioned_users(text);
+        people.extend(posted.user.clone());
+        if let Some(channel) = channel.and_then(|c| c.user.clone()) {
+            people.push(channel);
+        }
+        let _ = self.names.resolve_users(self.client, people);
+        let names = &*self.names;
+        let text = mrkdwn::render(
+            text,
+            &|id| names.user_name(id),
+            &|id| names.channel_name(id),
+            &Style::plain(),
+        );
+        let sender = posted
+            .user
+            .as_deref()
+            .filter(|_| !im)
+            .map(|user| names.user_name(user).unwrap_or_else(|| user.to_string()));
+        let note = notify::Note::new(
+            &names.channel_label(&posted.channel),
+            sender.as_deref(),
+            posted.reply_to().is_some(),
+            &text,
+        );
+        let mut stdout = io::stdout();
+        let _ = stdout
+            .write_all(note.sequence().as_bytes())
+            .and_then(|()| stdout.flush());
     }
 
     /// The latest poll, between keys and only while nothing is open over
@@ -735,6 +858,7 @@ impl App<'_> {
         if counts.prefs_missing {
             return Ok(());
         }
+        self.muted = muted(&counts);
         if !force && Pulse::of(&counts) == self.pulse {
             return self.revisited(&counts);
         }
@@ -779,6 +903,9 @@ impl App<'_> {
         self.state.frequent_emoji.clone_from(&counts.frequent_emoji);
         self.pulse = Pulse::of(counts);
         self.visited = Visited::of(counts);
+        if !counts.prefs_missing {
+            self.muted = muted(counts);
+        }
         self.owed = false;
         self.state.preview_failed = None;
         if let Some(pane) = self.state.thread.take() {

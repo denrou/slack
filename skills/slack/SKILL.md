@@ -25,7 +25,7 @@ The `slack` binary is [denrou/slack](https://github.com/denrou/slack). It reuses
 | A message, whenever and wherever it was said        | `slack search <query>`, newest first, `-n 100` at most; Slack's operators work          |
 | A channel or group message the user is in           | `slack channels [words]`                                                                |
 | A person: handle, name, title                       | `slack people <words>` searches the workspace; bare, the people they have a DM with     |
-| One number for a status bar                         | `slack --count`; `--json` adds `me`, the messages aimed at the user                     |
+| One number for a status bar                         | `slack --count`; `--json` adds `me`, the messages aimed at the user, and `notifying`    |
 
 The text output is made for reading: names resolved, local times, the threads numbered, `[3 replies]` and file notes, and no colour in a pipe. Summarise from it, or pass it on. `--json` is for anything parsed with `jq`: it carries ids (`user`, `channel`) and timestamps (`ts`, `thread_ts`) but no names, and `text` is raw Slack markup with `<@U123>` mentions; `slack people` or the text output maps the ids. Every `--json` is laid out over lines, so read it whole, never line by line.
 
