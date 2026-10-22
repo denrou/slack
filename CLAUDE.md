@@ -46,7 +46,7 @@ A concern about one of several asks never holds up the others. A reversal is fin
 ## Security rules
 
 - Never print, log or serialise a token (`xoxc`, `xoxd`, the Cookie header), in output, errors or `--json`.
-- Only `https://*.slack.com` origins, never `app.slack.com`, may be paired with the session cookie: `capture::is_slack_workspace_url` is the gate, and it is load-bearing. The socket `rtm.connect` names goes through its `wss://` twin, `is_slack_socket_url`.
+- Only `https://*.slack.com` origins, never `app.slack.com`, may be paired with the session cookie: `capture::is_slack_workspace_url` is the gate, and it is load-bearing. The socket `rtm.connect` names goes through its `wss://` twin, `is_slack_socket_url`, and no redirect is followed from it, since the cookie would go along.
 - A profile path from the environment is user input: a directory without our sentinel is never reused and never deleted.
 
 ## Decisions (2026-10-19)

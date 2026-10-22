@@ -8,6 +8,7 @@ use std::time::Duration;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 use tungstenite::client::IntoClientRequest;
+use tungstenite::error::UrlError;
 use tungstenite::http::HeaderValue;
 use tungstenite::stream::MaybeTlsStream;
 
@@ -68,6 +69,14 @@ pub enum Error {
 
 /// Slack's real-time socket, as `Client::socket` opens it.
 pub type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
+
+/// Why the socket did not open, without the URL tungstenite would quote.
+fn socket_reason(err: &tungstenite::Error) -> String {
+    match err {
+        tungstenite::Error::Url(UrlError::UnableToConnect(_)) => "could not connect".to_string(),
+        other => other.to_string(),
+    }
+}
 
 pub struct Credentials<'a> {
     pub xoxc: &'a str,
@@ -172,7 +181,7 @@ impl Client {
         let socket_error = |reason: String| Error::Socket { reason };
         let mut request = url
             .into_client_request()
-            .map_err(|err| socket_error(err.to_string()))?;
+            .map_err(|err| socket_error(socket_reason(&err)))?;
         let headers = request.headers_mut();
         for (name, value) in [
             ("Cookie", self.cookie.as_str()),
@@ -183,8 +192,10 @@ impl Client {
                 .map_err(|_| socket_error(format!("a `{name}` header that is not text")))?;
             headers.insert(name, value);
         }
-        let (socket, _response) =
-            tungstenite::connect(request).map_err(|err| socket_error(err.to_string()))?;
+        // Deliberate: no redirect is followed, since it would take the
+        // cookie to a host `is_slack_socket_url` never saw.
+        let (socket, _response) = tungstenite::client::connect_with_config(request, None, 0)
+            .map_err(|err| socket_error(socket_reason(&err)))?;
         Ok(socket)
     }
 
@@ -260,6 +271,14 @@ mod tests {
             cookie_header("xoxd-ab/c+d=e f"),
             "d=xoxd-ab%2Fc%2Bd%3De%20f"
         );
+    }
+
+    #[test]
+    fn a_socket_error_never_quotes_the_ticket() {
+        let err = tungstenite::Error::Url(UrlError::UnableToConnect(
+            "wss://wss-primary.slack.com/websocket/x?ticket=secret".to_string(),
+        ));
+        assert_eq!(socket_reason(&err), "could not connect");
     }
 
     #[test]
