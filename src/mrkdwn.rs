@@ -60,16 +60,22 @@ pub fn render(text: &str, user: Lookup, channel: Lookup, style: &Style) -> Strin
         .collect()
 }
 
-/// The text as the screen shows it, without its styles: for a title, an
-/// excerpt or a notification, where `*` and `_` would only be noise.
+/// The text without its markup: for a title, an excerpt or a notification,
+/// where `*` and `_` would only be noise, and a quote's bar or the line
+/// break that sets a code block apart would cut the first line short.
 pub fn strip(text: &str, user: Lookup, channel: Lookup) -> String {
     pieces(text, user, channel)
         .iter()
         .map(|piece| match piece {
-            Piece::Text(text, _) | Piece::Marker { shown: text, .. } => text.as_str(),
+            Piece::Text(text, _) => text.as_str(),
+            Piece::Marker { shown, .. } if *shown == QUOTED_BREAK => "\n",
+            Piece::Marker { .. } => "",
         })
         .collect()
 }
+
+/// A line break inside a `>>>` quote, which the bar follows.
+const QUOTED_BREAK: &str = "\n▎ ";
 
 /// A message's text: tokens expanded, entities decoded, markup read.
 pub fn pieces(text: &str, user: Lookup, channel: Lookup) -> Vec<Piece> {
@@ -317,19 +323,31 @@ impl Markup {
         }
     }
 
-    /// `>` at the start of a line quotes it, shown as a bar.
+    /// `>` at the start of a line quotes it, shown as a bar, and `>>>`
+    /// quotes the rest of the message, a bar after each line break.
     fn quotes(&mut self) {
         let len = self.atoms.len();
-        for at in 0..len {
+        let mut at = 0;
+        while at < len {
             if !(self.is(at, '>') && self.line_starts_at(at)) {
+                at += 1;
                 continue;
             }
-            let from = if self.char(at + 1) == Some(' ') {
-                at + 2
-            } else {
-                at + 1
-            };
+            let rest = (at..at + 3).all(|at| self.is(at, '>'));
+            let mut from = if rest { at + 3 } else { at + 1 };
+            if self.char(from) == Some(' ') {
+                from += 1;
+            }
             self.mark(at..from, "▎ ");
+            if rest {
+                for at in from..len {
+                    if self.is(at, '\n') {
+                        self.mark(at..at + 1, QUOTED_BREAK);
+                    }
+                }
+                return;
+            }
+            at = from;
         }
     }
 
@@ -670,6 +688,32 @@ mod tests {
     }
 
     #[test]
+    fn three_quote_marks_quote_the_rest_of_the_message() {
+        let quoted = "&gt;&gt;&gt; one\n&gt; two\nthree";
+        assert_eq!(
+            pieces(quoted, &user, &channel),
+            [
+                marker(">>> ", "▎ "),
+                text("one", Look::default()),
+                marker("\n", "\n▎ "),
+                text("> two", Look::default()),
+                marker("\n", "\n▎ "),
+                text("three", Look::default()),
+            ]
+        );
+        assert_eq!(strip(quoted, &user, &channel), "one\n> two\nthree");
+    }
+
+    #[test]
+    fn strip_leaves_a_title_whole() {
+        assert_eq!(
+            strip("deploy with ```make release``` please", &user, &channel),
+            "deploy with make release please"
+        );
+        assert_eq!(strip("&gt; quoted words", &user, &channel), "quoted words");
+    }
+
+    #[test]
     fn a_draft_keeps_its_markers_and_its_brackets() {
         assert_eq!(
             draft("*hi* <@U1> &amp;"),
@@ -698,6 +742,7 @@ mod tests {
             ">",
             "> ",
             "> *x*\n> y",
+            ">>> a\n*b*\n",
             "_ _",
             "~/a and ~/b",
             "*été* _à_ ~ça~",
