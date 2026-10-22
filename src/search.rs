@@ -78,15 +78,27 @@ pub fn parse(body: &Value) -> Result<Found, api::Error> {
         method: METHOD.to_string(),
         reason: "no `messages` block".to_string(),
     })?;
-    let hits = block
-        .get("matches")
-        .and_then(Value::as_array)
+    let total = block.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let matches = block.get("matches").and_then(Value::as_array);
+    let hits: Vec<Hit> = matches
         .map(|matches| matches.iter().filter_map(hit_from).collect())
         .unwrap_or_default();
-    Ok(Found {
-        total: block.get("total").and_then(Value::as_u64).unwrap_or(0),
-        hits,
-    })
+    // Slack found something and none of it reads: a shape that moved,
+    // which "nothing matches" would hide.
+    let broken = match matches {
+        None if total > 0 => Some(format!("{total} matches and no `matches` list")),
+        Some(matches) if hits.is_empty() && !matches.is_empty() => {
+            Some(format!("{} matches, none readable", matches.len()))
+        }
+        _ => None,
+    };
+    if let Some(reason) = broken {
+        return Err(api::Error::Shape {
+            method: METHOD.to_string(),
+            reason,
+        });
+    }
+    Ok(Found { total, hits })
 }
 
 fn hit_from(raw: &Value) -> Option<Hit> {
@@ -148,5 +160,15 @@ mod tests {
             parse(&json!({"ok": true})),
             Err(api::Error::Shape { .. })
         ));
+    }
+
+    #[test]
+    fn matches_that_none_reads_are_a_shape_error() {
+        let moved = json!({"ok": true, "messages": {"total": 3, "matches": [
+            {"ts": "1.0", "text": "a", "channel": "C1", "permalink": "https://acme.slack.com/archives/C1/p1"}
+        ]}});
+        assert!(matches!(parse(&moved), Err(api::Error::Shape { .. })));
+        let gone = json!({"ok": true, "messages": {"total": 3}});
+        assert!(matches!(parse(&gone), Err(api::Error::Shape { .. })));
     }
 }
