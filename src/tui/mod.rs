@@ -30,8 +30,8 @@ use ratatui::crossterm::{execute, terminal};
 use serde_json::Value;
 
 use self::model::{
-    Action, Candidate, Choice, ChoiceKind, Draft, Item, Mark, Mode, Picker, Section, State,
-    ThreadPane, Viewport, Wake,
+    Action, Candidate, Choice, ChoiceKind, Draft, Item, Mark, Mode, Picker, RECENT_ROWS, Section,
+    State, ThreadPane, Viewport, Wake,
 };
 use crate::api::{self, Client};
 use crate::counts::{Conversation, Counts, Kind};
@@ -69,7 +69,7 @@ fn screen(
 ) -> Result<()> {
     let counts = counts::fetch(client)?;
     let items = load(client, names, &counts)?;
-    let recent = recent(client, names, &counts)?;
+    let recent = recent(client, names, &counts, 0)?;
     let mut state = State::new(Vec::new(), me.map(str::to_string));
     state.replace_items(Some(items), recent);
     let live = Arc::new(AtomicBool::new(false));
@@ -194,12 +194,20 @@ fn load(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>
 /// The conversations visited last in Slack, as items without their
 /// history, which is read once the cursor rests on one. The unread ones
 /// are listed above already.
-fn recent(client: &Client, names: &mut Names, counts: &Counts) -> Result<Vec<Item>> {
+fn recent(client: &Client, names: &mut Names, counts: &Counts, opened: usize) -> Result<Vec<Item>> {
+    // Only what the sections can show is named, since Slack keeps dozens:
+    // `replace_items` leaves out the opened ones and keeps `RECENT_ROWS`.
+    let mut taken = [0; 2];
     let visited: Vec<&Conversation> = counts
         .recent
         .iter()
         .filter_map(|id| counts.conversations.iter().find(|c| &c.id == id))
         .filter(|c| !c.counts_as_unread())
+        .filter(|c| {
+            let taken = &mut taken[usize::from(c.kind != Kind::Channel)];
+            *taken += 1;
+            *taken <= RECENT_ROWS + opened
+        })
         .collect();
     names.resolve_channels(client, visited.iter().map(|c| c.id.clone()))?;
     let people: Vec<String> = visited
@@ -745,7 +753,7 @@ impl App<'_> {
         if visited == self.visited {
             return Ok(());
         }
-        match recent(self.client, self.names, counts) {
+        match recent(self.client, self.names, counts, self.state.opened()) {
             Ok(recent) => {
                 self.state.replace_items(None, recent);
                 self.visited = visited;
@@ -759,7 +767,7 @@ impl App<'_> {
     /// is loaded once the thread fails: the next poll must not redo it.
     fn reload(&mut self, counts: &Counts) -> Result<()> {
         let items = load(self.client, self.names, counts)?;
-        let recent = recent(self.client, self.names, counts)?;
+        let recent = recent(self.client, self.names, counts, self.state.opened())?;
         self.state.replace_items(Some(items), recent);
         self.state.frequent_emoji.clone_from(&counts.frequent_emoji);
         self.pulse = Pulse::of(counts);

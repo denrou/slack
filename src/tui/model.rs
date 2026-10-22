@@ -832,7 +832,7 @@ pub enum Wake {
 
 /// How many of each recent section the list shows: enough to reach the
 /// usual places, few enough to keep the list about what is new.
-const RECENT_ROWS: usize = 8;
+pub const RECENT_ROWS: usize = 8;
 
 /// How long a typing notice holds without another: Slack repeats it every
 /// few seconds while someone types.
@@ -1326,6 +1326,15 @@ impl State {
                 self.cursor = position(cursor_ts, self.cursor);
             }
         }
+    }
+
+    /// How many conversations are opened, which the recent sections
+    /// leave out.
+    pub fn opened(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.section == Section::Opened)
+            .count()
     }
 
     /// The selected conversation, when its history is still to be read.
