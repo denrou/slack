@@ -683,6 +683,37 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_gives_back_every_character_typed() {
+        for typed in [
+            "*",
+            "**",
+            "a*b*c",
+            "```oops",
+            "````",
+            "`````",
+            "``````",
+            "```\nlet x\n```",
+            "```a``` and ```b```",
+            "see ```x = 1``` done",
+            ">",
+            "> ",
+            "> *x*\n> y",
+            "_ _",
+            "~/a and ~/b",
+            "*été* _à_ ~ça~",
+        ] {
+            let back: String = draft(typed)
+                .iter()
+                .map(|piece| match piece {
+                    Piece::Text(text, _) | Piece::Marker { typed: text, .. } => text.as_str(),
+                })
+                .collect();
+            assert_eq!(back, typed);
+            assert_eq!(plain(typed), typed);
+        }
+    }
+
+    #[test]
     fn strip_drops_the_markers_render_plain_keeps_them() {
         let text = "*Release* is _today_ in <#C1>";
         assert_eq!(strip(text, &user, &channel), "Release is today in #general");
