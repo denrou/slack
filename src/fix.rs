@@ -107,7 +107,8 @@ fn run_within(command: &str, draft: &str, timeout: Duration) -> Result<String> {
 fn kill_group(child: &mut Child) {
     #[cfg(unix)]
     let _ = Command::new("kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        // `--` or procps' kill on Linux reads the group as an option.
+        .args(["-KILL", "--", &format!("-{}", child.id())])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
