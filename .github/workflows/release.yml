@@ -16,6 +16,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
 
     steps:
       - uses: actions/checkout@v7
@@ -34,6 +36,37 @@ jobs:
             echo "Cargo.toml version is $version but the tag is v$tag" >&2
             exit 1
           fi
+
+      # The notes are the tag's message past its first line, the tag name,
+      # and before its signature, since the tags are signed. Read here so a
+      # tag without them fails before the builds.
+      - name: Read the release notes from the tag
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ref="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
+          if [ "$(jq -r .object.type <<<"$ref")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is not an annotated tag, so it has no notes"
+            exit 1
+          fi
+          message="$(gh api "repos/$GH_REPO/git/tags/$(jq -r .object.sha <<<"$ref")" \
+            --jq '.message | split("\n-----BEGIN ")[0]')"
+          if [ "$(head -n 1 <<<"$message")" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::the message of $GITHUB_REF_NAME does not start with its name"
+            exit 1
+          fi
+          notes="$(tail -n +2 <<<"$message")"
+          if ! grep -q '[^[:space:]]' <<<"$notes"; then
+            echo "::error::the message of $GITHUB_REF_NAME holds no release notes"
+            exit 1
+          fi
+          {
+            echo "notes<<END_OF_NOTES"
+            echo "$notes"
+            echo "END_OF_NOTES"
+          } >> "$GITHUB_OUTPUT"
 
       - run: cargo fmt --check
 
@@ -80,7 +113,7 @@ jobs:
           path: dist/*.tar.gz
 
   release:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -94,21 +127,14 @@ jobs:
       - name: Write the checksums
         run: cd dist && sha256sum *.tar.gz > checksums.txt
 
-      # The notes are the tag's message past its first line (the tag name) and
-      # before its signature, since the tags are signed; GitHub's generated
-      # notes add the compare link below them.
+      # GitHub's generated notes add the compare link below the tag's.
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          NOTES: ${{ needs.check.outputs.notes }}
         run: |
-          ref="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
-          if [ "$(jq -r .object.type <<<"$ref")" != tag ]; then
-            echo "$GITHUB_REF_NAME is not an annotated tag, so it has no notes" >&2
-            exit 1
-          fi
-          gh api "repos/$GH_REPO/git/tags/$(jq -r .object.sha <<<"$ref")" \
-            --jq '.message | split("\n-----BEGIN ")[0] | split("\n") | .[1:] | join("\n")' > notes.md
+          printf '%s\n' "$NOTES" > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* --notes-file notes.md --generate-notes
 
   homebrew:
