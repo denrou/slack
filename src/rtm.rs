@@ -29,6 +29,8 @@ const MAX_WAIT: Duration = Duration::from_secs(60);
 /// A connection that held this long was a good one: the next failure
 /// starts the backoff over.
 const STEADY: Duration = Duration::from_secs(60);
+/// Failures to open in a row before the screen is told: one is a blip.
+const FAILURES_TOLD: u32 = 3;
 
 /// What the socket tells the screen.
 #[derive(Debug, PartialEq, Eq)]
@@ -40,6 +42,10 @@ pub enum Signal {
     },
     /// The connection dropped; it is being opened again.
     Down,
+    /// It failed to open `FAILURES_TOLD` times in a row, for this reason:
+    /// the poll covers meanwhile, and the tries go on. Once per run of
+    /// failures.
+    Off(String),
     Event(Event),
 }
 
@@ -171,10 +177,12 @@ pub fn listen(client: Client, live: Arc<AtomicBool>) -> Receiver<Signal> {
 fn keep_listening(client: &Client, live: &AtomicBool, sender: &Sender<Signal>) {
     let mut again = false;
     let mut wait = FIRST_WAIT;
+    let mut failures = 0;
     loop {
         let began = Instant::now();
         match client.socket() {
             Ok(socket) => {
+                failures = 0;
                 let ended = listen_on(socket, live, sender, again);
                 live.store(false, Ordering::Relaxed);
                 if ended == Ended::Closed || sender.send(Signal::Down).is_err() {
@@ -185,7 +193,12 @@ fn keep_listening(client: &Client, live: &AtomicBool, sender: &Sender<Signal>) {
             // The poll reports a dead session; another try would not help.
             Err(api::Error::Auth { .. }) => return,
             // The poll covers until the socket is back.
-            Err(_) => {}
+            Err(err) => {
+                failures += 1;
+                if failures == FAILURES_TOLD && sender.send(Signal::Off(err.to_string())).is_err() {
+                    return;
+                }
+            }
         }
         if began.elapsed() >= STEADY {
             wait = FIRST_WAIT;

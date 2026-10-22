@@ -673,6 +673,13 @@ impl App<'_> {
             let asked = match signal {
                 Signal::Up { again: true } => Wake::Reload,
                 Signal::Up { again: false } | Signal::Down => Wake::Check,
+                Signal::Off(reason) => {
+                    self.state.status = Some(format!(
+                        "Live updates are off ({reason}); checking Slack every {} seconds",
+                        POLL_EVERY.as_secs()
+                    ));
+                    Wake::Nothing
+                }
                 Signal::Event(event) => self.state.hear(event, now),
             };
             wake = wake.max(asked);
