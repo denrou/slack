@@ -1073,16 +1073,20 @@ impl State {
                     item.loaded = false;
                 }
             }
-            return if self.reloads_message(channel, &posted.ts) {
+            return if self.shows_message(channel, &posted.ts, false) {
                 Wake::Reload
             } else {
                 Wake::Nothing
             };
         }
         // Yours, sent from here or from another client: the cursor it
-        // moves comes as an event of its own.
+        // moves comes as an event of its own. A reply from another client
+        // is still missing from its thread on the screen.
         if posted.user.is_some() && posted.user == self.me {
-            return Wake::Nothing;
+            let missing = posted.reply_to().is_some_and(|root| {
+                self.shows_thread(channel, root) && !self.shows_message(channel, &posted.ts, true)
+            });
+            return if missing { Wake::Reload } else { Wake::Nothing };
         }
         let Some(root) = posted.reply_to() else {
             return Wake::Check;
@@ -1114,12 +1118,15 @@ impl State {
             .collect()
     }
 
-    /// The message is on the screen where a reload reads it again: an
-    /// opened conversation keeps the history it was opened with.
-    fn reloads_message(&self, channel: &str, ts: &str) -> bool {
+    /// The message is on the screen, and with `browsed` false only where a
+    /// reload reads it again: an opened conversation keeps the history it
+    /// was opened with.
+    fn shows_message(&self, channel: &str, ts: &str, browsed: bool) -> bool {
         let has = |messages: &[Message]| messages.iter().any(|message| message.ts == ts);
         self.items.iter().any(|item| {
-            item.channel == channel && !item.section.is_browsed() && has(&item.messages)
+            item.channel == channel
+                && (browsed || !item.section.is_browsed())
+                && has(&item.messages)
         }) || self
             .thread
             .as_ref()
@@ -3733,6 +3740,16 @@ mod tests {
             state.hear_now(posted("C2", "5.0", Some("2.000100"), "U1")),
             Wake::Reload,
             "a reply in a listed thread"
+        );
+        assert_eq!(
+            state.hear_now(posted("C2", "5.0", Some("2.000100"), "U7")),
+            Wake::Reload,
+            "yours from another client, missing from the thread"
+        );
+        assert_eq!(
+            state.hear_now(posted("C2", "1.000200", Some("2.000100"), "U7")),
+            Wake::Nothing,
+            "yours, already shown"
         );
         state.thread = Some(ThreadPane {
             channel: "C1".into(),
