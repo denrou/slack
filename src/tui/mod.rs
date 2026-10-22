@@ -84,12 +84,12 @@ fn screen(
         pulse: Pulse::of(&counts),
         visited: Visited::of(&counts),
         resting: None,
-        preview_failed: None,
         polls: poll(client.clone(), Arc::clone(&live), nudged),
         signals: rtm::listen(client.clone(), live),
         nudges,
         written: Instant::now(),
         poll_error: None,
+        owed: false,
     };
     app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
@@ -345,9 +345,6 @@ struct App<'a> {
     visited: Visited,
     /// The recent conversation the cursor rests on, and since when.
     resting: Option<(String, Instant)>,
-    /// A recent conversation whose history failed to load: not tried
-    /// again until the cursor leaves it.
-    preview_failed: Option<String>,
     polls: Receiver<Polled>,
     signals: Receiver<Signal>,
     /// To the poll: fetch now, and reload whatever the counts say if true.
@@ -357,6 +354,9 @@ struct App<'a> {
     written: Instant,
     /// The status line a failed poll put up, for the next good one to clear.
     poll_error: Option<String>,
+    /// A reload the socket asked for and no poll has done yet: a poll that
+    /// fails would otherwise drop it, and the counts may never show why.
+    owed: bool,
 }
 
 impl App<'_> {
@@ -401,12 +401,12 @@ impl App<'_> {
         match &self.resting {
             Some((resting, since)) if resting == channel => {
                 let waiting = matches!(self.state.mode, Mode::Browse)
-                    && self.preview_failed.as_ref() != Some(channel);
+                    && self.state.preview_failed.as_ref() != Some(channel);
                 waiting.then(|| PREVIEW_AFTER.saturating_sub(since.elapsed()))
             }
             _ => {
                 self.resting = Some((channel.clone(), Instant::now()));
-                self.preview_failed = None;
+                self.state.preview_failed = None;
                 Some(PREVIEW_AFTER)
             }
         }
@@ -424,7 +424,7 @@ impl App<'_> {
                 Ok(())
             }
             Err(err) => {
-                self.preview_failed = Some(channel);
+                self.state.preview_failed = Some(channel);
                 self.fail(err)
             }
         }
@@ -691,6 +691,9 @@ impl App<'_> {
         let Some(Polled { began, counts, .. }) = latest else {
             return Ok(());
         };
+        // Held until a reload does it, whichever way this poll ends.
+        force |= self.owed;
+        self.owed = force;
         if began < self.written {
             // What the socket asked for still holds.
             if force {
@@ -761,6 +764,8 @@ impl App<'_> {
         self.state.frequent_emoji.clone_from(&counts.frequent_emoji);
         self.pulse = Pulse::of(counts);
         self.visited = Visited::of(counts);
+        self.owed = false;
+        self.state.preview_failed = None;
         if let Some(pane) = self.state.thread.take() {
             let reloaded = self
                 .reload_thread(&pane)

@@ -361,11 +361,16 @@ fn draw_messages(
     let mut lines: Vec<Line> = Vec::new();
     if !in_thread
         && messages.is_empty()
-        && state
+        && let Some(item) = state
             .selected_item()
-            .is_some_and(|item| item.section.is_recent() && !item.loaded)
+            .filter(|item| item.section.is_recent() && !item.loaded)
     {
-        lines.push(Line::from("Loading…").dim());
+        let text = if state.preview_failed.as_ref() == Some(&item.channel) {
+            "Could not load this conversation; Ctrl-R tries again."
+        } else {
+            "Loading…"
+        };
+        lines.push(Line::from(text).dim());
     }
     if has_more && history {
         lines.push(Line::from("earlier messages not shown").dim());
@@ -967,6 +972,22 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    #[test]
+    fn a_recent_conversation_says_when_its_history_failed() {
+        let mut state = history(&[] as &[&str], None);
+        state.items[0].section = Section::RecentChannels;
+        state.items[0].loaded = false;
+        let shows = |state: &State, text: &str| {
+            let (buffer, _) = render(state, 100, 12);
+            (0..12).any(|y| row(&buffer, y).contains(text))
+        };
+        assert!(shows(&state, "Loading…"));
+
+        state.preview_failed = Some("C1".to_string());
+        assert!(shows(&state, "Could not load this conversation"));
+        assert!(!shows(&state, "Loading…"));
     }
 
     #[test]

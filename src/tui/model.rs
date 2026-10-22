@@ -889,6 +889,9 @@ pub struct State {
     pub typing: Typing,
     /// The search `/` brings back once it is closed or a hit is opened.
     pub last_search: Option<Search>,
+    /// A recent conversation whose history failed to load: not tried
+    /// again until the cursor leaves it or a reload.
+    pub preview_failed: Option<String>,
 }
 
 impl State {
@@ -911,6 +914,7 @@ impl State {
             checked: BTreeMap::new(),
             typing: BTreeMap::new(),
             last_search: None,
+            preview_failed: None,
         }
     }
 
