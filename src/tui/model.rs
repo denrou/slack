@@ -3724,6 +3724,12 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_covers_a_check() {
+        // `App::heard` keeps the strongest of a batch with `max`.
+        assert!(Wake::Nothing < Wake::Check && Wake::Check < Wake::Reload);
+    }
+
+    #[test]
     fn the_socket_reloads_only_for_what_the_counts_would_miss() {
         let mut state = state();
         state.me = Some("U7".into());

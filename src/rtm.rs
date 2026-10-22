@@ -360,30 +360,44 @@ mod tests {
             "mpim_marked",
             "group_marked",
             "thread_marked",
+            "pref_change",
         ] {
             let frame = json!({"type": kind, "channel": "D1", "ts": "1.0"});
             assert_eq!(Event::parse(&frame), Some(Event::Moved), "{kind}");
         }
-        let frame = json!({
-            "type": "reaction_removed", "user": "U2", "reaction": "eyes",
-            "item": {"type": "message", "channel": "C1", "ts": "2.0"}, "event_ts": "5.0"
-        });
-        assert_eq!(
-            Event::parse(&frame),
-            Some(Event::Reaction {
-                channel: "C1".to_string(),
-                ts: "2.0".to_string(),
-                user: "U2".to_string(),
-                name: "eyes".to_string(),
-                add: false,
-            })
-        );
+        for (kind, add) in [("reaction_added", true), ("reaction_removed", false)] {
+            let frame = json!({
+                "type": kind, "user": "U2", "reaction": "eyes",
+                "item": {"type": "message", "channel": "C1", "ts": "2.0"}, "event_ts": "5.0"
+            });
+            assert_eq!(
+                Event::parse(&frame),
+                Some(Event::Reaction {
+                    channel: "C1".to_string(),
+                    ts: "2.0".to_string(),
+                    user: "U2".to_string(),
+                    name: "eyes".to_string(),
+                    add,
+                }),
+                "{kind}"
+            );
+        }
         let frame = json!({"type": "user_typing", "channel": "D1", "user": "U2"});
         assert_eq!(
             Event::parse(&frame),
             Some(Event::Typing {
                 channel: "D1".to_string(),
                 thread_ts: None,
+                user: "U2".to_string(),
+            })
+        );
+        let frame =
+            json!({"type": "user_typing", "channel": "C1", "thread_ts": "2.0", "user": "U2"});
+        assert_eq!(
+            Event::parse(&frame),
+            Some(Event::Typing {
+                channel: "C1".to_string(),
+                thread_ts: Some("2.0".to_string()),
                 user: "U2".to_string(),
             })
         );
