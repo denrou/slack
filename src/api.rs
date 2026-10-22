@@ -2,14 +2,16 @@
 //! authenticated the way the web client does it, with the `xoxc` token in
 //! the body and the `xoxd` session cookie. Commands never see the headers.
 
-use std::net::TcpStream;
+use std::io::ErrorKind;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
+use tungstenite::HandshakeError;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::error::UrlError;
-use tungstenite::http::HeaderValue;
+use tungstenite::http::{HeaderValue, Uri};
 use tungstenite::stream::MaybeTlsStream;
 
 use crate::auth::capture;
@@ -69,6 +71,26 @@ pub enum Error {
 
 /// Slack's real-time socket, as `Client::socket` opens it.
 pub type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
+
+/// A connection to the socket's host with timeouts, which the handshake
+/// keeps: a middlebox that never answers would hold it forever otherwise.
+fn open_stream(uri: &Uri) -> std::io::Result<TcpStream> {
+    let host = uri
+        .host()
+        .ok_or_else(|| std::io::Error::from(ErrorKind::InvalidInput))?;
+    let mut failed = std::io::Error::from(ErrorKind::NotFound);
+    for addr in (host, uri.port_u16().unwrap_or(443)).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, TIMEOUT) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(TIMEOUT))?;
+                stream.set_write_timeout(Some(TIMEOUT))?;
+                return Ok(stream);
+            }
+            Err(err) => failed = err,
+        }
+    }
+    Err(failed)
+}
 
 /// Why the socket did not open, without the URL tungstenite would quote.
 fn socket_reason(err: &tungstenite::Error) -> String {
@@ -192,10 +214,18 @@ impl Client {
                 .map_err(|_| socket_error(format!("a `{name}` header that is not text")))?;
             headers.insert(name, value);
         }
-        // Deliberate: no redirect is followed, since it would take the
-        // cookie to a host `is_slack_socket_url` never saw.
-        let (socket, _response) = tungstenite::client::connect_with_config(request, None, 0)
-            .map_err(|err| socket_error(socket_reason(&err)))?;
+        // Deliberate: not `tungstenite::connect`, which has no timeout and
+        // follows redirects, the cookie with them, to a host
+        // `is_slack_socket_url` never saw.
+        let stream = open_stream(request.uri())
+            .map_err(|err| socket_error(format!("could not connect: {err}")))?;
+        let (socket, _response) =
+            tungstenite::client_tls(request, stream).map_err(|err| match err {
+                HandshakeError::Failure(err) => socket_error(socket_reason(&err)),
+                HandshakeError::Interrupted(_) => {
+                    socket_error("the handshake timed out".to_string())
+                }
+            })?;
         Ok(socket)
     }
 
