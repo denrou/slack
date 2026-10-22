@@ -3,7 +3,7 @@
 use jiff::Zoned;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -20,6 +20,10 @@ const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  r reply to it  R 
 const THREAD_HINTS: &str = "j/k move  r reply in the thread  R react  u open link  y copy link  O in Slack  h back  q quit";
 const CHECKED_HINTS: &str =
     "x select or unselect  e mark them read  Esc unselect  j/k move  q quit";
+
+/// The highlighted row: the terminal theme's own grey, softer than reversing
+/// the colours, which flips the whole row to white on a dark theme.
+const HIGHLIGHT: Style = Style::new().bg(Color::DarkGray);
 
 const HELP: &[&str] = &[
     "j, k, arrows    move through the list, or through the messages",
@@ -124,7 +128,7 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
         n => format!(" slack · {listed} · {n} selected "),
     };
     let highlight = if state.focus == Focus::List {
-        Style::new().add_modifier(Modifier::REVERSED)
+        HIGHLIGHT
     } else {
         Style::new().add_modifier(Modifier::BOLD)
     };
@@ -138,7 +142,7 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
 
 /// The picker takes the list's place: the filter in the title, the
 /// matching choices below, the marked people ticked, the selected one
-/// highlighted (reversed when the keys move the list, bold while they
+/// highlighted (on grey when the keys move the list, bold while they
 /// type the filter).
 fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     let matches = picker.matches();
@@ -174,7 +178,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     let highlight = if picker.filtering {
         Style::new().add_modifier(Modifier::BOLD)
     } else {
-        Style::new().add_modifier(Modifier::REVERSED)
+        HIGHLIGHT
     };
     let list = List::new(lines)
         .block(Block::bordered().title(title))
@@ -233,7 +237,7 @@ fn draw_search(frame: &mut Frame, area: Rect, search: &Search, names: &Names, no
     let highlight = if search.typing {
         Style::new().add_modifier(Modifier::BOLD)
     } else {
-        Style::new().add_modifier(Modifier::REVERSED)
+        HIGHLIGHT
     };
     let list = List::new(lines).block(block).highlight_style(highlight);
     let selected = (!search.hits.is_empty()).then(|| search.selected.min(search.hits.len() - 1));
@@ -613,9 +617,7 @@ fn draw_messages(
                 width: inner.width,
                 height: (bottom - top) as u16,
             };
-            frame
-                .buffer_mut()
-                .set_style(block, Style::new().add_modifier(Modifier::REVERSED));
+            frame.buffer_mut().set_style(block, HIGHLIGHT);
         }
     }
     Viewport {
@@ -654,7 +656,7 @@ fn list_rows(completion: &Completion) -> u16 {
 }
 
 /// The completion list, right above the reply box: what the typed word
-/// begins, the highlighted entry reversed.
+/// begins, the highlighted entry on grey.
 fn draw_completion(frame: &mut Frame, area: Rect, state: &State, completion: &Completion) {
     let candidates = state.candidates.as_deref().unwrap_or_default();
     let lines: Vec<ListItem> = completion
@@ -687,7 +689,7 @@ fn draw_completion(frame: &mut Frame, area: Rect, state: &State, completion: &Co
     );
     let list = List::new(lines)
         .block(Block::bordered().title(title))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        .highlight_style(HIGHLIGHT);
     let mut list_state = ListState::default().with_selected(Some(completion.pick));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -831,7 +833,7 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                     Span::styled(note, Style::new().dim()),
                 ]);
                 lines.push(if at == pick {
-                    line.style(Style::new().add_modifier(Modifier::REVERSED))
+                    line.style(HIGHLIGHT)
                 } else {
                     line
                 });
@@ -1181,7 +1183,7 @@ mod tests {
         );
         let last = row_with(&buffer, "reply 40").expect("the highlighted reply");
         let x = column_of(&buffer, last, "reply 40").unwrap();
-        assert!(has(&buffer, x, last, Modifier::REVERSED));
+        assert!(highlighted(&buffer, x, last));
 
         state.thread = None;
         state.items[0].section = Section::Channels;
@@ -1209,9 +1211,13 @@ mod tests {
         buffer[(x, y)].style().add_modifier.contains(modifier)
     }
 
+    fn highlighted(buffer: &Buffer, x: u16, y: u16) -> bool {
+        buffer[(x, y)].bg == Color::DarkGray
+    }
+
     /// The pane reaches the right edge: its last inner column is one in.
-    fn reversed(buffer: &Buffer, y: u16) -> bool {
-        has(buffer, buffer.area.width - 2, y, Modifier::REVERSED)
+    fn highlighted_row(buffer: &Buffer, y: u16) -> bool {
+        highlighted(buffer, buffer.area.width - 2, y)
     }
 
     #[test]
@@ -1287,11 +1293,8 @@ mod tests {
         assert!(row_with(&buffer, " 2 people · ").is_some());
         assert!(row_with(&buffer, "Tab picks, Esc closes the list").is_some());
         let x = column_of(&buffer, list, "@jdoe").expect("the entry");
-        assert!(
-            has(&buffer, x, list, Modifier::REVERSED),
-            "the first is highlighted"
-        );
-        assert!(!has(&buffer, x, list + 1, Modifier::REVERSED));
+        assert!(highlighted(&buffer, x, list), "the first is highlighted");
+        assert!(!highlighted(&buffer, x, list + 1));
 
         state.key(press(KeyCode::Esc));
         let (buffer, _) = render(&state, 100, 30);
@@ -1322,13 +1325,13 @@ mod tests {
         assert!(separator > first + 1, "the message wraps over several rows");
         for y in first..separator {
             assert!(
-                reversed(&buffer, y),
+                highlighted_row(&buffer, y),
                 "row {y} of the message is highlighted"
             );
         }
-        assert!(!reversed(&buffer, first - 1));
-        assert!(!reversed(&buffer, separator));
-        assert!(!reversed(&buffer, separator + 1));
+        assert!(!highlighted_row(&buffer, first - 1));
+        assert!(!highlighted_row(&buffer, separator));
+        assert!(!highlighted_row(&buffer, separator + 1));
     }
 
     #[test]
@@ -1370,10 +1373,10 @@ mod tests {
             rows[3]
         );
         assert!(
-            has(&buffer, 1, 3, Modifier::REVERSED) && has(&buffer, 1, 4, Modifier::REVERSED),
+            highlighted(&buffer, 1, 3) && highlighted(&buffer, 1, 4),
             "the hit is highlighted, both its lines"
         );
-        assert!(!has(&buffer, 1, 1, Modifier::REVERSED));
+        assert!(!highlighted(&buffer, 1, 1));
         assert!(
             rows[2].contains("then it worked"),
             "the pane has it whole: {}",
