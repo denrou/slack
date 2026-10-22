@@ -3608,7 +3608,6 @@ mod tests {
             thread_ts: None,
             user: Some("U2".to_string()),
             changed: true,
-            broadcast: false,
         });
         assert_eq!(
             state.hear(edit, Instant::now()),
@@ -3693,7 +3692,6 @@ mod tests {
             thread_ts: thread_ts.map(str::to_string),
             user: Some(user.to_string()),
             changed: false,
-            broadcast: false,
         })
     }
 

@@ -75,17 +75,13 @@ pub struct Posted {
     pub user: Option<String>,
     /// An edit or a deletion rather than a new message.
     pub changed: bool,
-    /// A reply also sent to the channel.
-    pub broadcast: bool,
 }
 
 impl Posted {
-    /// The root of the thread it is a reply in, unless it went to the
-    /// channel too.
+    /// The root of the thread it is a reply in, even one also sent to the
+    /// channel, whose part the counts see.
     pub fn reply_to(&self) -> Option<&str> {
-        self.thread_ts
-            .as_deref()
-            .filter(|root| *root != self.ts && !self.broadcast)
+        self.thread_ts.as_deref().filter(|root| *root != self.ts)
     }
 }
 
@@ -108,7 +104,6 @@ impl Event {
                             thread_ts: text(message, "thread_ts"),
                             user: text(message, "user"),
                             changed: true,
-                            broadcast: false,
                         }
                     }
                     Some("message_deleted") => {
@@ -119,7 +114,6 @@ impl Event {
                             thread_ts: previous.and_then(|message| text(message, "thread_ts")),
                             user: previous.and_then(|message| text(message, "user")),
                             changed: true,
-                            broadcast: false,
                         }
                     }
                     // The root's new reply count; the reply comes on its own.
@@ -130,7 +124,6 @@ impl Event {
                         thread_ts: text(frame, "thread_ts"),
                         user: text(frame, "user"),
                         changed: false,
-                        broadcast: subtype == Some("thread_broadcast"),
                     },
                 };
                 Some(Event::Message(posted))
@@ -276,7 +269,6 @@ mod tests {
             thread_ts: thread_ts.map(str::to_string),
             user: Some(user.to_string()),
             changed: false,
-            broadcast: false,
         }
     }
 
@@ -299,8 +291,7 @@ mod tests {
         let Some(Event::Message(broadcast)) = Event::parse(&broadcast) else {
             panic!("a broadcast is a message");
         };
-        assert!(broadcast.broadcast);
-        assert_eq!(broadcast.reply_to(), None, "it is in the channel too");
+        assert_eq!(broadcast.reply_to(), Some("2.0"), "in the thread too");
 
         let root = json!({"type": "message", "channel": "C1", "user": "U1", "ts": "2.0", "thread_ts": "2.0"});
         let Some(Event::Message(root)) = Event::parse(&root) else {
