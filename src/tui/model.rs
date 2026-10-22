@@ -546,6 +546,9 @@ pub struct Draft {
     /// The highlighted entry of the completion list, None once Esc closed
     /// the list; typing opens it again.
     pub pick: Option<usize>,
+    /// The text as typed, while the box holds its correction: Ctrl-G
+    /// again brings it back, until an edit makes the correction yours.
+    pub typed: Option<String>,
 }
 
 impl Draft {
@@ -554,6 +557,7 @@ impl Draft {
             text: String::new(),
             thread_ts,
             pick: Some(0),
+            typed: None,
         }
     }
 
@@ -809,6 +813,11 @@ pub enum Action {
         name: String,
         add: bool,
     },
+    /// Correct the reply box's text with the configured command, the box
+    /// staying open for the result.
+    Fix {
+        text: String,
+    },
     /// Ask Slack's search, the search mode staying open for the hits.
     Search {
         query: String,
@@ -875,6 +884,8 @@ pub struct State {
     /// What the reply box completes, once loaded (empty after a failed
     /// load, so the box works without a list).
     pub candidates: Option<Vec<Candidate>>,
+    /// Whether the config names a command that corrects a draft.
+    pub fixes: bool,
     pub me: Option<String>,
     /// Slack's most used emoji, which the `R` prompt offers first.
     pub frequent_emoji: Vec<String>,
@@ -909,6 +920,7 @@ impl State {
             viewport: Viewport::default(),
             pending_g: false,
             candidates: None,
+            fixes: false,
             frequent_emoji: Vec::new(),
             checked: BTreeMap::new(),
             typing: BTreeMap::new(),
@@ -1674,8 +1686,8 @@ impl State {
     }
 
     /// A key into the text of the reply box: Enter sends it, a line break
-    /// goes into it, a deleting key (`Cut`) takes from its end, Esc drops
-    /// it.
+    /// goes into it, a deleting key (`Cut`) takes from its end, Ctrl-G
+    /// corrects it or takes the correction back, Esc drops it.
     fn edit(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
         if let Some(cut) = Cut::of(key) {
             cut.apply(&mut draft.text);
@@ -1702,6 +1714,7 @@ impl State {
                     None => Action::None,
                 }
             }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => self.fix(draft),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 draft.text.push(c);
                 self.typed(draft)
@@ -1713,10 +1726,48 @@ impl State {
         }
     }
 
+    /// Ctrl-G: the text as typed back when the box holds its correction,
+    /// else a correction asked of the configured command.
+    fn fix(&mut self, mut draft: Draft) -> Action {
+        let action = if let Some(typed) = draft.typed.take() {
+            draft.text = typed;
+            self.status = Some("Back to your text".to_string());
+            Action::None
+        } else if !self.fixes {
+            self.status = Some("Set fix_command in ~/.config/slack/config.toml first".to_string());
+            Action::None
+        } else if draft.text.trim().is_empty() {
+            Action::None
+        } else {
+            Action::Fix {
+                text: draft.text.clone(),
+            }
+        };
+        self.mode = Mode::Compose(draft);
+        action
+    }
+
+    /// The correction of `typed` arrived: the box shows it, unless the
+    /// box was left meanwhile or the command found nothing to correct.
+    pub fn fixed(&mut self, typed: String, fixed: String) {
+        let Mode::Compose(draft) = &mut self.mode else {
+            return;
+        };
+        if fixed == typed.trim() {
+            self.status = Some("Nothing to correct".to_string());
+            return;
+        }
+        draft.text = fixed;
+        draft.typed = Some(typed);
+        draft.pick = None;
+        self.status = Some("Corrected · Ctrl-G takes it back".to_string());
+    }
+
     /// The text changed: the completion list opens again, and the names
     /// it needs are loaded the first time a `@` or `#` word appears.
     fn typed(&mut self, mut draft: Draft) -> Action {
         draft.pick = Some(0);
+        draft.typed = None;
         let load = self.candidates.is_none() && completing(&draft.text).is_some();
         self.mode = Mode::Compose(draft);
         if load {
@@ -3354,6 +3405,76 @@ mod tests {
         assert_eq!(cut("one\ntwo", Cut::Line), "one\n");
         assert_eq!(cut("", Cut::Char), "");
         assert_eq!(cut("é", Cut::Char), "");
+    }
+
+    fn draft_text(state: &State) -> &str {
+        match &state.mode {
+            Mode::Compose(draft) => &draft.text,
+            mode => panic!("not composing: {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_g_corrects_the_draft_and_again_takes_it_back() {
+        let mut state = state();
+        state.fixes = true;
+        state.key(press(KeyCode::Char('r')));
+        state.paste("ca va ");
+        assert_eq!(
+            state.key(control('g')),
+            Action::Fix {
+                text: "ca va ".to_string()
+            }
+        );
+        state.fixed("ca va ".to_string(), "ça va".to_string());
+        assert_eq!(draft_text(&state), "ça va");
+        assert_eq!(state.key(control('g')), Action::None);
+        assert_eq!(draft_text(&state), "ca va ");
+        assert_eq!(state.status.as_deref(), Some("Back to your text"));
+        // Taken back, Ctrl-G asks for a correction again.
+        assert!(matches!(state.key(control('g')), Action::Fix { .. }));
+    }
+
+    #[test]
+    fn an_edit_after_a_correction_keeps_it() {
+        let mut state = state();
+        state.fixes = true;
+        state.key(press(KeyCode::Char('r')));
+        state.paste("ca va");
+        state.fixed("ca va".to_string(), "ça va".to_string());
+        state.key(press(KeyCode::Char('?')));
+        assert!(matches!(state.key(control('g')), Action::Fix { text } if text == "ça va?"));
+    }
+
+    #[test]
+    fn a_correction_that_changes_nothing_says_so() {
+        let mut state = state();
+        state.fixes = true;
+        state.key(press(KeyCode::Char('r')));
+        state.paste("ça va\n");
+        state.fixed("ça va\n".to_string(), "ça va".to_string());
+        assert_eq!(draft_text(&state), "ça va\n");
+        assert_eq!(state.status.as_deref(), Some("Nothing to correct"));
+        assert!(matches!(state.key(control('g')), Action::Fix { .. }));
+    }
+
+    #[test]
+    fn ctrl_g_without_a_command_says_where_to_set_one() {
+        let mut state = state();
+        state.key(press(KeyCode::Char('r')));
+        state.paste("ca va");
+        assert_eq!(state.key(control('g')), Action::None);
+        assert!(state.status.as_deref().unwrap().contains("fix_command"));
+        assert_eq!(draft_text(&state), "ca va");
+    }
+
+    #[test]
+    fn a_correction_after_the_box_closed_is_dropped() {
+        let mut state = state();
+        state.fixes = true;
+        state.fixed("ca va".to_string(), "ça va".to_string());
+        assert_eq!(state.mode, Mode::Browse);
+        assert_eq!(state.status, None);
     }
 
     #[test]

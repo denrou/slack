@@ -36,6 +36,7 @@ const HELP: &[&str] = &[
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "Ctrl-J          a new line in the reply box (Ctrl-Enter, Shift-Enter too where the terminal reports them)",
     "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
+    "Ctrl-G          in the reply box, correct the accents and typos with fix_command (config.toml); again, your text back",
     "e               mark it as read, or close it, unmarked, if you opened it; with a selection, all of the selection",
     "x               select the conversation for e, or unselect it",
     "u, y            open, or copy, a link of the highlighted message",
@@ -746,6 +747,9 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 None if completion.is_some() => {
                     format!("{title} · Tab picks, Esc closes the list ")
                 }
+                None if state.fixes => format!(
+                    "{title} · Enter sends, Ctrl-G corrects, Ctrl-J a new line, Esc cancels "
+                ),
                 None => format!("{title} · Enter sends, Ctrl-J a new line, Esc cancels "),
             };
             let mut lines = styled_lines(&mrkdwn::draft(text), true);
@@ -1293,6 +1297,11 @@ mod tests {
         let (buffer, _) = render(&state, 100, 30);
         assert!(row_with(&buffer, "@jdoe").is_none(), "Esc closes the list");
         assert!(row_with(&buffer, "Enter sends, Ctrl-J a new line, Esc cancels").is_some());
+
+        // The correction key is offered only when a command is set.
+        state.fixes = true;
+        let (buffer, _) = render(&state, 120, 30);
+        assert!(row_with(&buffer, "Enter sends, Ctrl-G corrects, Ctrl-J").is_some());
         state.status = Some("Error: channel_not_found".to_string());
         let (buffer, _) = render(&state, 100, 30);
         assert!(

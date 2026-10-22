@@ -92,6 +92,7 @@ In WezTerm and Ghostty the screen also notifies you when a message aimed at you 
 | `r`               | Reply: to the conversation, to the highlighted message, or in the open thread                                                     |
 | Ctrl-J            | A new line in the reply box (Ctrl-Enter and Shift-Enter too, where the terminal tells them from Enter)                            |
 | Ctrl-W, Ctrl-U    | Take the last word, the line, back in the reply box (Option-Backspace and Command-Backspace too, where the terminal reports them) |
+| Ctrl-G            | Correct the accents, typos and grammar of the reply box with your `fix_command`; again, your own text back                        |
 | `s`               | A message to the conversation, wherever you are in it                                                                             |
 | `c`               | Compose: pick a channel or people (Tab marks several as you type), then write                                                     |
 | `o`               | Open a channel or group you are in, or a person (type to filter, `m` shows the muted)                                             |
@@ -108,6 +109,14 @@ In WezTerm and Ghostty the screen also notifies you when a message aimed at you 
 The keys follow three rules: `q` and Ctrl-C quit from anywhere, `Esc` and `h` back out of whatever is open (the picker, a prompt, the reply box, a thread, the pane; at the list, `Esc` alone also unselects) and never quit, and moving is vim's, `gg`, `G`, Ctrl-D and friends included. From the list the Ctrl keys scroll the pane; in the pane they move the highlighted message by as many messages as the screen shows.
 
 A reply to a conversation marks it as read up to your message, as in the app, and it leaves the list; a reply inside a thread shows the thread again with your message, and a reply to a message from the pane leaves the conversation listed, since it stays unread in Slack. Enter sends a reply and Ctrl-J starts a new line in it. Ctrl-Enter and Shift-Enter (Slack's own key) do the same in a terminal that speaks the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/), which `slack` asks for when the screen opens; in any other terminal both are plain Enter and send. Backspace takes a character back, Ctrl-W the last word and Ctrl-U the line; Option-Backspace and Command-Backspace do the same where the terminal reports them apart from Backspace, which takes the same protocol for the Command one. Pasted text keeps its line breaks. `slack send` with stdin takes a long message. In the box, `@` and `#` complete people and channels: a list opens above the box as you type, Up/Down move in it, Tab or Enter take the highlighted entry, Esc closes it. On sending, from the box or from `slack send`, an `@handle` or a `#channel` the name cache knows becomes a real mention; `@here` and `@channel` stay plain text.
+
+Ctrl-G in the box corrects what you typed: the accents a QWERTY keyboard leaves out, the typos and the grammar, never the wording. The correction replaces the text in the box for you to read before Enter sends it, and Ctrl-G again, before any other key changes the text, brings back what you typed. The model is a command of your choice, set in `~/.config/slack/config.toml`; it reads the instructions and your text on stdin and prints the corrected text, and runs through `sh -c` from the temporary directory. With Claude Code:
+
+```toml
+fix_command = "claude -p --model haiku --tools '' --system-prompt 'You correct text and reply with the corrected text alone.' --no-session-persistence --strict-mcp-config"
+```
+
+The flags keep `claude` a plain model rather than an agent: no tools, no MCP servers, its own system prompt, no session saved. A correction takes two to four seconds with Haiku. Your draft goes to whoever runs the model, Anthropic here; `ollama run <model>` keeps it on your machine.
 
 Without a terminal on both ends, as in a pipe or a script, `slack` prints what `slack unreads` prints instead of drawing.
 
@@ -146,7 +155,7 @@ ln -s "$PWD/skills/slack" ~/.claude/skills/slack
 
 ## Files
 
-`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
+`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json`, `browser-profile/`, and `config.toml` if you write one (its one setting is `fix_command`, above). `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
 
 ## Releasing
 

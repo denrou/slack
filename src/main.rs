@@ -4,9 +4,11 @@
 mod api;
 mod auth;
 mod commands;
+mod config;
 mod counts;
 mod directory;
 mod emoji;
+mod fix;
 mod history;
 mod lastview;
 mod mention;

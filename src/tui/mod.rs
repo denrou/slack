@@ -36,6 +36,7 @@ use self::model::{
     State, ThreadPane, Viewport, Wake,
 };
 use crate::api::{self, Client};
+use crate::config::Config;
 use crate::counts::{Conversation, Counts, Kind};
 use crate::directory::{self, Listed};
 use crate::history::{self, Message};
@@ -43,7 +44,7 @@ use crate::names::Names;
 use crate::rtm::{self, Posted, Signal};
 use crate::search::{self, Found, Hit};
 use crate::{
-    counts, emoji, lastview, mention, mrkdwn, notify, react, read, replies, target, view, warn,
+    counts, emoji, fix, lastview, mention, mrkdwn, notify, react, read, replies, target, view, warn,
 };
 
 pub fn run(
@@ -75,6 +76,15 @@ fn screen(
     let recent = recent(client, names, &counts, 0)?;
     let mut state = State::new(Vec::new(), me.map(str::to_string));
     state.replace_items(Some(items), recent);
+    // A config that does not read must not keep you from Slack: the box
+    // just cannot correct.
+    let fix_command = Config::load()
+        .unwrap_or_else(|err| {
+            warn::warn(format!("{err:#}"));
+            Config::default()
+        })
+        .fix_command;
+    state.fixes = fix_command.is_some();
     let live = Arc::new(AtomicBool::new(false));
     let (nudges, nudged) = mpsc::channel();
     let term_program = env::var("TERM_PROGRAM").ok();
@@ -99,6 +109,7 @@ fn screen(
         written: Instant::now(),
         poll_error: None,
         owed: false,
+        fix_command,
     };
     app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
@@ -401,6 +412,8 @@ struct App<'a> {
     /// When the heartbeat was last written, None while there is none.
     beat: Option<Instant>,
     muted: BTreeSet<String>,
+    /// What corrects a draft on Ctrl-G, from the config.
+    fix_command: Option<String>,
 }
 
 impl App<'_> {
@@ -564,6 +577,7 @@ impl App<'_> {
                             text,
                             thread_ts,
                             pick: None,
+                            typed: None,
                         });
                         self.fail(err)
                     }
@@ -659,6 +673,19 @@ impl App<'_> {
                 self.busy(terminal, &format!("Loading {}…", choice.label))?;
                 match self.show(&choice) {
                     Ok(item) => self.opened(item, compose),
+                    Err(err) => self.fail(err),
+                }
+            }
+            Action::Fix { text } => {
+                let Some(command) = self.fix_command.clone() else {
+                    return Ok(());
+                };
+                self.busy(terminal, "Correcting…")?;
+                match fix::run(&command, &text) {
+                    Ok(fixed) => {
+                        self.state.fixed(text, fixed);
+                        Ok(())
+                    }
                     Err(err) => self.fail(err),
                 }
             }
