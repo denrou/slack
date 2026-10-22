@@ -105,6 +105,19 @@ Deferred on purpose by the review of 2026-10-21 (`v0.14.0..main`):
 - `slack search` indents the permalink by copying `render_messages`' gutter (`commands.rs`); it drifts if that gutter changes, which a glance at the output shows.
 - Untested, since each needs a pure function pulled out of `App` or `history::around` first: the owed reload and the re-nudge of a dropped poll, `Visited::of`, `read_in_place`, and the merge of the two pages around a search hit.
 
+Deferred on purpose by the review of 2026-10-22 (`v0.15.0..main`):
+
+- A DM that comes in while the reply box, the picker or the search is open shows nowhere until it closes: the terminal has the focus, so nothing is notified, and no reload runs outside the list. Notifying then would post while you type in the terminal; a mark on the box's border may be the smaller answer, to weigh once it is felt.
+- The notifications' mute set is built from the conversations `client.counts` lists, so a closed muted DM is notified as direct, and a startup without the preferences notifies every muted conversation's `@here` until the next good poll. A muted DM is rare, and startup has no earlier list to fall back on.
+- `notifying` is claimed from `TERM_PROGRAM` alone: Zellij or screen inside WezTerm, or a terminal macOS does not let notify, silences the screen and the fallback both. The first DM shows it; a `notify` key in `config.toml` is the way out if it happens.
+- Messages heard nowhere while the socket reconnects are shown by the reload but not notified, and after a laptop wakes the heartbeat is renewed for up to a minute on a dead socket. A note counting what `@ME` gained across a reconnect would cover both.
+- A heartbeat that cannot be written is tried again on every pass and never reported; the fallback notifies meanwhile, twice rather than never.
+- The channel lookup a notification needs on a miss runs on the screen's thread while it is unfocused: once per new conversation, then cached.
+- `fix::run` runs on the screen's thread, as every action does (blocking I/O, above), so a cold `claude -p` freezes the screen for its 10 to 20 seconds; running it on a thread is ready to do, since `State::fixed` already drops a stale answer. Its deadline does not cover the read of the answer once `sh` has exited, which a helper left holding stdout would hang, and a read error there passes a truncated correction, seen before Enter. Neither seen with `claude -p`.
+- The markup is parsed again on every redraw, four times a second, for every message in the pane. Worth a cache by message `ts` if the screen shows up in Activity Monitor.
+- Closing one of two screens removes the shared heartbeat, so the fallback notifies beside the other for up to 30 seconds; two screens already notify twice.
+- Untested, since each needs a pure function pulled out of `App` first: the heartbeat's four transitions in `keep_beat`, and the note `App::notify` builds (a group DM names its sender, an IM does not).
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
