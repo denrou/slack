@@ -96,6 +96,13 @@ Deferred on purpose by the review of 2026-10-21 (`v0.12.0..main`):
 - The whole threads are read after the histories and the thread view, not beside them, and a long thread is read again on every reload even when nothing in it moved. Overlapping them needs the thread view first, and a cache keyed by `latest_reply` would be a store of its own; worth it if a reload feels slow.
 - Each unread conversation reads one page of 200 and usually keeps 50 or today's. Asking from midnight and falling back to the last 50 would be two calls where one is now; Denis chose the one bigger call.
 
+Deferred on purpose by the review of 2026-10-21 (`v0.14.0..main`):
+
+- A change that leaves a message's text alone (a link's preview, a bot updating its attachments) is dropped from the socket and shows at the next reload. Applying it in place would mean parsing the socket's message as the history does, for what is mostly a preview.
+- Your reply from another client bumps no reply count under a root shown in a conversation's history: from here the screen has already read it again, and the socket cannot tell the two apart.
+- `slack search` indents the permalink by copying `render_messages`' gutter (`commands.rs`); it drifts if that gutter changes, which a glance at the output shows.
+- Untested, since each needs a pure function pulled out of `App` or `history::around` first: the owed reload and the re-nudge of a dropped poll, `Visited::of`, `read_in_place`, and the merge of the two pages around a search hit.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
