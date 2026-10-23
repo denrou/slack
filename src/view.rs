@@ -404,7 +404,13 @@ fn sections<'a>(unread: &[&'a Conversation]) -> Sections<'a> {
     sections
 }
 
-fn collect_names(people: &mut BTreeSet<String>, places: &mut BTreeSet<String>, message: &Message) {
+/// The authors and the people a message mentions, and the channels it
+/// links without their name, for one lookup of each kind.
+pub(crate) fn collect_names(
+    people: &mut BTreeSet<String>,
+    places: &mut BTreeSet<String>,
+    message: &Message,
+) {
     people.extend(message.user.clone());
     people.extend(mentioned_users(&message.text));
     places.extend(mentioned_channels(&message.text));

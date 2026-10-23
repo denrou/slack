@@ -132,16 +132,13 @@ pub fn thread(spec: &str, json: bool, no_color: bool) -> Result<()> {
     let mut names = Names::load();
     let (channel, thread_ts) = thread_target(team_id, spec)?;
     let fetched = replies::fetch(&client, &channel, &thread_ts)?;
-    names.resolve_channels(&client, [channel.clone()])?;
     let mut people = BTreeSet::new();
-    let mut places = BTreeSet::new();
+    let mut places = BTreeSet::from([channel.clone()]);
     for message in std::iter::once(&fetched.root).chain(&fetched.replies) {
-        people.extend(message.user.clone());
-        people.extend(view::mentioned_users(&message.text));
-        places.extend(view::mentioned_channels(&message.text));
+        view::collect_names(&mut people, &mut places, message);
     }
-    names.resolve_users(&client, people)?;
     names.resolve_channels(&client, places)?;
+    names.resolve_users(&client, people)?;
     names.save();
 
     if json {
@@ -495,17 +492,14 @@ fn load_conversation(
         .and_then(Value::as_str)
         .filter(|cursor| history::is_usable_cursor(cursor))
         .map(str::to_string);
-    names.resolve_channels(client, [channel.clone()])?;
     let mut people = BTreeSet::new();
-    people.extend(names.channel(&channel).and_then(|c| c.user.clone()));
-    let mut places = BTreeSet::new();
+    let mut places = BTreeSet::from([channel.clone()]);
     for message in &page.messages {
-        people.extend(message.user.clone());
-        people.extend(view::mentioned_users(&message.text));
-        places.extend(view::mentioned_channels(&message.text));
+        view::collect_names(&mut people, &mut places, message);
     }
-    names.resolve_users(client, people)?;
     names.resolve_channels(client, places)?;
+    people.extend(names.channel(&channel).and_then(|c| c.user.clone()));
+    names.resolve_users(client, people)?;
     Ok((channel, page, last_read))
 }
 

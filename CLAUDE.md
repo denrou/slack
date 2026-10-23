@@ -114,7 +114,7 @@ Deferred on purpose by the review of 2026-10-22 (`v0.15.0..main`):
 - `notifying` is claimed from `TERM_PROGRAM` alone: Zellij or screen inside WezTerm, or a terminal macOS does not let notify, silences the screen and the fallback both. The first DM shows it; a `notify` key in `config.toml` is the way out if it happens.
 - Messages heard nowhere while the socket reconnects are shown by the reload but not notified, and after a laptop wakes the heartbeat is renewed for up to a minute on a dead socket. A note counting what `@ME` gained across a reconnect would cover both.
 - A heartbeat that cannot be written is tried again on every pass and never reported; the fallback notifies meanwhile, twice rather than never.
-- The channel lookup a notification needs on a miss runs on the screen's thread while it is unfocused: once per new conversation, then cached.
+- The channel lookups a notification needs on a miss run on the screen's thread while it is unfocused: its conversation and the channels its text links without a name, once each, then cached (a channel Slack will not name, for the rest of the session).
 - `fix::run` runs on the screen's thread, as every action does (blocking I/O, above), so a cold `claude -p` freezes the screen for its 10 to 20 seconds; running it on a thread is ready to do, since `State::fixed` already drops a stale answer. Its deadline does not cover the read of the answer once `sh` has exited, which a helper left holding stdout would hang, and a read error there passes a truncated correction, seen before Enter. Neither seen with `claude -p`.
 - The markup is parsed again on every redraw, four times a second, for every message in the pane. Worth a cache by message `ts` if the screen shows up in Activity Monitor.
 - Closing one of two screens removes the shared heartbeat, so the fallback notifies beside the other for up to 30 seconds; two screens already notify twice.
@@ -133,6 +133,12 @@ Deferred on purpose by the review of 2026-10-22 (`v0.17.0..main`):
 - The terminal's graphics are asked on every start, up to 2 seconds on a terminal that does not answer, for a feature used now and then. A shorter timeout would be worse: the crate's reader is not cancelled and would keep taking keys. Asking on the first image instead would race crossterm's reader. WezTerm answers at once.
 - A key typed while the startup queries run is lost, and so are bytes the graphics query leaves in std's buffered stdin.
 - The week a copy is kept is counted at the next start of the screen, not by `--count`, which the launchd job runs every 5 minutes and which must stay two calls and nothing else.
+
+Deferred on purpose by the review of 2026-10-23 (`v0.18.0..main`):
+
+- The channels a message links are found by a scan of their own (`view::mentions`), beside `mrkdwn`'s token pass that draws them, so odd markup could be looked up and drawn differently. The scan is the one `mentioned_users` always was; one parser for both if a raw id ever shows.
+- The lookup rounds stay one after another: on a cold cache, `view::build` waits on the conversations, the threads' channels, the people, then the linked channels. A warm cache makes each a no-op, so this is felt on a first run only.
+- Untested end to end, since resolution needs a `Client`: a linked channel shown by name. `mentioned_channels`, the `refused` set and the drawing with a known name are each tested.
 
 ## Reference implementation
 

@@ -18,6 +18,10 @@ pub struct Names {
     users: BTreeMap<String, User>,
     #[serde(default)]
     channels: BTreeMap<String, Channel>,
+    /// The ids Slack would not name this run (a private channel you are not
+    /// in, another organisation's), kept so a reload does not ask again.
+    #[serde(skip)]
+    refused: BTreeSet<String>,
     #[serde(skip)]
     dirty: bool,
     #[serde(skip)]
@@ -107,6 +111,7 @@ impl Names {
                 .into_iter()
                 .map(|(id, channel)| (id.to_string(), channel))
                 .collect(),
+            refused: BTreeSet::new(),
             dirty: false,
             path: None,
         }
@@ -172,7 +177,10 @@ impl Names {
                     }
                 }
                 Err(err @ api::Error::Auth { .. }) => return Err(err),
-                Err(_) => {} // a deactivated account, say: the id stays visible
+                Err(api::Error::Slack { .. }) => {
+                    self.refused.insert(id);
+                }
+                Err(_) => {} // a network error: asked again next time
             }
         }
         Ok(())
@@ -197,6 +205,9 @@ impl Names {
                     }
                 }
                 Err(err @ api::Error::Auth { .. }) => return Err(err),
+                Err(api::Error::Slack { .. }) => {
+                    self.refused.insert(id);
+                }
                 Err(_) => {}
             }
         }
@@ -346,7 +357,7 @@ impl Names {
         I: IntoIterator<Item = String>,
     {
         ids.into_iter()
-            .filter(|id| !known(self, id))
+            .filter(|id| !known(self, id) && !self.refused.contains(id))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -445,6 +456,17 @@ mod tests {
         let user = user_from(&json!({"user": {"name": "bot", "is_bot": true}})).unwrap();
         assert!(user.is_bot && user.display == "bot");
         assert!(user_from(&json!({"user": {}})).is_none());
+    }
+
+    #[test]
+    fn refused_ids_are_not_asked_again() {
+        let mut names = Names::default();
+        names.refused.insert("C9".to_string());
+        let ids = ["C1", "C9", "C1"].map(String::from);
+        assert_eq!(
+            names.missing(ids, |names, id| names.channels.contains_key(id)),
+            ["C1"]
+        );
     }
 
     #[test]

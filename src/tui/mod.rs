@@ -1409,9 +1409,7 @@ impl App<'_> {
         let mut people = BTreeSet::new();
         let mut places = BTreeSet::new();
         for message in messages {
-            people.extend(message.user.clone());
-            people.extend(view::mentioned_users(&message.text));
-            places.extend(view::mentioned_channels(&message.text));
+            view::collect_names(&mut people, &mut places, message);
         }
         self.names.resolve_users(self.client, people)?;
         self.names.resolve_channels(self.client, places)?;
