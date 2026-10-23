@@ -144,6 +144,16 @@ fn partial(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Drop every copy, for `slack logout`; false when there was none.
+pub fn clear() -> Result<bool> {
+    let dir = dir()?;
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(true),
+        Err(err) if paths::is_not_found(&err) => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("could not remove {}", dir.display())),
+    }
+}
+
 fn dir() -> Result<PathBuf> {
     Ok(paths::cache_dir()?.join("files"))
 }

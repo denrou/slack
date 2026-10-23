@@ -47,7 +47,7 @@ A concern about one of several asks never holds up the others. A reversal is fin
 
 - Never print, log or serialise a token (`xoxc`, `xoxd`, the Cookie header), in output, errors or `--json`.
 - Only `https://*.slack.com` origins, never `app.slack.com`, may be paired with the session cookie: `capture::is_slack_workspace_url` is the gate, and it is load-bearing. The socket `rtm.connect` names goes through its `wss://` twin, `is_slack_socket_url`, and no redirect is followed from it, since the cookie would go along. The same holds for a posted file (`Client::download`, on `files.slack.com` since 2026-10-22).
-- A posted file is copied to disk owner-only (`~/.cache/slack/files/`, 0700 and 0600) and dropped after a week: it may come from a private channel.
+- A posted file is copied to disk owner-only (`~/.cache/slack/files/`, 0700 and 0600), marked as a download (macOS's quarantine flag) before it is opened, and dropped after a week, the next time the screen opens, and by `slack logout`: it may come from a private channel, or be something that runs.
 - A profile path from the environment is user input: a directory without our sentinel is never reused and never deleted.
 
 ## Decisions (2026-10-19)

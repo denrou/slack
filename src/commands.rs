@@ -19,8 +19,8 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, history, lastview, mrkdwn, notify, react, read, replies, search, send,
-    target, tui, view,
+    counts, directory, files, history, lastview, mrkdwn, notify, react, read, replies, search,
+    send, target, tui, view,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -634,6 +634,9 @@ pub fn logout(keep_browser_session: bool) -> Result<()> {
         println!("Removed the saved workspaces.");
     } else {
         println!("No saved workspaces.");
+    }
+    if files::clear()? {
+        println!("Deleted the files the screen downloaded.");
     }
     if keep_browser_session {
         println!(
