@@ -15,22 +15,23 @@ prettier --write "**/*.md"                    # Markdown
 
 ## Workflow
 
-Denis's personal project (`github.com/denrou/slack`), outside the Centreon organisation. The Centreon conventions (feature branch, pull request, `/create-pr`, `/check-pr`, Jira references) do not apply, and `/create-pr` must not be used.
+Denis's personal project (`github.com/denrou/slack`), outside the Centreon organisation. The Centreon conventions (`/create-pr`, `/check-pr`, Jira references) do not apply, and `/create-pr` must not be used.
 
 Denis leads the project as product owner; Claude is the developer and owns the code, its architecture and its quality.
 
-- **Commit straight on the local `main`**, one conventional commit per change (`feat:`, `fix:`, `docs:`, `chore: release X.Y.Z`). Format, lint and test before committing; run Prettier on any Markdown touched. `ARCHITECTURE.md` and the decisions below change in the same commit as the code they describe. So does `skills/slack/SKILL.md`, the manual an agent reads before using the CLI: a command, an output or a rule it states changes in the same commit as the code. From a worktree (background sessions), rebase its branch on the local `main`, commit there, and hand Denis the one line to run in his own terminal: `cd ~/code/denrou/slack && git merge --ff-only <branch>`. Such a session must not merge, and its isolation refuses any git command aimed at the main checkout, a `!` line typed into the session included (it failed that way on 2026-10-20).
-- **A push is a release (since 2026-10-20).** Nothing is pushed between releases: commits pile up on the local `main`, and Denis's one push sends `main` and the new tag together. Never ask him to push anything else, never push a branch or open a pull request to get around it, and never bump the version or create a tag on your own. He tries the batch from the local checkout (`cargo install --path ~/code/denrou/slack` puts it in `~/.cargo/bin`) and says when it is ready.
+- **One branch and one pull request per change (since 2026-10-23).** Committing straight on `main` kept one session working at a time, made the review of a release cover every change at once, and turned each change into a release. Now each session works on its own branch (`feat/…`, `fix/…`, `docs/…`, `chore/…`), from `origin/main` after a fetch, in its own worktree when sessions run side by side. Format, lint and test before each commit; run Prettier on any Markdown touched. `ARCHITECTURE.md`, the decisions below and `skills/slack/SKILL.md` (the manual an agent reads before using the CLI: a command, an output or a rule it states) change in the same pull request as the code they describe.
+- **`main` takes squash-merged pull requests only.** A ruleset requires the pull request and CI's `check` job, and the pull request's title and body become the commit on `main`: the title is a conventional commit (`feat:`, `fix:`, `docs:`, `chore:`), the body is written as a commit body (writing-voice rule), with `Closes #N` for the issues it settles.
+- **The branch is pushed and the pull request opened when Denis asks** ("open the PR"); until then the work stays local. When `main` moves under an open pull request, merge `main` into the branch: rebasing a pushed branch would take a force push.
+- **Each pull request is reviewed on its own**: `/code-review` on it, plus the pr-review-toolkit agents when it is large. Fix what matters in the branch; what is left out on purpose becomes an issue labelled `deferred`, with its reason and the review it came from, linked from the pull request.
+- **Denis tries and merges.** He tries the branch (`cargo install --path <checkout>` puts it in `~/.cargo/bin`) and merges it himself; never merge on your own.
+- **Merging is not releasing.** Denis runs `main`; a release is the Homebrew binary, cut when a batch is worth it. Never bump the version or create a tag on your own.
 - **A release, when Denis asks for it**:
-  1. Review the batch: `/code-review` over everything since the last tag (`git log v<previous>..main`), plus the pr-review-toolkit agents when the batch is large. Fix what matters in their own commits; what is deferred on purpose goes to "Not planned yet" below with its reason.
-  2. `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo build --release`: CI only sees the code at release time, so it has to pass here first.
-  3. Bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z`, create the annotated tag with the release notes as its message (`git tag -a vX.Y.Z --cleanup=whitespace -F <file>`), and hand Denis the one line: `! git push origin main vX.Y.Z` (`git push origin main` is denied by the global permission settings).
-
-     The message is `vX.Y.Z`, a blank line, then the notes the GitHub Release shows (since 2026-10-21): a few Markdown bullets on what changed for whoever uses the tool, new commands and keys, a behaviour that moved, a fix that was felt, not the commit list, which the compare link GitHub adds below them already gives. Show them to Denis with the push line. `--cleanup=whitespace` keeps a line that starts with `#`, which git would otherwise strip as a comment.
-
+  1. Read the pull requests merged since the last tag (`git log v<previous>..origin/main`, one squash commit each) and draft the notes the GitHub Release shows: a few Markdown bullets on what changed for whoever uses the tool, new commands and keys, a behaviour that moved, a fix that was felt, not the list of pull requests, which the compare link GitHub adds below them already gives.
+  2. Open a `chore: release X.Y.Z` pull request that bumps `version` in `Cargo.toml` (`cargo build` so `Cargo.lock` follows), with the notes in its body, and show them to Denis.
+  3. Once he has merged it, fetch and create the annotated tag on its merge commit, the message being `vX.Y.Z`, a blank line, then the notes: `git tag -a vX.Y.Z --cleanup=whitespace -F <file> origin/main` (`--cleanup=whitespace` keeps a line that starts with `#`, which git would otherwise strip as a comment). Hand Denis the one line: `! git push origin vX.Y.Z`.
   4. Once he has pushed, watch the release with `gh run watch` and the tap with `gh run watch --repo denrou/homebrew-slack`, then report what shipped.
 
-  The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version and reads its notes (a tag without them fails there, before the builds), lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with the tag's notes and the compare link, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
+  The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version and reads its notes (a tag without them fails there, before the builds), lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with the tag's notes and the compare link, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every pull request and every push to `main`.
 
 - **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, `unreads`) can be run from here to check the output. **Never run `send`, `read` or anything in the screen (`slack` alone) that writes from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
 
@@ -41,7 +42,7 @@ Denis asks for enhancements, fixes and features as they come to him in use, and 
 - When it is right as stated, build it, no question asked; one line on why it holds is enough.
 - When it needs more thought, or another approach serves the same want better (a smaller change, another key, a different place in the flow, a cost it would carry later), say so first: the want as understood, the concern, the alternative with its trade-off, and a lean. Then build what he picks.
 
-A concern about one of several asks never holds up the others. A reversal is fine: the picker opened on its list on request, then in its filter a day later, because use decides.
+An idea not built now becomes an issue labelled `enhancement`, with the concern and the lean when there is one. A concern about one of several asks never holds up the others. A reversal is fine: the picker opened on its list on request, then in its filter a day later, because use decides.
 
 ## Security rules
 
@@ -75,70 +76,9 @@ Written down because none of them can be read from the code.
 
 Kept from slackcli: the browser-session credentials and their capture (`auth/`). Deliberately not ported: app tokens, `parse-curl`, drafts, scheduling, canvases, the custom emoji list, file uploads and listings, saved items, user groups, the update checker, log files, Windows. If one becomes needed, it is a feature, not a port.
 
-## Not planned yet
+## Backlog
 
-`--workspace`, a `watch` mode, loading older history from the TUI.
-
-Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the list with its error instead of dropping it, an `ItemKind` enum in place of `Item`'s parallel fields, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
-
-Deferred on purpose by the review of 2026-10-21 (`v0.9.0..main`):
-
-- The `R` list follows Slack's `emoji_use`, so an emoji just used from here moves up only once Slack counts it (whether `reactions.add` does is unverified). A local bump would be undone by the next reload unless the CLI wrote the pref back with `users.prefs.set`, a write for a cosmetic gain.
-- Slack lists only the first users of a popular reaction, so yours may be missing: `R` then adds, `already_reacted` is taken as done and the count shows one too many until a reload. Rare, and the fix needs `react::set` to tell a change from a no-op.
-- After a mark or a reply, the next poll still differs from the list's counts and reloads to confirm what the screen already shows. Correct, one history call per conversation; updating the pulse locally would need the new cursors.
-- The picker's Tab is silent on a channel and when it unmarks someone, and BackTab no longer moves up since Tab stopped moving down.
-- A poll thread that panics leaves the screen without auto-refresh and without a word; a panic there is a bug, not a condition.
-- A pref that is present but not JSON is read as absent without a warning (from before this batch).
-- `slack react --remove` says "Took back" when there was nothing to take back.
-
-Deferred on purpose by the review of 2026-10-21 (`v0.11.0..main`): a conversation `e` marked but kept, because a message came in after `x` selected it, shows its old unread count and `── new ──` line until the next refresh, up to about 15 seconds. Showing it read up to the mark would need a third way to word the detail line, beside the listed and the opened ones.
-
-Deferred on purpose by the review of 2026-10-21 (`v0.10.0..main`): with people marked, Enter on a typed name whose highlighted match is a channel or a group does nothing and says nothing (the picker has no status line of its own). Rare, since a group is people; a typo that matches nothing goes to the list instead.
-
-Deferred on purpose by the review of 2026-10-21 (`v0.12.0..main`):
-
-- The whole threads are read after the histories and the thread view, not beside them, and a long thread is read again on every reload even when nothing in it moved. Overlapping them needs the thread view first, and a cache keyed by `latest_reply` would be a store of its own; worth it if a reload feels slow.
-- Each unread conversation reads one page of 200 and usually keeps 50 or today's. Asking from midnight and falling back to the last 50 would be two calls where one is now; Denis chose the one bigger call.
-
-Deferred on purpose by the review of 2026-10-21 (`v0.14.0..main`):
-
-- A change that leaves a message's text alone (a link's preview, a bot updating its attachments) is dropped from the socket and shows at the next reload. Applying it in place would mean parsing the socket's message as the history does, for what is mostly a preview.
-- Your reply from another client bumps no reply count under a root shown in a conversation's history: from here the screen has already read it again, and the socket cannot tell the two apart.
-- `slack search` indents the permalink by copying `render_messages`' gutter (`commands.rs`); it drifts if that gutter changes, which a glance at the output shows.
-- Untested, since each needs a pure function pulled out of `App` or `history::around` first: the owed reload and the re-nudge of a dropped poll, `Visited::of`, `read_in_place`, and the merge of the two pages around a search hit.
-
-Deferred on purpose by the review of 2026-10-22 (`v0.15.0..main`):
-
-- A DM that comes in while the reply box, the picker or the search is open shows nowhere until it closes: the terminal has the focus, so nothing is notified, and no reload runs outside the list. Notifying then would post while you type in the terminal; a mark on the box's border may be the smaller answer, to weigh once it is felt.
-- The notifications' mute set is built from the conversations `client.counts` lists, so a closed muted DM is notified as direct, and a startup without the preferences notifies every muted conversation's `@here` until the next good poll. A muted DM is rare, and startup has no earlier list to fall back on.
-- `notifying` is claimed from `TERM_PROGRAM` alone: Zellij or screen inside WezTerm, or a terminal macOS does not let notify, silences the screen and the fallback both. The first DM shows it; a `notify` key in `config.toml` is the way out if it happens.
-- Messages heard nowhere while the socket reconnects are shown by the reload but not notified, and after a laptop wakes the heartbeat is renewed for up to a minute on a dead socket. A note counting what `@ME` gained across a reconnect would cover both.
-- A heartbeat that cannot be written is tried again on every pass and never reported; the fallback notifies meanwhile, twice rather than never.
-- The channel lookups a notification needs on a miss run on the screen's thread while it is unfocused: its conversation and the channels its text links without a name, once each, then cached (a channel Slack will not name, for the rest of the session).
-- `fix::run` runs on the screen's thread, as every action does (blocking I/O, above), so a cold `claude -p` freezes the screen for its 10 to 20 seconds; running it on a thread is ready to do, since `State::fixed` already drops a stale answer. Its deadline does not cover the read of the answer once `sh` has exited, which a helper left holding stdout would hang, and a read error there passes a truncated correction, seen before Enter. Neither seen with `claude -p`.
-- The markup is parsed again on every redraw, four times a second, for every message in the pane. Worth a cache by message `ts` if the screen shows up in Activity Monitor.
-- Closing one of two screens removes the shared heartbeat, so the fallback notifies beside the other for up to 30 seconds; two screens already notify twice.
-- Untested, since each needs a pure function pulled out of `App` first: the heartbeat's four transitions in `keep_beat`, and the note `App::notify` builds (a group DM names its sender, an IM does not).
-
-Deferred on purpose by the review of 2026-10-22 (`v0.16.1..main`):
-
-- The reply box's cursor steps by Unicode scalar, not by grapheme: in a decomposed `é` (text copied from a macOS file name) or a 👍🏽, Left can stop inside the character and Delete takes half of it. Typed and corrected French is composed, so it is not felt; the fix is the `unicode-segmentation` crate, and `Move::Left` and `Cut::Char` should then share one step. Up and Down keep the column in characters, not in display width, for the same reason.
-- Ctrl-G and its undo put the cursor at the end, so the place in a long draft is lost. The correction is asked before sending, with the cursor at the end in practice; the undo could keep the old cursor beside `Draft::typed` if it is ever felt.
-- `Draft::text` and `Draft::cursor` are both public, so nothing but care keeps the cursor on a boundary of the text; `ui.rs`'s tests set the text by hand. Private fields behind a constructor if a third writer appears.
-- The reply box wraps its text three times a frame (its height, the caret's row, the drawing). Drafts are a few lines; one count shared by the three if the screen shows up in Activity Monitor, with the markup cache above.
-
-Deferred on purpose by the review of 2026-10-22 (`v0.17.0..main`):
-
-- A file is downloaded on the screen's thread under one 120-second deadline: one that takes longer (a long screen recording) cannot be opened from here, and the screen is frozen meanwhile. The fix is the one `fix::run` is ready for, a thread, with a deadline per read rather than for the whole file; previews are small and videos rare, and `O` opens the message in Slack meanwhile.
-- The terminal's graphics are asked on every start, up to 2 seconds on a terminal that does not answer, for a feature used now and then. A shorter timeout would be worse: the crate's reader is not cancelled and would keep taking keys. Asking on the first image instead would race crossterm's reader. WezTerm answers at once.
-- A key typed while the startup queries run is lost, and so are bytes the graphics query leaves in std's buffered stdin.
-- The week a copy is kept is counted at the next start of the screen, not by `--count`, which the launchd job runs every 5 minutes and which must stay two calls and nothing else.
-
-Deferred on purpose by the review of 2026-10-23 (`v0.18.0..main`):
-
-- The channels a message links are found by a scan of their own (`view::mentions`), beside `mrkdwn`'s token pass that draws them, so odd markup could be looked up and drawn differently. The scan is the one `mentioned_users` always was; one parser for both if a raw id ever shows.
-- The lookup rounds stay one after another: on a cold cache, `view::build` waits on the conversations, the threads' channels, the people, then the linked channels. A warm cache makes each a no-op, so this is felt on a first run only.
-- Untested end to end, since resolution needs a `Client`: a linked channel shown by name. `mentioned_channels`, the `refused` set and the drawing with a known name are each tested.
+In GitHub issues (since 2026-10-23): `enhancement` for an idea not built yet, `deferred` for what a review left out on purpose, with its reason and the review it came from. Before changing a module, `gh issue list --label deferred --search <module or symbol>` shows what was left there to pick up when the code around it moves.
 
 ## Reference implementation
 
