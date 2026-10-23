@@ -7,7 +7,6 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -74,6 +73,8 @@ pub fn fetch(client: &Client, file: &File, version: Version) -> Result<PathBuf> 
 /// that cannot be marked is not handed over.
 #[cfg(target_os = "macos")]
 fn quarantine(path: &Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -201,8 +202,6 @@ fn safe_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-
     use super::*;
 
     fn file(id: &str, name: &str) -> File {
@@ -256,6 +255,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_download_is_marked_as_one() {
+        use std::env;
+        use std::process::Command;
+
         let dir = env::temp_dir().join(format!("slack-quarantine-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("setup.terminal");
