@@ -128,13 +128,14 @@ fn screen(
     };
     app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
-    let modes = Modes::ask();
     // How the terminal draws a picture, and its cell size in pixels: asked
     // once, before the first key is read, since the answer comes on the
-    // same input. A terminal without graphics gets half blocks.
+    // same input, and before `Modes::ask` turns on the focus reports, which
+    // the query would swallow. A terminal without graphics gets half blocks.
     if let Ok(graphics) = Graphics::from_query_stdio() {
         app.graphics = graphics;
     }
+    let modes = Modes::ask();
     let result = app.run(&mut terminal);
     if app.beat.is_some() {
         notify::stop();
