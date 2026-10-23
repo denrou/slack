@@ -6,18 +6,21 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 
 use super::model::{
-    Completion, Draft, Focus, Mode, Picker, Row, Search, Section, State, Viewport, row_of, rows,
+    Completion, Draft, Focus, Mode, Picker, Row, Search, Section, State, Target, Viewport, row_of,
+    rows,
 };
-use crate::history::Message;
+use crate::history::{File, Message};
 use crate::names::Names;
 use crate::{emoji, mrkdwn, view};
 
 const LIST_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e mark read  x select  c compose  o open  / search  O in Slack  Ctrl-R refresh  ? keys  q quit";
 const OPENED_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e close  x select  c compose  o open  / search  O in Slack  Ctrl-R refresh  ? keys  q quit";
-const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  r reply to it  R react  u open link  y copy link  e mark read  O in Slack  h back  q quit";
-const THREAD_HINTS: &str = "j/k move  r reply in the thread  R react  u open link  y copy link  O in Slack  h back  q quit";
+const MESSAGES_HINTS: &str = "j/k move  Enter open the thread  r reply to it  R react  u open link or file  y copy link  e mark read  O in Slack  h back  q quit";
+const THREAD_HINTS: &str = "j/k move  r reply in the thread  R react  u open link or file  y copy link  O in Slack  h back  q quit";
 const CHECKED_HINTS: &str =
     "x select or unselect  e mark them read  Esc unselect  j/k move  q quit";
 
@@ -44,7 +47,7 @@ const HELP: &[&str] = &[
     "Ctrl-G          in the reply box, correct the accents and typos with fix_command (config.toml); again, your text back",
     "e               mark it as read, or close it, unmarked, if you opened it; with a selection, all of the selection",
     "x               select the conversation for e, or unselect it",
-    "u, y            open, or copy, a link of the highlighted message",
+    "u, y            open a link or a file of the highlighted message, or copy its link: an image shows in the pane, where u hands it to the viewer",
     "R               react to the highlighted message: type to filter, Enter puts it on, or takes yours back",
     "O               open it in Slack, at the highlighted message from the pane",
     "Ctrl-R          refresh",
@@ -52,8 +55,15 @@ const HELP: &[&str] = &[
 ];
 
 /// Returns what the keys that move by screens need to know about the
-/// messages pane, for `State::viewport`.
-pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Viewport {
+/// messages pane, for `State::viewport`. `image` is the picture of
+/// `Mode::Image`, encoded for the terminal.
+pub fn draw(
+    frame: &mut Frame,
+    state: &State,
+    names: &Names,
+    now: &Zoned,
+    image: Option<&mut StatefulProtocol>,
+) -> Viewport {
     let bottom_height = match &state.mode {
         Mode::Compose(draft) => {
             compose_rows(&draft.text, frame.area().width)
@@ -63,7 +73,7 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Vie
         Mode::Help => HELP.len() as u16 + 2,
         Mode::Links { links, .. } => links.len() as u16 + 2,
         Mode::React(reacting) => state.emoji_choices(&reacting.query).len() as u16 + 3,
-        Mode::Browse | Mode::Pick(_) | Mode::Search(_) => 1,
+        Mode::Browse | Mode::Pick(_) | Mode::Search(_) | Mode::Image(_) => 1,
     };
     let [main, bottom] = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_height)])
         .areas(frame.area());
@@ -78,6 +88,17 @@ pub fn draw(frame: &mut Frame, state: &State, names: &Names, now: &Zoned) -> Vie
         Mode::Pick(picker) => {
             draw_picker(frame, left, picker);
             draw_messages(frame, right, state, names, now)
+        }
+        Mode::Image(file) => {
+            draw_list(frame, left, state);
+            let block = Block::bordered().title(format!(" {} ", file.title));
+            let inner = block.inner(right);
+            frame.render_widget(block, right);
+            if let Some(image) = image {
+                frame.render_stateful_widget(StatefulImage::default(), inner, image);
+            }
+            // The keys keep the messages pane's measures while it is hidden.
+            state.viewport
         }
         _ => {
             draw_list(frame, left, state);
@@ -227,7 +248,7 @@ fn draw_search(frame: &mut Frame, area: Rect, search: &Search, names: &Names, no
             let text = Some(plain_text(message, names))
                 .filter(|text| !text.trim().is_empty())
                 .or_else(|| message.attachments.first().cloned())
-                .or_else(|| message.files.first().cloned())
+                .or_else(|| message.files.first().map(|file| file.title.clone()))
                 .unwrap_or_default();
             ListItem::new(vec![
                 Line::from(head),
@@ -256,17 +277,12 @@ fn draw_hit(frame: &mut Frame, area: Rect, search: &Search, names: &Names, now: 
     title.extend(author(&hit.message, names));
     title.push(view::format_ts(&hit.message.ts, now));
     let mut lines = message_lines(&hit.message, names);
-    let notes = hit
-        .message
-        .files
-        .iter()
-        .map(|file| format!("file: {file}"))
-        .chain(
-            hit.message
-                .attachments
-                .iter()
-                .map(|a| format!("attachment: {a}")),
-        );
+    let notes = hit.message.files.iter().map(file_note).chain(
+        hit.message
+            .attachments
+            .iter()
+            .map(|a| format!("attachment: {a}")),
+    );
     for note in notes {
         lines.push(Line::from(note).dim());
     }
@@ -349,6 +365,12 @@ fn look_style(look: mrkdwn::Look) -> Style {
         style = style.crossed_out();
     }
     style
+}
+
+/// A file under its message: `u` opens either kind, an image in the pane.
+fn file_note(file: &File) -> String {
+    let kind = if file.is_image() { "image" } else { "file" };
+    format!("{kind}: {}", file.title)
 }
 
 fn draw_messages(
@@ -467,7 +489,7 @@ fn draw_messages(
             n => notes.push(format!("{n} replies")),
         }
         for file in &message.files {
-            notes.push(format!("file: {file}"));
+            notes.push(file_note(file));
         }
         if !notes.is_empty() {
             spans.push(Span::styled(
@@ -822,18 +844,24 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
             let title = if *copy {
                 " Copy which link? · a digit picks, any other key cancels "
             } else {
-                " Open which link? · a digit picks, any other key cancels "
+                " Open which one? · a digit picks, any other key cancels "
             };
             let lines: Vec<Line> = links
                 .iter()
                 .enumerate()
-                .map(|(index, link)| {
-                    let mut spans = vec![
-                        Span::styled(format!("{}  ", index + 1), Style::new().bold()),
-                        Span::raw(link.url.as_str()),
-                    ];
-                    if let Some(label) = &link.label {
-                        spans.push(Span::styled(format!("  {label}"), Style::new().dim()));
+                .map(|(index, target)| {
+                    let mut spans = vec![Span::styled(
+                        format!("{}  ", index + 1),
+                        Style::new().bold(),
+                    )];
+                    match target {
+                        Target::Link(link) => {
+                            spans.push(Span::raw(link.url.as_str()));
+                            if let Some(label) = &link.label {
+                                spans.push(Span::styled(format!("  {label}"), Style::new().dim()));
+                            }
+                        }
+                        Target::File(file) => spans.push(Span::raw(file_note(file))),
                     }
                     Line::from(spans)
                 })
@@ -961,6 +989,11 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
             };
             frame.render_widget(Paragraph::new(text).dim(), area);
         }
+        Mode::Image(_) => {
+            let hints = "u open it in the viewer  y copy link  any other key closes";
+            let text = state.status.as_deref().unwrap_or(hints);
+            frame.render_widget(Paragraph::new(text).dim(), area);
+        }
         Mode::Browse => {
             let opened = state
                 .selected_item()
@@ -1053,7 +1086,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
         let mut viewport = Viewport::default();
         terminal
-            .draw(|frame| viewport = draw(frame, state, &Names::default(), &Zoned::now()))
+            .draw(|frame| viewport = draw(frame, state, &Names::default(), &Zoned::now(), None))
             .expect("a draw");
         (terminal.backend().buffer().clone(), viewport)
     }
@@ -1249,7 +1282,7 @@ mod tests {
         // The thread pane, its last reply highlighted: still on screen
         // under the pinned root.
         let mut root = message(&ts(1), "");
-        root.files = vec!["diagram.png".to_string()];
+        root.files = vec![file("diagram.png", None)];
         let mut messages = vec![root];
         messages.extend((2..=40).map(|n| message(&ts(n), &format!("reply {n}"))));
         state.open_thread(crate::tui::model::ThreadPane {
@@ -1278,6 +1311,55 @@ mod tests {
         let (buffer, viewport) = render(&state, 100, 20);
         assert_eq!(roots(&buffer), 0, "a channel pins nothing");
         assert_eq!(viewport.height, thread_height + 1, "the root keeps its row");
+    }
+
+    fn file(name: &str, mimetype: Option<&str>) -> File {
+        File {
+            id: "F1".to_string(),
+            title: name.to_string(),
+            name: name.to_string(),
+            mimetype: mimetype.map(str::to_string),
+            url: None,
+            thumb: None,
+            permalink: None,
+        }
+    }
+
+    #[test]
+    fn an_image_takes_the_messages_pane_and_says_how_to_leave() {
+        let mut state = history(&["look"], None);
+        let shot = file("shot.png", Some("image/png"));
+        state.items[0].messages[0].files = vec![shot.clone()];
+        state.focus = Focus::Messages;
+        let (buffer, _) = render(&state, 100, 12);
+        assert!(
+            row_with(&buffer, "[image: shot.png]").is_some(),
+            "the note says image"
+        );
+
+        state.mode = Mode::Links {
+            links: vec![
+                Target::Link(crate::mrkdwn::Link {
+                    url: "https://a.b/1".to_string(),
+                    label: None,
+                }),
+                Target::File(shot.clone()),
+            ],
+            copy: false,
+        };
+        let (buffer, _) = render(&state, 100, 12);
+        assert!(row_with(&buffer, "Open which one?").is_some());
+        assert!(row_with(&buffer, "2  image: shot.png").is_some());
+
+        state.mode = Mode::Image(shot);
+        let (buffer, _) = render(&state, 100, 12);
+        let title = row_with(&buffer, " shot.png ").expect("the pane is titled with the file");
+        assert_eq!(title, 0);
+        assert!(
+            row_with(&buffer, "look").is_none(),
+            "the image hides the messages"
+        );
+        assert!(row(&buffer, 11).contains("any other key closes"));
     }
 
     fn row_with(buffer: &Buffer, needle: &str) -> Option<u16> {

@@ -3,7 +3,7 @@
 //! answers newest first, so with a limit the page holds the most recent
 //! messages; `has_more` says older ones exist.
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::api::{self, Client};
@@ -31,11 +31,77 @@ pub struct Message {
     #[serde(skip_serializing_if = "is_zero")]
     pub reply_count: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
+    pub files: Vec<File>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
+}
+
+/// A file posted with a message. Printed as its title alone, `--json`
+/// included: the URLs are fetched with the session cookie, and are of no
+/// use without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct File {
+    pub id: String,
+    /// The title Slack shows, else the file name.
+    pub title: String,
+    /// The file name, extension included, for the copy on disk.
+    pub name: String,
+    pub mimetype: Option<String>,
+    /// The file itself; None for a deleted one.
+    pub url: Option<String>,
+    /// The largest preview of an image, 1024 pixels at most.
+    pub thumb: Option<String>,
+    /// The file's page in Slack, for `y`.
+    pub permalink: Option<String>,
+}
+
+/// Thumbnails Slack makes of an image, the largest first. Above 1024 a
+/// terminal pane gains nothing, and the download grows.
+const THUMBS: &[&str] = &["thumb_1024", "thumb_720", "thumb_480", "thumb_360"];
+
+/// What the screen draws itself; GIFs go to the system viewer, since only
+/// their first frame would show here.
+const DRAWN: &[&str] = &["image/png", "image/jpeg", "image/webp"];
+
+impl File {
+    fn from(raw: &Value) -> Option<File> {
+        let string = |name: &str| {
+            raw.get(name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let name = string("name");
+        Some(File {
+            id: string("id").unwrap_or_default(),
+            title: string("title").or_else(|| name.clone())?,
+            name: name.unwrap_or_default(),
+            mimetype: string("mimetype"),
+            url: string("url_private"),
+            thumb: THUMBS.iter().find_map(|key| string(key)),
+            permalink: string("permalink"),
+        })
+    }
+
+    pub fn is_image(&self) -> bool {
+        self.mimetype
+            .as_deref()
+            .is_some_and(|mimetype| mimetype.starts_with("image/"))
+    }
+
+    /// The screen draws it in the messages pane rather than handing it to
+    /// the system viewer.
+    pub fn is_drawn(&self) -> bool {
+        self.thumb.is_some() && self.mimetype.as_deref().is_some_and(|m| DRAWN.contains(&m))
+    }
+}
+
+impl Serialize for File {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.title)
+    }
 }
 
 /// One emoji on a message, with who put it there.
@@ -241,7 +307,11 @@ pub fn message_from(raw: &Value) -> Option<Message> {
         subtype: string("subtype"),
         thread_ts: string("thread_ts"),
         reply_count: raw.get("reply_count").and_then(Value::as_u64).unwrap_or(0),
-        files: titles("files", &["title", "name"]),
+        files: raw
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|files| files.iter().filter_map(File::from).collect())
+            .unwrap_or_default(),
         attachments,
         reactions: raw
             .get("reactions")
@@ -308,7 +378,8 @@ mod tests {
         assert!(unread.has_more);
         let bot = &unread.messages[0];
         assert_eq!(bot.bot.as_deref(), Some("deploybot"));
-        assert_eq!(bot.files, ["Deploy log"]);
+        let titles: Vec<&str> = bot.files.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["Deploy log"]);
         assert_eq!(bot.attachments, ["preview"]);
         assert_eq!(unread.messages[1].reply_count, 2);
         assert!(!unread.messages[1].is_reply());
@@ -317,6 +388,51 @@ mod tests {
         assert_eq!((reactions[0].name.as_str(), reactions[0].count), ("+1", 2));
         assert!(reactions[0].by("U7"));
         assert_eq!(reactions[1].count, 1, "the count falls back to the users");
+    }
+
+    #[test]
+    fn a_file_keeps_its_largest_thumbnail_and_prints_as_its_title() {
+        let message = message_from(&json!({
+            "ts": "1700000010.000100",
+            "text": "",
+            "files": [
+                {"id": "F1", "name": "shot.png", "title": "", "mimetype": "image/png",
+                 "url_private": "https://files.slack.com/files-pri/T1-F1/shot.png",
+                 "thumb_360": "https://files.slack.com/t/360.png",
+                 "thumb_720": "https://files.slack.com/t/720.png",
+                 "permalink": "https://acme.slack.com/files/U1/F1/shot.png"},
+                {"id": "F2", "name": "party.gif", "mimetype": "image/gif",
+                 "thumb_360": "https://files.slack.com/t/gif.png"},
+                {"id": "F3", "name": "notes.pdf", "mimetype": "application/pdf"},
+                {"id": "F4", "mode": "tombstone"}
+            ]
+        }))
+        .unwrap();
+        let [shot, gif, pdf] = message.files.as_slice() else {
+            panic!(
+                "a file without a name or title is dropped: {:?}",
+                message.files
+            );
+        };
+        assert_eq!(
+            shot.title, "shot.png",
+            "an empty title falls back to the name"
+        );
+        assert_eq!(
+            shot.thumb.as_deref(),
+            Some("https://files.slack.com/t/720.png")
+        );
+        assert!(shot.is_drawn());
+        assert!(
+            gif.is_image() && !gif.is_drawn(),
+            "a GIF goes to the viewer"
+        );
+        assert!(!pdf.is_image() && !pdf.is_drawn());
+        assert_eq!(
+            serde_json::to_value(&message).unwrap()["files"],
+            json!(["shot.png", "party.gif", "notes.pdf"]),
+            "no URL in the JSON"
+        );
     }
 
     #[test]

@@ -673,7 +673,7 @@ pub(crate) fn render_messages(
             });
         }
         for file in &message.files {
-            notes.push(format!("file: {file}"));
+            notes.push(format!("file: {}", file.title));
         }
         for attachment in &message.attachments {
             notes.push(format!("attachment: {attachment}"));

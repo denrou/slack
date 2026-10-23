@@ -12,7 +12,9 @@ mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsStr;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +31,8 @@ use ratatui::crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::{execute, terminal};
+use ratatui_image::picker::Picker as Graphics;
+use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 
 use self::model::{
@@ -36,9 +40,11 @@ use self::model::{
     State, ThreadPane, Viewport, Wake,
 };
 use crate::api::{self, Client};
+use crate::auth::capture;
 use crate::config::Config;
 use crate::counts::{Conversation, Counts, Kind};
 use crate::directory::{self, Listed};
+use crate::files::{self, Copy};
 use crate::history::{self, Message};
 use crate::names::Names;
 use crate::rtm::{self, Posted, Signal};
@@ -89,6 +95,9 @@ fn screen(
     if fix_command.is_some() {
         state.fixes = Ok(());
     }
+    if let Err(err) = files::prune() {
+        warn::warn(format!("{err:#}"));
+    }
     let live = Arc::new(AtomicBool::new(false));
     let (nudges, nudged) = mpsc::channel();
     let term_program = env::var("TERM_PROGRAM").ok();
@@ -114,10 +123,18 @@ fn screen(
         poll_error: None,
         owed: false,
         fix_command,
+        graphics: Graphics::halfblocks(),
+        image: None,
     };
     app.state.frequent_emoji.clone_from(&counts.frequent_emoji);
     let mut terminal = ratatui::init();
     let modes = Modes::ask();
+    // How the terminal draws a picture, and its cell size in pixels: asked
+    // once, before the first key is read, since the answer comes on the
+    // same input. A terminal without graphics gets half blocks.
+    if let Ok(graphics) = Graphics::from_query_stdio() {
+        app.graphics = graphics;
+    }
     let result = app.run(&mut terminal);
     if app.beat.is_some() {
         notify::stop();
@@ -418,6 +435,10 @@ struct App<'a> {
     muted: BTreeSet<String>,
     /// What corrects a draft on Ctrl-G, from the config.
     fix_command: Option<String>,
+    /// How this terminal draws a picture.
+    graphics: Graphics,
+    /// The picture of `Mode::Image`, kept while it is shown.
+    image: Option<StatefulProtocol>,
 }
 
 impl App<'_> {
@@ -506,8 +527,19 @@ impl App<'_> {
             self.state.status = Some(format!("Warning: {}", warnings.join("; ")));
         }
         let now = Zoned::now();
+        let image = if matches!(self.state.mode, Mode::Image(_)) {
+            self.image.as_mut()
+        } else {
+            // A picture is the terminal's, not ratatui's: some terminals
+            // keep it over text drawn into its cells, so the screen is
+            // drawn again from scratch once it closes.
+            if self.image.take().is_some() {
+                terminal.clear()?;
+            }
+            None
+        };
         let mut viewport = Viewport::default();
-        terminal.draw(|frame| viewport = ui::draw(frame, &self.state, self.names, &now))?;
+        terminal.draw(|frame| viewport = ui::draw(frame, &self.state, self.names, &now, image))?;
         self.state.viewport = viewport;
         Ok(())
     }
@@ -619,6 +651,38 @@ impl App<'_> {
                         Ok(())
                     }
                     Err(err) => self.fail(err.into()),
+                }
+            }
+            Action::ShowFile(file) => {
+                self.busy(terminal, &format!("Loading {}…", file.title))?;
+                let loaded =
+                    files::fetch(self.client, &file, Copy::Thumb).and_then(|path| decode(&path));
+                match loaded {
+                    Ok(picture) => {
+                        self.image = Some(self.graphics.new_resize_protocol(picture));
+                        self.state.status = None;
+                        self.state.mode = Mode::Image(file);
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
+                }
+            }
+            Action::OpenFile(file) => {
+                // A file Slack only links to, a Google Doc say, is the
+                // browser's to open, and without the cookie.
+                if let Some(url) = (file.url.as_deref()).filter(|url| {
+                    !capture::is_slack_workspace_url(url) && url.starts_with("https://")
+                }) {
+                    return self.act(Action::OpenLink(url.to_string()), terminal);
+                }
+                self.busy(terminal, &format!("Downloading {}…", file.title))?;
+                let opened = files::fetch(self.client, &file, Copy::Original).and_then(launch);
+                match opened {
+                    Ok(()) => {
+                        self.state.status = Some(format!("Opened {}", file.title));
+                        Ok(())
+                    }
+                    Err(err) => self.fail(err),
                 }
             }
             Action::OpenLink(url) => match launch(&url) {
@@ -1398,9 +1462,10 @@ fn permalink(base: &str, ts: &str) -> String {
     format!("{base}/p{}", ts.replace('.', ""))
 }
 
-/// Hand a URL to the system opener: the browser, or the mail client for
-/// a mailto link.
-fn launch(url: &str) -> Result<()> {
+/// Hand a URL to the system opener, the browser or the mail client for a
+/// mailto link, or a file to the application that opens its kind.
+fn launch(url: impl AsRef<OsStr>) -> Result<()> {
+    let url = url.as_ref();
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -1413,9 +1478,21 @@ fn launch(url: &str) -> Result<()> {
         .stderr(Stdio::null())
         .status()?;
     if !status.success() {
-        return Err(anyhow!("{opener} could not open {url}"));
+        return Err(anyhow!("{opener} could not open {}", url.to_string_lossy()));
     }
     Ok(())
+}
+
+/// A picture from its copy on disk, whatever the extension says: Slack's
+/// previews are named by their size, not their format.
+fn decode(path: &Path) -> Result<image::DynamicImage> {
+    let unreadable = || format!("could not read the image {}", path.display());
+    image::ImageReader::open(path)
+        .with_context(unreadable)?
+        .with_guessed_format()
+        .with_context(unreadable)?
+        .decode()
+        .with_context(unreadable)
 }
 
 /// Put text in the clipboard through the first tool found: pbcopy on

@@ -48,6 +48,12 @@ pub fn restrict(path: &Path, mode: u32) -> io::Result<()> {
 /// created with the default mode and tightened afterwards is world-readable
 /// in between.
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    create_private(path)?.write_all(contents)
+}
+
+/// Create or truncate `path` for writing, owner-readable from the first
+/// byte, as `write_private` does for contents written in one go.
+pub fn create_private(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -55,9 +61,10 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)?.write_all(contents)?;
+    let file = options.open(path)?;
     // The mode above applies on creation only; an existing file keeps its own.
-    restrict(path, 0o600)
+    restrict(path, 0o600)?;
+    Ok(file)
 }
 
 /// Whether the error says the file was simply not there.

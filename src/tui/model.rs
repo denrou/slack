@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::counts::{Conversation, Kind};
-use crate::history::{self, Message, compare_ts};
+use crate::history::{self, File, Message, compare_ts};
 use crate::mrkdwn::{self, Link};
 use crate::names::Names;
 use crate::rtm::{Event, Posted};
@@ -867,12 +867,22 @@ pub enum Mode {
     Pick(Picker),
     React(Reacting),
     Search(Search),
-    /// Which link of the highlighted message: a digit picks one, to
-    /// open it or to copy it.
+    /// Which link or file of the highlighted message: a digit picks one,
+    /// to open it or to copy its link.
     Links {
-        links: Vec<Link>,
+        links: Vec<Target>,
         copy: bool,
     },
+    /// An image of a message, drawn over the messages pane; `mod.rs`
+    /// holds the picture itself.
+    Image(File),
+}
+
+/// What `u` and `y` offer of a message: its links, then its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Link(Link),
+    File(File),
 }
 
 /// What the selection holds a conversation by: its channel and thread,
@@ -939,6 +949,10 @@ pub enum Action {
     OpenLink(String),
     /// Put a URL in the clipboard.
     CopyLink(String),
+    /// Draw an image of a message in the messages pane.
+    ShowFile(File),
+    /// Hand a file to the system viewer.
+    OpenFile(File),
     /// Put an emoji on a message, or take yours back.
     React {
         channel: String,
@@ -1566,6 +1580,7 @@ impl State {
             Mode::React(reacting) => self.react(reacting, key),
             Mode::Search(search) => self.search(search, key),
             Mode::Links { links, copy } => self.choose_link(links, copy, key),
+            Mode::Image(file) => self.image(file, key),
         }
     }
 
@@ -2066,25 +2081,40 @@ impl State {
         Action::None
     }
 
-    /// `u` and `y`: a link of the highlighted message, opened or copied.
-    /// One link goes straight away; several ask which; none, or no
-    /// message under the cursor, is a status line.
+    /// `u` and `y`: a link or a file of the highlighted message, opened
+    /// or its link copied. One goes straight away; several ask which;
+    /// none, or no message under the cursor, is a status line.
     fn link(&mut self, copy: bool) -> Action {
         if self.focus != Focus::Messages {
             self.status = Some("Move onto a message first (l)".to_string());
             return Action::None;
         }
-        let mut links = self
+        let mut links: Vec<Target> = self
             .pane_messages()
             .get(self.cursor)
-            .map(|message| mrkdwn::links(&message.text))
+            .map(|message| {
+                let links = mrkdwn::links(&message.text).into_iter().map(Target::Link);
+                // A file is copied by its page in Slack, which not all have.
+                let files = (message.files.iter())
+                    .filter(|file| !copy || file.permalink.is_some())
+                    .cloned()
+                    .map(Target::File);
+                links.chain(files).collect()
+            })
             .unwrap_or_default();
         match links.len() {
             0 => {
-                self.status = Some("No link in this message".to_string());
+                self.status = Some(
+                    if copy {
+                        "No link in this message"
+                    } else {
+                        "Nothing to open in this message"
+                    }
+                    .to_string(),
+                );
                 Action::None
             }
-            1 => link_action(links.swap_remove(0).url, copy),
+            1 => target_action(links.swap_remove(0), copy),
             _ => {
                 // A digit picks, so the prompt stops at nine.
                 links.truncate(9);
@@ -2155,14 +2185,32 @@ impl State {
     }
 
     /// A digit picks a link of the prompt; any other key gives up.
-    fn choose_link(&mut self, mut links: Vec<Link>, copy: bool, key: KeyEvent) -> Action {
+    fn choose_link(&mut self, mut links: Vec<Target>, copy: bool, key: KeyEvent) -> Action {
         if let KeyCode::Char(c) = key.code
             && let Some(index) = c.to_digit(10).map(|digit| digit as usize)
             && (1..=links.len()).contains(&index)
         {
-            return link_action(links.swap_remove(index - 1).url, copy);
+            return target_action(links.swap_remove(index - 1), copy);
         }
         Action::None
+    }
+
+    /// The image shown: `u` hands the file itself to the system viewer,
+    /// `y` copies its link, and any other key closes it, as the help does.
+    fn image(&mut self, file: File, key: KeyEvent) -> Action {
+        let action = match key.code {
+            KeyCode::Char('u') => Action::OpenFile(file.clone()),
+            KeyCode::Char('y') => match &file.permalink {
+                Some(url) => Action::CopyLink(url.clone()),
+                None => {
+                    self.status = Some("Slack gives no link to this file".to_string());
+                    Action::None
+                }
+            },
+            _ => return Action::None,
+        };
+        self.mode = Mode::Image(file);
+        action
     }
 
     /// One level back: close the thread, else leave the messages pane.
@@ -2270,6 +2318,17 @@ impl State {
             self.cursor = 0;
             self.scroll = 0;
         }
+    }
+}
+
+/// A file is drawn here when it can be, else handed over; copied, it is
+/// its page in Slack (`link` offers only the files that have one).
+fn target_action(target: Target, copy: bool) -> Action {
+    match target {
+        Target::Link(link) => link_action(link.url, copy),
+        Target::File(file) if copy => file.permalink.map_or(Action::None, Action::CopyLink),
+        Target::File(file) if file.is_drawn() => Action::ShowFile(file),
+        Target::File(file) => Action::OpenFile(file),
     }
 }
 
@@ -3404,7 +3463,68 @@ mod tests {
 
         state.items[0].messages[1].text = "plain".into();
         state.key(press(KeyCode::Char('u')));
+        assert_eq!(
+            state.status.as_deref(),
+            Some("Nothing to open in this message")
+        );
+        state.key(press(KeyCode::Char('y')));
         assert_eq!(state.status.as_deref(), Some("No link in this message"));
+    }
+
+    fn file(name: &str, mimetype: &str, permalink: bool) -> File {
+        File {
+            id: "F1".into(),
+            title: name.into(),
+            name: name.into(),
+            mimetype: Some(mimetype.into()),
+            url: Some(format!("https://files.slack.com/files-pri/T1-F1/{name}")),
+            thumb: Some("https://files.slack.com/t/720.png".into()),
+            permalink: permalink.then(|| format!("https://acme.slack.com/files/U1/F1/{name}")),
+        }
+    }
+
+    #[test]
+    fn u_draws_an_image_and_hands_any_other_file_over() {
+        let mut state = state();
+        let (shot, gif) = (
+            file("shot.png", "image/png", true),
+            file("party.gif", "image/gif", false),
+        );
+        state.items[0].messages[0].files = vec![shot.clone()];
+        state.items[0].messages[1].text = "see <https://a.b/1>".into();
+        state.items[0].messages[1].files = vec![gif.clone()];
+        state.key(press(KeyCode::Char('l')));
+
+        assert_eq!(
+            state.key(press(KeyCode::Char('u'))),
+            Action::ShowFile(shot.clone())
+        );
+        state.mode = Mode::Image(shot.clone());
+        assert_eq!(
+            state.key(press(KeyCode::Char('u'))),
+            Action::OpenFile(shot.clone()),
+            "u again: the file itself, to the viewer"
+        );
+        assert_eq!(
+            state.key(press(KeyCode::Char('y'))),
+            Action::CopyLink(shot.permalink.clone().unwrap())
+        );
+        assert_eq!(state.mode, Mode::Image(shot), "u and y keep it open");
+        assert_eq!(state.key(press(KeyCode::Char('q'))), Action::None);
+        assert_eq!(state.mode, Mode::Browse, "any other key closes it");
+
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Char('u')));
+        assert!(
+            matches!(&state.mode, Mode::Links { links, copy: false } if links.len() == 2),
+            "the link, then the file"
+        );
+        assert_eq!(state.key(press(KeyCode::Char('2'))), Action::OpenFile(gif));
+        assert_eq!(
+            state.key(press(KeyCode::Char('y'))),
+            Action::CopyLink("https://a.b/1".into()),
+            "a file without a page in Slack has nothing to copy"
+        );
     }
 
     #[test]

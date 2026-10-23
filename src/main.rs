@@ -8,6 +8,7 @@ mod config;
 mod counts;
 mod directory;
 mod emoji;
+mod files;
 mod fix;
 mod history;
 mod lastview;
