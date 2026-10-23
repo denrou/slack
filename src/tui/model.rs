@@ -1822,6 +1822,9 @@ impl State {
         }
         if let Some(to) = Move::of(key) {
             draft.cursor = to.apply(&draft.text, draft.cursor);
+            // Passing through a mention is not completing it: the list
+            // would take Enter. Typing opens it again.
+            draft.pick = None;
             self.mode = Mode::Compose(draft);
             return Action::None;
         }
@@ -3599,6 +3602,24 @@ mod tests {
         };
         assert_eq!(draft.text, "cc @jdoe  please");
         assert_eq!(draft.cursor, "cc @jdoe ".len());
+    }
+
+    #[test]
+    fn moving_through_a_mention_does_not_open_the_completion() {
+        let mut state = state();
+        state.candidates = Some(vec![candidate("@jdoe", "Jane Doe", "jdoe jane doe")]);
+        state.key(press(KeyCode::Char('r')));
+        state.paste("@jdoe can you check");
+        state.key(control('a'));
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert!(state.completion(draft).is_none());
+        assert!(matches!(
+            state.key(press(KeyCode::Enter)),
+            Action::Send { text, .. } if text == "@jdoe can you check"
+        ));
     }
 
     #[test]
