@@ -44,7 +44,7 @@ use crate::auth::capture;
 use crate::config::Config;
 use crate::counts::{Conversation, Counts, Kind};
 use crate::directory::{self, Listed};
-use crate::files::{self, Copy};
+use crate::files::{self, Version};
 use crate::history::{self, Message};
 use crate::names::Names;
 use crate::rtm::{self, Posted, Signal};
@@ -656,7 +656,7 @@ impl App<'_> {
             Action::ShowFile(file) => {
                 self.busy(terminal, &format!("Loading {}…", file.title))?;
                 let loaded =
-                    files::fetch(self.client, &file, Copy::Thumb).and_then(|path| decode(&path));
+                    files::fetch(self.client, &file, Version::Thumb).and_then(|path| decode(&path));
                 match loaded {
                     Ok(picture) => {
                         self.image = Some(self.graphics.new_resize_protocol(picture));
@@ -676,7 +676,7 @@ impl App<'_> {
                     return self.act(Action::OpenLink(url.to_string()), terminal);
                 }
                 self.busy(terminal, &format!("Downloading {}…", file.title))?;
-                let opened = files::fetch(self.client, &file, Copy::Original).and_then(launch);
+                let opened = files::fetch(self.client, &file, Version::Original).and_then(launch);
                 match opened {
                     Ok(()) => {
                         self.state.status = Some(format!("Opened {}", file.title));

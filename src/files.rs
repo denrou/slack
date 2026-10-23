@@ -18,9 +18,9 @@ use crate::paths;
 /// same week, short enough that the cache is not an archive of Slack.
 const KEEP_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Which copy of a file.
+/// Which copy of a file (not `Copy`, which would hide the trait).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Copy {
+pub enum Version {
     /// The preview of an image, drawn in the messages pane.
     Thumb,
     /// The file as posted, for the system viewer.
@@ -28,14 +28,14 @@ pub enum Copy {
 }
 
 /// The copy on disk, fetched unless it is there already.
-pub fn fetch(client: &Client, file: &File, copy: Copy) -> Result<PathBuf> {
-    let url = match copy {
-        Copy::Thumb => file.thumb.as_deref(),
-        Copy::Original => file.url.as_deref(),
+pub fn fetch(client: &Client, file: &File, version: Version) -> Result<PathBuf> {
+    let url = match version {
+        Version::Thumb => file.thumb.as_deref(),
+        Version::Original => file.url.as_deref(),
     }
     .context("Slack gives no link to this file")?;
     let dir = dir()?;
-    let path = dir.join(relative(file, copy)?);
+    let path = dir.join(relative(file, version)?);
     if fs::metadata(&path).is_ok_and(|meta| meta.len() > 0) {
         return Ok(path);
     }
@@ -90,15 +90,15 @@ fn is_stale(modified: SystemTime, now: SystemTime) -> bool {
 /// `<id>/<name>` for the file, `<id>/.thumb` for its preview: the name
 /// keeps its extension, which the system viewer goes by, and shows in the
 /// viewer's title.
-fn relative(file: &File, copy: Copy) -> Result<PathBuf> {
+fn relative(file: &File, version: Version) -> Result<PathBuf> {
     // The id names a directory: anything but Slack's own shape could
     // climb out of the cache.
     if file.id.is_empty() || !file.id.chars().all(|c| c.is_ascii_alphanumeric()) {
         bail!("Slack gave this file no usable id");
     }
-    let name = match copy {
-        Copy::Thumb => ".thumb".to_string(),
-        Copy::Original => safe_name(&file.name),
+    let name = match version {
+        Version::Thumb => ".thumb".to_string(),
+        Version::Original => safe_name(&file.name),
     };
     Ok(Path::new(&file.id).join(name))
 }
@@ -142,29 +142,29 @@ mod tests {
 
     #[test]
     fn a_copy_stays_in_its_files_directory() {
-        let path = |id: &str, name: &str, copy| relative(&file(id, name), copy);
+        let path = |id: &str, name: &str, version| relative(&file(id, name), version);
         assert_eq!(
-            path("F1", "shot.png", Copy::Original).unwrap(),
+            path("F1", "shot.png", Version::Original).unwrap(),
             Path::new("F1/shot.png")
         );
         assert_eq!(
-            path("F1", "shot.png", Copy::Thumb).unwrap(),
+            path("F1", "shot.png", Version::Thumb).unwrap(),
             Path::new("F1/.thumb")
         );
         assert_eq!(
-            path("F1", "../../.ssh/config", Copy::Original).unwrap(),
+            path("F1", "../../.ssh/config", Version::Original).unwrap(),
             Path::new("F1/_.._.ssh_config")
         );
         assert_eq!(
-            path("F1", ".thumb", Copy::Original).unwrap(),
+            path("F1", ".thumb", Version::Original).unwrap(),
             Path::new("F1/thumb")
         );
         assert_eq!(
-            path("F1", "", Copy::Original).unwrap(),
+            path("F1", "", Version::Original).unwrap(),
             Path::new("F1/file")
         );
-        assert!(path("../F1", "shot.png", Copy::Original).is_err());
-        assert!(path("", "shot.png", Copy::Original).is_err());
+        assert!(path("../F1", "shot.png", Version::Original).is_err());
+        assert!(path("", "shot.png", Version::Original).is_err());
     }
 
     #[test]
