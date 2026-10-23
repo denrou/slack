@@ -118,6 +118,13 @@ Deferred on purpose by the review of 2026-10-22 (`v0.15.0..main`):
 - Closing one of two screens removes the shared heartbeat, so the fallback notifies beside the other for up to 30 seconds; two screens already notify twice.
 - Untested, since each needs a pure function pulled out of `App` first: the heartbeat's four transitions in `keep_beat`, and the note `App::notify` builds (a group DM names its sender, an IM does not).
 
+Deferred on purpose by the review of 2026-10-22 (`v0.16.1..main`):
+
+- The reply box's cursor steps by Unicode scalar, not by grapheme: in a decomposed `é` (text copied from a macOS file name) or a 👍🏽, Left can stop inside the character and Delete takes half of it. Typed and corrected French is composed, so it is not felt; the fix is the `unicode-segmentation` crate, and `Move::Left` and `Cut::Char` should then share one step. Up and Down keep the column in characters, not in display width, for the same reason.
+- Ctrl-G and its undo put the cursor at the end, so the place in a long draft is lost. The correction is asked before sending, with the cursor at the end in practice; the undo could keep the old cursor beside `Draft::typed` if it is ever felt.
+- `Draft::text` and `Draft::cursor` are both public, so nothing but care keeps the cursor on a boundary of the text; `ui.rs`'s tests set the text by hand. Private fields behind a constructor if a third writer appears.
+- The reply box wraps its text three times a frame (its height, the caret's row, the drawing). Drafts are a few lines; one count shared by the three if the screen shows up in Activity Monitor, with the markup cache above.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
