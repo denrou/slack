@@ -7,6 +7,7 @@
 use std::cmp::Ordering;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::api::{self, Client};
 use crate::counts::{self, Conversation, Kind};
@@ -80,7 +81,7 @@ pub struct Person {
 }
 
 impl Person {
-    fn from_cache(id: &str, user: &User) -> Person {
+    pub fn from_cache(id: &str, user: &User) -> Person {
         Person {
             id: id.to_string(),
             handle: user.name.clone(),
@@ -127,6 +128,34 @@ pub fn correspondents(client: &Client, names: &mut Names) -> Result<Vec<Person>,
         })
         .collect();
     Ok(people)
+}
+
+/// The members of a channel, bots included, or None when there are more
+/// than `max`: which of them one page holds says nothing.
+pub fn members(
+    client: &Client,
+    channel: &str,
+    max: usize,
+) -> Result<Option<Vec<String>>, api::Error> {
+    const METHOD: &str = "conversations.members";
+    let limit = (max + 1).to_string();
+    let body = client.call(METHOD, &[("channel", channel), ("limit", &limit)])?;
+    let members: Vec<String> = body
+        .get("members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| api::Error::Shape {
+            method: METHOD.to_string(),
+            reason: "missing `members`".to_string(),
+        })?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let more = body
+        .pointer("/response_metadata/next_cursor")
+        .and_then(Value::as_str)
+        .is_some_and(|cursor| !cursor.is_empty());
+    Ok((!more && members.len() <= max).then_some(members))
 }
 
 /// Everyone in the workspace matching `filter`, from a fresh walk of the

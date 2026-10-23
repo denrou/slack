@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::api::{self, Client, Credentials, Identity};
@@ -14,6 +14,7 @@ use crate::auth::{capture, cdp};
 use crate::counts::Kind;
 use crate::directory::Listed;
 use crate::names::Names;
+use crate::presence::{self, Person, Presence, Status};
 use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
 use crate::target::parse_permalink;
@@ -322,6 +323,186 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// The most people `slack who` describes: each costs two calls.
+const WHO_MAX: usize = 50;
+/// The people of the DMs visited last that a bare `slack who` describes,
+/// as many as the screen's `Recent people`.
+const WHO_RECENT: usize = 8;
+
+/// One person as `slack who --json` prints them.
+#[derive(serde::Serialize)]
+struct Described<'a> {
+    user: &'a str,
+    handle: &'a str,
+    name: &'a str,
+    presence: Option<Presence>,
+    status: Option<&'a Status>,
+    tz: Option<&'a str>,
+    /// Their clock now, with its offset.
+    local_time: Option<String>,
+    notifications_paused_until: Option<i64>,
+}
+
+pub fn who(targets: &[String], json: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let me = workspace.user_id.as_deref();
+    let mut names = Names::load();
+    let found = who_people(&client, &mut names, targets, me).and_then(|users| {
+        names.resolve_users(&client, users.clone())?;
+        let mut people = presence::profiles(&client, &users)?;
+        for (user, presence) in presence::presences(&client, &users)? {
+            people.entry(user).or_default().presence = Some(presence);
+        }
+        Ok((users, people))
+    });
+    names.save();
+    let (users, mut people) = found?;
+    let mut described: Vec<(directory::Person, Person)> = users
+        .iter()
+        .map(|id| {
+            let listed = names.user(id).map_or_else(
+                || directory::Person {
+                    id: id.clone(),
+                    handle: id.clone(),
+                    display: id.clone(),
+                    real: String::new(),
+                    title: String::new(),
+                },
+                |user| directory::Person::from_cache(id, user),
+            );
+            (listed, people.remove(id).unwrap_or_default())
+        })
+        .collect();
+    // Who is around first.
+    described.sort_by_cached_key(|(listed, person)| {
+        (
+            person.presence != Some(Presence::Active),
+            listed.display.to_lowercase(),
+        )
+    });
+    let now = jiff::Zoned::now();
+    let seconds = now.timestamp().as_second();
+    if json {
+        let value: Vec<Described> = described
+            .iter()
+            .map(|(listed, person)| Described {
+                user: &listed.id,
+                handle: &listed.handle,
+                name: &listed.display,
+                presence: person.presence,
+                status: person.status(seconds),
+                tz: person.profile.as_ref().and_then(|p| p.tz.as_deref()),
+                local_time: person
+                    .local(&now)
+                    .map(|local| local.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()),
+                notifications_paused_until: person.paused_until(seconds),
+            })
+            .collect();
+        return print_json(&value);
+    }
+    if described.is_empty() {
+        println!("No direct message visited lately; name the people: slack who @jane '#team'");
+        return Ok(());
+    }
+    let style = Style::detect(false);
+    let width = described
+        .iter()
+        .map(|(listed, _)| listed.display.chars().count() + 1)
+        .max()
+        .unwrap_or(0);
+    to_stdout(|out| {
+        for (listed, person) in &described {
+            let label = format!("@{}", listed.display);
+            let padding = " ".repeat(width - label.chars().count());
+            let (dot, word) = match person.presence {
+                Some(Presence::Active) => ("●", "active"),
+                Some(Presence::Away) => ("○", "away"),
+                None => ("?", "presence unknown"),
+            };
+            let mut notes = vec![style.dim(word)];
+            notes.extend(person.notes(&now));
+            if person.profile.is_none() {
+                notes.push(style.dim("status could not be read"));
+            }
+            writeln!(
+                out,
+                "{dot} {}{padding}  {}",
+                style.bold(&label),
+                notes.join(" · ")
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// Whom `slack who` describes, in the order named: the people named, the
+/// members of a channel named, else the people of the DMs visited last.
+/// Bots, and you in a list you did not name yourself in, are left out.
+fn who_people(
+    client: &Client,
+    names: &mut Names,
+    targets: &[String],
+    me: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut users = Vec::new();
+    if targets.is_empty() {
+        let counts = counts::fetch(client)?;
+        let dms: Vec<String> = counts
+            .recent
+            .iter()
+            .filter(|id| {
+                counts
+                    .conversations
+                    .iter()
+                    .any(|c| &c.id == *id && c.kind == Kind::Im)
+            })
+            .take(WHO_RECENT)
+            .cloned()
+            .collect();
+        names.resolve_channels(client, dms.clone())?;
+        users.extend(
+            dms.iter()
+                .filter_map(|dm| names.dm_user(dm))
+                .filter(|user| Some(*user) != me)
+                .map(str::to_string),
+        );
+    }
+    for target in targets {
+        if let Some(name) = target.strip_prefix('@') {
+            let user = names
+                .user_id_by_name(client, name)?
+                .ok_or_else(|| anyhow!("no one called @{name} in the workspace"))?;
+            users.push(user);
+        } else if let Some(name) = target.strip_prefix('#') {
+            let channel = names
+                .channel_id_by_name(client, name)?
+                .ok_or_else(|| anyhow!("no channel named #{name} that you can see"))?;
+            let members = directory::members(client, &channel, WHO_MAX)?.ok_or_else(|| {
+                anyhow!("#{name} has more than {WHO_MAX} members; name the people instead: slack who @jane @bob")
+            })?;
+            names.resolve_users(client, members.clone())?;
+            users.extend(members.into_iter().filter(|user| {
+                Some(user.as_str()) != me
+                    && user != "USLACKBOT"
+                    && !names.user(user).is_some_and(|u| u.is_bot)
+            }));
+        } else {
+            bail!("`{target}` is not an @person or a #channel");
+        }
+    }
+    let mut seen = HashSet::new();
+    users.retain(|user| seen.insert(user.clone()));
+    if users.len() > WHO_MAX {
+        bail!(
+            "that is {} people; `slack who` describes {WHO_MAX} at most",
+            users.len()
+        );
+    }
+    Ok(users)
 }
 
 pub fn search(query: &str, limit: usize, json: bool, no_color: bool) -> Result<()> {

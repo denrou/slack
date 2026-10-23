@@ -10,11 +10,12 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 
 use super::model::{
-    Completion, Draft, Focus, Mode, Picker, Row, Search, Section, State, Target, Viewport, row_of,
-    rows,
+    Completion, Draft, Focus, Item, Mode, Picker, Row, Search, Section, State, Target, Viewport,
+    row_of, rows,
 };
 use crate::history::{File, Message};
 use crate::names::Names;
+use crate::presence::{Person, Presence, Status};
 use crate::{emoji, mrkdwn, view};
 
 const LIST_HINTS: &str = "j/k move  Tab section  Enter messages  r reply  e mark read  x select  c compose  o open  / search  O in Slack  Ctrl-R refresh  ? keys  q quit";
@@ -90,7 +91,7 @@ pub fn draw(
             draw_messages(frame, right, state, names, now)
         }
         Mode::Image(file) => {
-            draw_list(frame, left, state);
+            draw_list(frame, left, state, names, now);
             let block = Block::bordered().title(format!(" {} ", file.title));
             let inner = block.inner(right);
             frame.render_widget(block, right);
@@ -101,7 +102,7 @@ pub fn draw(
             state.viewport
         }
         _ => {
-            draw_list(frame, left, state);
+            draw_list(frame, left, state, names, now);
             draw_messages(frame, right, state, names, now)
         }
     };
@@ -109,7 +110,26 @@ pub fn draw(
     viewport
 }
 
-fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
+/// The person of a DM item, None for any other item; Some(None) while
+/// nothing is known of them yet.
+fn dm_person<'a>(item: &Item, names: &Names, state: &'a State) -> Option<Option<&'a Person>> {
+    let user = names
+        .dm_user(&item.channel)
+        .filter(|_| item.thread_ts.is_none())?;
+    Some(state.people.get(user))
+}
+
+/// Whether a DM's person is at their screen; a space while not known.
+fn presence_dot(presence: Option<Presence>) -> Span<'static> {
+    match presence {
+        Some(Presence::Active) => Span::styled("● ", Style::new().fg(Color::Green)),
+        Some(Presence::Away) => Span::styled("○ ", Style::new().dim()),
+        None => Span::raw("  "),
+    }
+}
+
+fn draw_list(frame: &mut Frame, area: Rect, state: &State, names: &Names, now: &Zoned) {
+    let seconds = now.timestamp().as_second();
     let rows = rows(&state.items);
     let lines: Vec<ListItem> = rows
         .iter()
@@ -123,12 +143,26 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State) {
                 } else {
                     Style::new()
                 };
-                let mut spans = vec![
-                    Span::raw(tick),
-                    Span::styled(item.title.as_str(), title),
-                    Span::raw("  "),
-                    Span::styled(item.detail.as_str(), Style::new().dim()),
-                ];
+                let mut spans = vec![Span::raw(tick)];
+                // A DM's person: whether they are there, their status's
+                // emoji, their paused notifications.
+                let person = dm_person(item, names, state);
+                if let Some(person) = person {
+                    spans.push(presence_dot(person.and_then(|person| person.presence)));
+                }
+                spans.push(Span::styled(item.title.as_str(), title));
+                if let Some(person) = person.flatten() {
+                    // A custom emoji's `:name:` would crowd the row.
+                    let glyph = person.status(seconds).and_then(Status::character);
+                    if let Some(glyph) = glyph {
+                        spans.push(Span::raw(format!(" {glyph}")));
+                    }
+                    if person.paused_until(seconds).is_some() {
+                        spans.push(Span::raw(" 🔕"));
+                    }
+                }
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(item.detail.as_str(), Style::new().dim()));
                 if !state
                     .typists(&item.channel, item.thread_ts.as_deref())
                     .is_empty()
@@ -395,10 +429,14 @@ fn draw_messages(
             )
         }
         (None, Some(item)) => (
-            if item.detail.is_empty() {
-                format!(" {} ", item.title)
-            } else {
-                format!(" {} · {} ", item.title, item.detail)
+            {
+                let mut parts = vec![item.title.clone()];
+                if !item.detail.is_empty() {
+                    parts.push(item.detail.clone());
+                }
+                let person = dm_person(item, names, state).flatten();
+                parts.extend(person.map(|person| person.notes(now)).unwrap_or_default());
+                format!(" {} ", parts.join(" · "))
             },
             item.has_more,
             false,
@@ -1104,6 +1142,58 @@ mod tests {
             let at = row.find(text)?;
             Some((u16::try_from(row[..at].chars().count()).ok()?, y))
         })
+    }
+
+    #[test]
+    fn a_dm_shows_whether_its_person_is_there() {
+        use crate::names::{Channel, User};
+        use crate::presence::Profile;
+
+        let mut state = history(&["hello"], None);
+        state.items[0].channel = "D1".to_string();
+        state.items[0].title = "@jane".to_string();
+        state.people.insert(
+            "U1".to_string(),
+            Person {
+                presence: Some(Presence::Active),
+                profile: Some(Profile {
+                    status: Some(Status {
+                        emoji: "running".to_string(),
+                        unicode: None,
+                        text: "At the gym".to_string(),
+                        expires: None,
+                    }),
+                    tz: Some("Europe/Brussels".to_string()),
+                }),
+                dnd: None,
+            },
+        );
+        let dm = Channel {
+            name: "U1".to_string(),
+            is_private: false,
+            is_im: true,
+            is_mpim: false,
+            user: Some("U1".to_string()),
+        };
+        let names = Names::with(vec![("U1", User::default())], vec![("D1", dm)]);
+        let now: Zoned = "2026-10-23T10:00:00-04:00[America/Toronto]"
+            .parse()
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 10)).expect("a test terminal");
+        terminal
+            .draw(|frame| {
+                draw(frame, &state, &names, &now, None);
+            })
+            .expect("a draw");
+        let buffer = terminal.backend().buffer().clone();
+        let (x, y) = find(&buffer, "● @jane 🏃").expect("the dot and the status's emoji");
+        assert_eq!(buffer[(x, y)].fg, Color::Green);
+        // The emoji's second cell reads as a blank here.
+        let title = row(&buffer, 0);
+        assert!(
+            title.contains("@jane · 🏃") && title.contains("At the gym · 16:00 in Brussels"),
+            "the pane's title: {title}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` opens what needs you in an interactive view, `slack unreads` prints it, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack show` reads any conversation, `slack search` finds a message. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` opens what needs you in an interactive view, `slack unreads` prints it, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -40,6 +40,8 @@ slack channels                  # the channels and group messages you are in
 slack channels dev              # ...whose name contains "dev"
 slack people                    # the people you have a direct message with
 slack people jane               # ...or anyone in the workspace matching "jane"
+slack who                       # the people of your recent DMs: there or away, status, their clock
+slack who @jane '#sre'          # ...or these people, or a channel's members
 slack show '#dev-team'          # the last 20 messages of a channel, read or not
 slack show @jane -n 50          # ...or of a direct message, 50 of them
 slack search deploy failed      # the 20 newest messages that match, anywhere
@@ -67,6 +69,10 @@ The view stops at what is unread. `slack show '#dev-team'` prints the last 20 me
 
 To find the name, `slack channels` lists the channels and group messages you are in, with `private`, `muted` and `unread` where they apply, and `slack people` lists the people you have a direct message with. Both take words to match: `slack channels sre`, `slack people jane doe`. For people, a filter searches the whole workspace directory (handle, name, title), not only your direct messages. `--json` on any of the three gives the data.
 
+## Who is around
+
+`slack who @jane @bob` says, for each person, whether they are at their screen (`●` active, `○` away, Slack's green dot), their status with its emoji and when it ends, their clock when it is not yours (`16:00 in Brussels`), and until when their notifications are paused, so you know before you write whether they will see it now. `slack who '#sre'` does the same for a channel's members, bots left out, up to 50; without arguments, it is the people of the direct messages you visited last. The ones there come first. Slack keeps no history of this, so it is now or nothing. `--json` gives `presence`, `status` (`emoji`, `text`, `expires`), `tz`, `local_time` and `notifications_paused_until` for each.
+
 ## Search
 
 `slack search <query>` asks Slack's own search and prints the newest matches first, 20 of them (`-n 100` at most), each under its conversation with its author, its time and its permalink, which `slack thread` and `slack send` take. The query is Slack's: `in:#channel`, `from:@person`, `before:`, `after:`, `on:`, `has:link` work as in the app. A line on stderr says how many matched beyond those shown, so a pipe gets the matches alone; `--json` gives `query`, `total` and `matches` (each a message with `channel`, `name` and `permalink`).
@@ -77,7 +83,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 `e` marks the selected conversation as read and takes it off the list; on an opened conversation it only closes it, since closing is not reading (an unread one is also listed in its section, where `e` marks it). To mark several, `x` selects them one at a time (a ✓ shows, `x` again unselects, Esc unselects them all) and `e` marks them together. Each is marked up to the newest message it had when you selected it: one that came in since was never on your screen, so it stays unread.
 
-The screen keeps itself current: it listens to Slack's real-time socket, as the app does, and reloads when a message, a reply, an edit or a read moved what it shows, leaving you where you were (the selection, the highlighted message, the open thread). Someone typing puts a `✎` after the conversation in the list and their name under the messages. It waits while the reply box, the picker or a prompt is open, so nothing moves under what you are typing. Should the socket drop, the screen asks Slack every 15 seconds whether anything moved until it is back, and every 2 minutes beside it in case it stops sending something.
+The screen keeps itself current: it listens to Slack's real-time socket, as the app does, and reloads when a message, a reply, an edit or a read moved what it shows, leaving you where you were (the selection, the highlighted message, the open thread). Someone typing puts a `✎` after the conversation in the list and their name under the messages. A direct message shows whether its person is there, `●` or `○` before the name as Slack hears it, then their status's emoji and `🔕` while their notifications are paused; its pane's title adds the status itself, their clock when it is not yours and until when the notifications are paused. It waits while the reply box, the picker or a prompt is open, so nothing moves under what you are typing. Should the socket drop, the screen asks Slack every 15 seconds whether anything moved until it is back, and every 2 minutes beside it in case it stops sending something.
 
 In WezTerm and Ghostty the screen also notifies you when a message aimed at you arrives while the terminal is in the background: a DM or a group message, unless muted, or a mention of you, `@here` and `@channel` included outside a muted channel. The terminal posts the notification (`OSC 777`), and clicking it brings you back. Nothing is posted while you are looking at the screen, which already shows the message, nor while the socket is down. Other terminals get no notification: they would drop the sequence without a word.
 

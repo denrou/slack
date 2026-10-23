@@ -1,6 +1,7 @@
 //! Slack's real-time socket (`rtm.connect`), which the screen listens to
 //! so it hears of a message as it is posted instead of polling for it. A
-//! detached thread holds the socket, keeps it alive and reconnects;
+//! detached thread holds the socket, keeps it alive and reconnects, and
+//! subscribes to the presence of the people the screen shows;
 //! `Event::parse` turns a frame into what the screen acts on, and is
 //! pure. What an event means for the screen is decided there, not here.
 
@@ -16,6 +17,7 @@ use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
 
 use crate::api::{self, Client, Socket};
+use crate::presence::Presence;
 
 /// How long a read waits, so the loop gets to send its pings.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,6 +71,12 @@ pub enum Event {
         thread_ts: Option<String>,
         user: String,
     },
+    /// People watched (`presence_sub`) came or went; Slack also says it
+    /// for each of them right after the subscription.
+    Presence {
+        users: Vec<String>,
+        presence: Presence,
+    },
 }
 
 /// A message posted, edited or deleted.
@@ -95,7 +103,7 @@ impl Posted {
 }
 
 impl Event {
-    /// The events the screen acts on; the rest (presence, profiles,
+    /// The events the screen acts on; the rest (profiles,
     /// `search_recents`…) are dropped.
     pub fn parse(frame: &Value) -> Option<Event> {
         let text =
@@ -166,6 +174,19 @@ impl Event {
                 thread_ts: text(frame, "thread_ts"),
                 user: text(frame, "user")?,
             }),
+            // One person as `user`, or several as `users`.
+            "presence_change" => {
+                let presence = Presence::parse(frame.get("presence")?.as_str()?)?;
+                let users = match frame.get("users").and_then(Value::as_array) {
+                    Some(users) => users
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                    None => vec![text(frame, "user")?],
+                };
+                Some(Event::Presence { users, presence })
+            }
             _ => None,
         }
     }
@@ -173,14 +194,27 @@ impl Event {
 
 /// Listen on Slack's socket from a thread of its own, for as long as the
 /// screen holds the receiver. `live` says whether the socket is up, for
-/// the poll to slow down meanwhile. Detached, as the poll is.
-pub fn listen(client: Client, live: Arc<AtomicBool>) -> Receiver<Signal> {
+/// the poll to slow down meanwhile. `watch` takes the people whose
+/// presence to hear of, the whole list each time. Detached, as the poll
+/// is.
+pub fn listen(
+    client: Client,
+    live: Arc<AtomicBool>,
+    watch: Receiver<Vec<String>>,
+) -> Receiver<Signal> {
     let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || keep_listening(&client, &live, &sender));
+    thread::spawn(move || keep_listening(&client, &live, &watch, &sender));
     receiver
 }
 
-fn keep_listening(client: &Client, live: &AtomicBool, sender: &Sender<Signal>) {
+fn keep_listening(
+    client: &Client,
+    live: &AtomicBool,
+    watch: &Receiver<Vec<String>>,
+    sender: &Sender<Signal>,
+) {
+    // Kept across connections: each new one subscribes again.
+    let mut watched = Vec::new();
     let mut again = false;
     let mut wait = FIRST_WAIT;
     let mut failures = 0;
@@ -189,7 +223,7 @@ fn keep_listening(client: &Client, live: &AtomicBool, sender: &Sender<Signal>) {
         match client.socket() {
             Ok(socket) => {
                 failures = 0;
-                let ended = listen_on(socket, live, sender, again);
+                let ended = listen_on(socket, live, sender, again, watch, &mut watched);
                 live.store(false, Ordering::Relaxed);
                 if ended == Ended::Closed || sender.send(Signal::Down).is_err() {
                     return;
@@ -222,16 +256,40 @@ enum Ended {
     Closed,
 }
 
-fn listen_on(mut socket: Socket, live: &AtomicBool, sender: &Sender<Signal>, again: bool) -> Ended {
+fn listen_on(
+    mut socket: Socket,
+    live: &AtomicBool,
+    sender: &Sender<Signal>,
+    again: bool,
+    watch: &Receiver<Vec<String>>,
+    watched: &mut Vec<String>,
+) -> Ended {
     if set_read_timeout(&socket).is_err() {
         return Ended::Dropped;
     }
     let mut heard = Instant::now();
     let mut pinged = Instant::now();
     let mut id = 0u64;
+    let mut hello = false;
+    // What this connection subscribed to: none yet.
+    let mut subscribed: Option<Vec<String>> = None;
     loop {
         if heard.elapsed() >= SILENCE {
             return Ended::Dropped;
+        }
+        if let Some(latest) = watch.try_iter().last() {
+            *watched = latest;
+        }
+        // Each subscription replaces the last; an empty one ends them.
+        let wanted = subscribed
+            .as_ref()
+            .map_or(!watched.is_empty(), |s| s != watched);
+        if hello && wanted {
+            let sub = json!({"type": "presence_sub", "ids": watched}).to_string();
+            if socket.send(Message::text(sub)).is_err() {
+                return Ended::Dropped;
+            }
+            subscribed = Some(watched.clone());
         }
         if pinged.elapsed() >= PING_EVERY {
             id += 1;
@@ -262,6 +320,7 @@ fn listen_on(mut socket: Socket, live: &AtomicBool, sender: &Sender<Signal>, aga
         };
         let signal = match frame.get("type").and_then(Value::as_str) {
             Some("hello") => {
+                hello = true;
                 live.store(true, Ordering::Relaxed);
                 Signal::Up { again }
             }
@@ -418,5 +477,25 @@ mod tests {
         ] {
             assert_eq!(Event::parse(&frame), None, "{frame}");
         }
+    }
+
+    #[test]
+    fn presence_comes_for_one_or_several() {
+        let one = json!({"type": "presence_change", "user": "U1", "presence": "active"});
+        assert_eq!(
+            Event::parse(&one),
+            Some(Event::Presence {
+                users: vec!["U1".to_string()],
+                presence: Presence::Active,
+            })
+        );
+        let several = json!({"type": "presence_change", "users": ["U1", "U2"], "presence": "away"});
+        assert_eq!(
+            Event::parse(&several),
+            Some(Event::Presence {
+                users: vec!["U1".to_string(), "U2".to_string()],
+                presence: Presence::Away,
+            })
+        );
     }
 }

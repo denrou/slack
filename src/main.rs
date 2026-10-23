@@ -19,6 +19,7 @@ mod notify;
 mod par;
 mod paths;
 mod prefs;
+mod presence;
 mod react;
 mod read;
 mod replies;
@@ -140,6 +141,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show who is around: presence, status, their clock, paused notifications
+    Who {
+        /// `@person`s, or a `#channel` for its members; the people of the DMs you visited last when omitted
+        targets: Vec<String>,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Search the messages, newest first; Slack's operators work (`in:#dev from:@jane after:2026-10-01`)
     Search {
         /// What to look for, Slack's search syntax
@@ -203,6 +212,7 @@ fn main() -> ExitCode {
         }) => commands::thread(&thread, json, no_color),
         Some(Command::Channels { filter, json }) => commands::channels(&filter.join(" "), json),
         Some(Command::People { filter, json }) => commands::people(&filter.join(" "), json),
+        Some(Command::Who { targets, json }) => commands::who(&targets, json),
         Some(Command::Search {
             query,
             limit,

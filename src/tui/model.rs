@@ -11,6 +11,7 @@ use crate::counts::{Conversation, Kind};
 use crate::history::{self, File, Message, compare_ts};
 use crate::mrkdwn::{self, Link};
 use crate::names::Names;
+use crate::presence::Person;
 use crate::rtm::{Event, Posted};
 use crate::search::{Found, Hit};
 use crate::view::{self, Entry, View};
@@ -1050,6 +1051,9 @@ pub struct State {
     /// A recent conversation whose history failed to load: not tried
     /// again until the cursor leaves it or a reload.
     pub preview_failed: Option<String>,
+    /// The people of the DMs listed, by user id: presence from the
+    /// socket, the rest from a thread that reads it now and then.
+    pub people: BTreeMap<String, Person>,
 }
 
 impl State {
@@ -1074,6 +1078,7 @@ impl State {
             typing: BTreeMap::new(),
             last_search: None,
             preview_failed: None,
+            people: BTreeMap::new(),
         }
     }
 
@@ -1207,6 +1212,12 @@ impl State {
                 Wake::Nothing
             }
             Event::Message(posted) => self.posted(&posted),
+            Event::Presence { users, presence } => {
+                for user in users {
+                    self.people.entry(user).or_default().presence = Some(presence);
+                }
+                Wake::Nothing
+            }
         }
     }
 
@@ -2343,6 +2354,7 @@ fn link_action(url: String, copy: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presence::{Presence, Profile};
 
     #[test]
     fn a_thread_is_read_whole_from_its_first_new_reply() {
@@ -4355,6 +4367,22 @@ mod tests {
         assert_eq!(state.typists("C2", Some("2.000100")), ["U2"]);
         state.forget_typing(start + TYPING_FOR);
         assert!(state.typing.is_empty(), "not repeated");
+    }
+
+    #[test]
+    fn presence_is_kept_beside_the_rest() {
+        let mut state = state();
+        let presence = |users: &[&str], presence: Presence| Event::Presence {
+            users: users.iter().map(|user| user.to_string()).collect(),
+            presence,
+        };
+        state.people.entry("U1".into()).or_default().profile = Some(Profile::default());
+        let wake = state.hear(presence(&["U1", "U2"], Presence::Active), Instant::now());
+        assert_eq!(wake, Wake::Nothing, "nothing to read again");
+        state.hear(presence(&["U2"], Presence::Away), Instant::now());
+        assert_eq!(state.people["U1"].presence, Some(Presence::Active));
+        assert!(state.people["U1"].profile.is_some(), "the profile stays");
+        assert_eq!(state.people["U2"].presence, Some(Presence::Away));
     }
 
     fn hit(channel: &str, ts: &str, thread_ts: Option<&str>) -> Hit {

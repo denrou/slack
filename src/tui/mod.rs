@@ -47,6 +47,7 @@ use crate::directory::{self, Listed};
 use crate::files::{self, Version};
 use crate::history::{self, Message};
 use crate::names::Names;
+use crate::presence::{self, Person};
 use crate::rtm::{self, Posted, Signal};
 use crate::search::{self, Found, Hit};
 use crate::{
@@ -100,6 +101,8 @@ fn screen(
     }
     let live = Arc::new(AtomicBool::new(false));
     let (nudges, nudged) = mpsc::channel();
+    let (watch, watched) = mpsc::channel();
+    let (wanted, wants) = mpsc::channel();
     let term_program = env::var("TERM_PROGRAM").ok();
     let mut app = App {
         client,
@@ -112,7 +115,11 @@ fn screen(
         visited: Visited::of(&counts),
         resting: None,
         polls: poll(client.clone(), Arc::clone(&live), nudged),
-        signals: rtm::listen(client.clone(), Arc::clone(&live)),
+        signals: rtm::listen(client.clone(), Arc::clone(&live), watched),
+        described: describe(client.clone(), Arc::clone(&live), wants),
+        watch,
+        wanted,
+        watching: Vec::new(),
         nudges,
         live,
         notifies: me.is_some() && notify::supported(term_program.as_deref()),
@@ -332,6 +339,78 @@ fn poll(client: Client, live: Arc<AtomicBool>, nudges: Receiver<bool>) -> Receiv
     receiver
 }
 
+/// How often the status, timezone and paused notifications of the people
+/// listed are read again: a status lasts hours, and the socket was not
+/// seen telling of one.
+const PROFILE_EVERY: Duration = Duration::from_secs(300);
+/// How often their presence is read while the socket, which tells of it
+/// as it moves, is down.
+const PRESENCE_EVERY: Duration = Duration::from_secs(60);
+
+/// The people of the DMs listed, described on a thread of its own: the
+/// profile of each when first listed and every `PROFILE_EVERY`, and the
+/// presence of all while the socket is down. `wanted` takes the whole
+/// list each time it changes. A read that fails is tried again on the
+/// next turn, and a dead session stops it, since the poll reports that.
+/// Detached, as the poll is.
+fn describe(
+    client: Client,
+    live: Arc<AtomicBool>,
+    wanted: Receiver<Vec<String>>,
+) -> Receiver<BTreeMap<String, Person>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut people: Vec<String> = Vec::new();
+        let mut read: BTreeMap<String, Instant> = BTreeMap::new();
+        loop {
+            let every = if live.load(Ordering::Relaxed) {
+                PROFILE_EVERY
+            } else {
+                PRESENCE_EVERY
+            };
+            match wanted.recv_timeout(every) {
+                Ok(list) => people = wanted.try_iter().last().unwrap_or(list),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            let due: Vec<String> = people
+                .iter()
+                .filter(|user| {
+                    read.get(*user)
+                        .is_none_or(|at| at.elapsed() >= PROFILE_EVERY)
+                })
+                .cloned()
+                .collect();
+            let mut found = match presence::profiles(&client, &due) {
+                Ok(found) => found,
+                Err(api::Error::Auth { .. }) => return,
+                Err(_) => BTreeMap::new(),
+            };
+            let now = Instant::now();
+            for (user, person) in &found {
+                if person.profile.is_some() {
+                    read.insert(user.clone(), now);
+                }
+            }
+            if !live.load(Ordering::Relaxed) {
+                match presence::presences(&client, &people) {
+                    Ok(presences) => {
+                        for (user, presence) in presences {
+                            found.entry(user).or_default().presence = Some(presence);
+                        }
+                    }
+                    Err(api::Error::Auth { .. }) => return,
+                    Err(_) => {}
+                }
+            }
+            if !found.is_empty() && sender.send(found).is_err() {
+                return;
+            }
+        }
+    });
+    receiver
+}
+
 struct Polled {
     began: Instant,
     counts: Result<Counts, api::Error>,
@@ -414,6 +493,13 @@ struct App<'a> {
     resting: Option<(String, Instant)>,
     polls: Receiver<Polled>,
     signals: Receiver<Signal>,
+    /// What `describe` read of the people listed.
+    described: Receiver<BTreeMap<String, Person>>,
+    /// To the socket and to `describe`: the people listed now.
+    watch: Sender<Vec<String>>,
+    wanted: Sender<Vec<String>>,
+    /// The people last sent to both.
+    watching: Vec<String>,
     /// To the poll: fetch now, and reload whatever the counts say if true.
     nudges: Sender<bool>,
     /// When the last mark or reply finished: a poll begun before it shows
@@ -447,6 +533,7 @@ impl App<'_> {
         loop {
             self.keep_beat();
             self.heard();
+            self.watch_people();
             self.draw(terminal)?;
             let wait = match self.preview_wait() {
                 Some(Duration::ZERO) => {
@@ -844,6 +931,33 @@ impl App<'_> {
             // The poll outlives no screen: an error here means quitting.
             let _ = self.nudges.send(wake == Wake::Reload);
         }
+    }
+
+    /// The people of the DMs listed, each read of them, and who they are
+    /// sent to the socket and to `describe` when they changed.
+    fn watch_people(&mut self) {
+        for found in self.described.try_iter() {
+            for (user, person) in found {
+                self.state.people.entry(user).or_default().update(person);
+            }
+        }
+        let mut people: Vec<String> = self
+            .state
+            .items
+            .iter()
+            .filter(|item| item.thread_ts.is_none())
+            .filter_map(|item| self.names.dm_user(&item.channel))
+            .map(str::to_string)
+            .collect();
+        people.sort();
+        people.dedup();
+        if people == self.watching {
+            return;
+        }
+        // Neither outlives the screen: an error here means quitting.
+        let _ = self.watch.send(people.clone());
+        let _ = self.wanted.send(people.clone());
+        self.watching = people;
     }
 
     /// The heartbeat follows the socket: written while it is up, removed
