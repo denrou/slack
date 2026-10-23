@@ -39,7 +39,8 @@ const HELP: &[&str] = &[
     "/               search Slack (in:#channel, from:@person, after:2026-10-01 work): Enter searches, then opens the match in its conversation; / again brings the last search back",
     "@, #            in the reply box, complete a person or a channel: Up/Down move, Tab picks, Esc closes the list",
     "Ctrl-J          a new line in the reply box (Ctrl-Enter, Shift-Enter too where the terminal reports them)",
-    "Ctrl-W, Ctrl-U  the last word, the line, back (Option-, Command-Backspace too where the terminal reports them)",
+    "Arrows          in the reply box, move the cursor; with Option a word, with Command to the line's start or end (Home, End, Ctrl-A, Ctrl-E too)",
+    "Ctrl-W, Ctrl-U  the word, the line before the cursor, back (Option-, Command-Backspace too where the terminal reports them)",
     "Ctrl-G          in the reply box, correct the accents and typos with fix_command (config.toml); again, your text back",
     "e               mark it as read, or close it, unmarked, if you opened it; with a selection, all of the selection",
     "x               select the conversation for e, or unselect it",
@@ -707,6 +708,38 @@ fn compose_rows(text: &str, width: u16) -> u16 {
         .clamp(1, COMPOSE_ROWS)
 }
 
+/// The reply box's caret, before the `column`th character of the line.
+fn put_caret(line: &mut Line<'static>, column: usize) {
+    let caret = Span::styled("▏", Style::new().dim());
+    // Characters left to pass before the caret, None once it is placed.
+    let mut left = Some(column);
+    let mut spans = Vec::with_capacity(line.spans.len() + 2);
+    for span in line.spans.drain(..) {
+        let count = span.content.chars().count();
+        match left {
+            Some(n) if n < count => {
+                let split = span.content.char_indices().nth(n).map_or(0, |(at, _)| at);
+                let (head, tail) = span.content.split_at(split);
+                if !head.is_empty() {
+                    spans.push(Span::styled(head.to_string(), span.style));
+                }
+                spans.push(caret.clone());
+                spans.push(Span::styled(tail.to_string(), span.style));
+                left = None;
+            }
+            Some(n) => {
+                left = Some(n - count);
+                spans.push(span);
+            }
+            None => spans.push(span),
+        }
+    }
+    if left.is_some() {
+        spans.push(caret);
+    }
+    line.spans = spans;
+}
+
 fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
     match &state.mode {
         Mode::Compose(draft) => {
@@ -720,7 +753,10 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 draw_completion(frame, above, state, completion);
             }
             let Draft {
-                text, thread_ts, ..
+                text,
+                cursor,
+                thread_ts,
+                ..
             } = draft;
             let to = state
                 .selected_item()
@@ -754,17 +790,21 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 ),
                 None => format!("{title} · Enter sends, Ctrl-J a new line, Esc cancels "),
             };
+            let before = &text[..*cursor];
             let mut lines = styled_lines(&mrkdwn::draft(text), true);
-            if let Some(last) = lines.last_mut() {
-                last.push_span(Span::styled("▏", Style::new().dim()));
+            if let Some(line) = lines.get_mut(before.matches('\n').count()) {
+                let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
+                put_caret(line, column);
             }
-            // The last rows stay in view once the text outgrows the box.
+            // The caret's row stays in view once the text outgrows the box.
             let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
             let inner = area.inner(Margin::new(1, 1));
             let rows = if inner.width == 0 {
                 0
             } else {
-                paragraph.line_count(inner.width)
+                Paragraph::new(format!("{before}▏"))
+                    .wrap(Wrap { trim: false })
+                    .line_count(inner.width)
             };
             let scroll = rows.saturating_sub(usize::from(inner.height));
             frame.render_widget(
@@ -1052,6 +1092,32 @@ mod tests {
         assert!(buffer[(x + 4, y)].modifier.contains(Modifier::DIM));
         assert!(buffer[(x + 5, y)].modifier.contains(Modifier::BOLD));
         assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_reply_box_draws_its_caret_at_the_cursor() {
+        let mut state = history(&["hello"], None);
+        let mut draft = Draft::new(None);
+        draft.text = "say *hi*\nthere".to_string();
+        draft.cursor = "say *h".len();
+        state.mode = Mode::Compose(draft);
+        let (buffer, _) = render(&state, 100, 12);
+        let (x, y) = find(&buffer, "say *h▏i*").expect("the caret inside the word");
+        assert!(
+            buffer[(x + 7, y)].modifier.contains(Modifier::BOLD),
+            "styled after it too"
+        );
+        assert!(find(&buffer, "there▏").is_none());
+
+        let Mode::Compose(draft) = &mut state.mode else {
+            unreachable!()
+        };
+        draft.cursor = draft.text.len();
+        let (buffer, _) = render(&state, 100, 12);
+        assert!(
+            find(&buffer, "there▏").is_some(),
+            "at the end of the last line"
+        );
     }
 
     #[test]

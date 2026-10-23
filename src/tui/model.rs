@@ -541,6 +541,8 @@ impl Picker {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Draft {
     pub text: String,
+    /// Where the next key types or deletes, as a byte offset into `text`.
+    pub cursor: usize,
     /// The thread it goes in, if any.
     pub thread_ts: Option<String>,
     /// The highlighted entry of the completion list, None once Esc closed
@@ -555,6 +557,7 @@ impl Draft {
     pub fn new(thread_ts: Option<String>) -> Draft {
         Draft {
             text: String::new(),
+            cursor: 0,
             thread_ts,
             pick: Some(0),
             typed: None,
@@ -564,10 +567,128 @@ impl Draft {
     /// The chosen entry takes the place of the word being completed, a
     /// space after it.
     fn accept(&mut self, start: usize, insert: &str) {
-        self.text.truncate(start);
-        self.text.push_str(insert);
-        self.text.push(' ');
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        self.insert(insert);
+        self.insert(" ");
         self.pick = Some(0);
+    }
+
+    fn insert(&mut self, text: &str) {
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    /// The text before the cursor: what a deleting key takes from and
+    /// what the completion reads.
+    fn before(&self) -> &str {
+        &self.text[..self.cursor]
+    }
+
+    fn cut(&mut self, cut: Cut) {
+        let start = cut.start(self.before());
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    /// Delete (Fn-Backspace on a Mac): the character after the cursor.
+    fn cut_after(&mut self) {
+        if let Some(c) = self.text[self.cursor..].chars().next() {
+            self.text
+                .replace_range(self.cursor..self.cursor + c.len_utf8(), "");
+        }
+    }
+
+    /// The whole text is replaced, by a correction or its undoing: the
+    /// cursor goes to its end.
+    fn replace(&mut self, text: String) {
+        self.cursor = text.len();
+        self.text = text;
+    }
+}
+
+/// Where a key moves the cursor of the reply box: Left and Right a
+/// character; with Option (Alt) or Ctrl, or Option-B and Option-F as
+/// Terminal.app sends them, a word; with Command (Super), or Home, End,
+/// Ctrl-A and Ctrl-E as in readline, to the start or the end of the line;
+/// Up and Down to the line above or below, in the same column. The
+/// modified arrows reach the box only where the terminal reports them.
+#[derive(Clone, Copy)]
+enum Move {
+    Left,
+    Right,
+    WordLeft,
+    WordRight,
+    LineStart,
+    LineEnd,
+    Up,
+    Down,
+}
+
+impl Move {
+    fn of(key: KeyEvent) -> Option<Move> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let word = alt || control;
+        let line = key.modifiers.contains(KeyModifiers::SUPER);
+        match key.code {
+            KeyCode::Left if line => Some(Move::LineStart),
+            KeyCode::Right if line => Some(Move::LineEnd),
+            KeyCode::Left if word => Some(Move::WordLeft),
+            KeyCode::Right if word => Some(Move::WordRight),
+            KeyCode::Left => Some(Move::Left),
+            KeyCode::Right => Some(Move::Right),
+            KeyCode::Char('b') if alt => Some(Move::WordLeft),
+            KeyCode::Char('f') if alt => Some(Move::WordRight),
+            KeyCode::Home => Some(Move::LineStart),
+            KeyCode::End => Some(Move::LineEnd),
+            KeyCode::Char('a') if control => Some(Move::LineStart),
+            KeyCode::Char('e') if control => Some(Move::LineEnd),
+            KeyCode::Up => Some(Move::Up),
+            KeyCode::Down => Some(Move::Down),
+            _ => None,
+        }
+    }
+
+    /// Where the cursor lands in `text` from `at`. A word is a run of
+    /// non-blanks, as on a Mac: left goes to the start of the one before,
+    /// right to the end of the one after.
+    fn apply(self, text: &str, at: usize) -> usize {
+        let line_start = |at: usize| text[..at].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = |at: usize| text[at..].find('\n').map_or(text.len(), |n| at + n);
+        // The byte offset of the `column`th character of the line at
+        // `start`, or of its end when the line is shorter.
+        let column_in = |start: usize, column: usize| {
+            text[start..line_end(start)]
+                .char_indices()
+                .nth(column)
+                .map_or(line_end(start), |(n, _)| start + n)
+        };
+        let column = || text[line_start(at)..at].chars().count();
+        match self {
+            Move::Left => text[..at]
+                .chars()
+                .next_back()
+                .map_or(at, |c| at - c.len_utf8()),
+            Move::Right => text[at..].chars().next().map_or(at, |c| at + c.len_utf8()),
+            Move::WordLeft => word_start(text[..at].trim_end()),
+            Move::WordRight => {
+                let rest = text[at..].trim_start();
+                let start = text.len() - rest.len();
+                rest.find(char::is_whitespace)
+                    .map_or(text.len(), |n| start + n)
+            }
+            Move::LineStart => line_start(at),
+            Move::LineEnd => line_end(at),
+            Move::Up => match line_start(at) {
+                0 => 0,
+                start => column_in(line_start(start - 1), column()),
+            },
+            Move::Down => match line_end(at) {
+                end if end == text.len() => end,
+                end => column_in(end + 1, column()),
+            },
+        }
     }
 }
 
@@ -659,7 +780,7 @@ fn breaks_line(key: KeyEvent) -> bool {
     }
 }
 
-/// What a deleting key takes off the end of the text: Backspace (or the
+/// What a deleting key takes before the cursor: Backspace (or the
 /// Ctrl-H some terminals send for it) a character; Ctrl-W, or Backspace
 /// with Option (Alt) or Ctrl, the word before it; Ctrl-U, or Backspace with Command (Super), the line. The
 /// modified Backspaces are a Mac's and reach the box only where the
@@ -690,11 +811,12 @@ impl Cut {
         }
     }
 
-    /// A word is the run before the end and the blanks after it, as on a
-    /// Mac. A line break goes alone, for a word or a line as for a
-    /// character: the line above is never eaten by accident.
-    fn apply(self, text: &mut String) {
-        let keep = match self {
+    /// Where the cut of the end of `text` starts. A word is the run
+    /// before the end and the blanks after it, as on a Mac. A line break
+    /// goes alone, for a word or a line as for a character: the line
+    /// above is never eaten by accident.
+    fn start(self, text: &str) -> usize {
+        match self {
             _ if text.ends_with('\n') => text.len() - 1,
             Cut::Char => text.len() - text.chars().next_back().map_or(0, char::len_utf8),
             Cut::Word => {
@@ -704,8 +826,12 @@ impl Cut {
                 word_start(&text[..end])
             }
             Cut::Line => text.rfind('\n').map_or(0, |at| at + 1),
-        };
-        text.truncate(keep);
+        }
+    }
+
+    /// The cut of a one-line query, which has no cursor.
+    fn apply(self, text: &mut String) {
+        text.truncate(self.start(text));
     }
 }
 
@@ -935,7 +1061,7 @@ impl State {
     /// list, before the names are loaded, or when nothing matches.
     pub fn completion(&self, draft: &Draft) -> Option<Completion> {
         let pick = draft.pick?;
-        let (start, sigil, word) = completing(&draft.text)?;
+        let (start, sigil, word) = completing(draft.before())?;
         let word = word.to_lowercase();
         let matches: Vec<usize> = self
             .candidates
@@ -1442,9 +1568,7 @@ impl State {
     pub fn paste(&mut self, pasted: &str) -> Action {
         match std::mem::replace(&mut self.mode, Mode::Browse) {
             Mode::Compose(mut draft) => {
-                draft
-                    .text
-                    .push_str(&pasted.replace("\r\n", "\n").replace('\r', "\n"));
+                draft.insert(&pasted.replace("\r\n", "\n").replace('\r', "\n"));
                 return self.typed(draft);
             }
             Mode::Pick(mut picker) if picker.filtering => {
@@ -1654,7 +1778,8 @@ impl State {
 
     /// The reply box. Enter sends and Esc gives up, unless a completion
     /// list is open above the box: then Tab or Enter take the highlighted
-    /// entry, Up and Down (Ctrl-p, Ctrl-n too) move in it, Esc closes it.
+    /// entry, Up and Down (Ctrl-p, Ctrl-n too) move in it rather than in
+    /// the text, Esc closes it.
     /// A line break (`breaks_line`) is one whatever is open.
     fn compose(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1687,17 +1812,27 @@ impl State {
     }
 
     /// A key into the text of the reply box: Enter sends it, a line break
-    /// goes into it, a deleting key (`Cut`) takes from its end, Ctrl-G
-    /// corrects it or takes the correction back, Esc drops it.
+    /// goes into it at the cursor, an arrow (`Move`) moves the cursor, a
+    /// deleting key (`Cut`) takes before it and Delete after it, Ctrl-G
+    /// corrects the text or takes the correction back, Esc drops it.
     fn edit(&mut self, mut draft: Draft, key: KeyEvent) -> Action {
         if let Some(cut) = Cut::of(key) {
-            cut.apply(&mut draft.text);
+            draft.cut(cut);
             return self.typed(draft);
+        }
+        if let Some(to) = Move::of(key) {
+            draft.cursor = to.apply(&draft.text, draft.cursor);
+            self.mode = Mode::Compose(draft);
+            return Action::None;
         }
         match key.code {
             KeyCode::Esc => Action::None,
+            KeyCode::Delete => {
+                draft.cut_after();
+                self.typed(draft)
+            }
             _ if breaks_line(key) => {
-                draft.text.push('\n');
+                draft.insert("\n");
                 self.typed(draft)
             }
             KeyCode::Enter => {
@@ -1717,7 +1852,7 @@ impl State {
             }
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => self.fix(draft),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                draft.text.push(c);
+                draft.insert(c.encode_utf8(&mut [0; 4]));
                 self.typed(draft)
             }
             _ => {
@@ -1731,7 +1866,7 @@ impl State {
     /// else a correction asked of the configured command.
     fn fix(&mut self, mut draft: Draft) -> Action {
         let action = if let Some(typed) = draft.typed.take() {
-            draft.text = typed;
+            draft.replace(typed);
             self.status = Some("Back to your text".to_string());
             Action::None
         } else if let Err(why) = &self.fixes {
@@ -1760,7 +1895,7 @@ impl State {
         }
         // The model trims its answer: the space or line break typed last
         // stays, so the next word does not stick to the corrected one.
-        draft.text = fixed + &typed[typed.trim_end().len()..];
+        draft.replace(fixed + &typed[typed.trim_end().len()..]);
         draft.typed = Some(typed);
         draft.pick = None;
         self.status = Some("Corrected · Ctrl-G takes it back".to_string());
@@ -1771,7 +1906,7 @@ impl State {
     fn typed(&mut self, mut draft: Draft) -> Action {
         draft.pick = Some(0);
         draft.typed = None;
-        let load = self.candidates.is_none() && completing(&draft.text).is_some();
+        let load = self.candidates.is_none() && completing(draft.before()).is_some();
         self.mode = Mode::Compose(draft);
         if load {
             Action::LoadCandidates
@@ -3396,12 +3531,79 @@ mod tests {
     }
 
     #[test]
-    fn a_word_cut_takes_the_blanks_after_it() {
-        let cut = |text: &str, cut: Cut| {
-            let mut text = text.to_string();
-            cut.apply(&mut text);
-            text
+    fn the_arrows_move_in_the_draft_and_keys_act_at_the_cursor() {
+        // The cursor is a byte offset: `ö` takes two.
+        let cursor = |state: &State| match &state.mode {
+            Mode::Compose(draft) => (draft.text.clone(), draft.cursor),
+            other => panic!("still writing, not {other:?}"),
         };
+        let mut state = state();
+        state.key(press(KeyCode::Char('r')));
+        state.paste("one twö three\nfour");
+        state.key(press(KeyCode::Up));
+        assert_eq!(cursor(&state).1, 4, "Up keeps the column");
+        state.key(press(KeyCode::Right));
+        state.key(press(KeyCode::Right));
+        state.key(press(KeyCode::Right));
+        state.key(press(KeyCode::Char('X')));
+        assert_eq!(cursor(&state), ("one twöX three\nfour".into(), 9));
+        state.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(cursor(&state).1, 4, "Option-Left: the start of the word");
+        state.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(cursor(&state).1, 0, "Option-B, as Terminal.app sends it");
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(cursor(&state).1, 3, "Option-Right: the end of the word");
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(cursor(&state).1, 15, "Command-Right: the end of the line");
+        state.key(press(KeyCode::Down));
+        assert_eq!(cursor(&state).1, 20, "a shorter line: its end");
+        state.key(control('a'));
+        assert_eq!(
+            cursor(&state).1,
+            16,
+            "Ctrl-A: the start of the line, not the text"
+        );
+        state.key(press(KeyCode::Backspace));
+        assert_eq!(cursor(&state), ("one twöX threefour".into(), 15));
+        state.key(control('w'));
+        assert_eq!(cursor(&state), ("one twöX four".into(), 10));
+        state.key(press(KeyCode::Delete));
+        assert_eq!(cursor(&state), ("one twöX our".into(), 10));
+        state.key(press(KeyCode::End));
+        state.key(press(KeyCode::Right));
+        assert_eq!(
+            cursor(&state).1,
+            "one twöX our".len(),
+            "no further than the end"
+        );
+        assert!(matches!(
+            state.key(press(KeyCode::Enter)),
+            Action::Send { text, .. } if text == "one twöX our"
+        ));
+    }
+
+    #[test]
+    fn the_completion_reads_and_replaces_the_word_before_the_cursor() {
+        let mut state = state();
+        state.candidates = Some(vec![candidate("@jdoe", "Jane Doe", "jdoe jane doe")]);
+        state.key(press(KeyCode::Char('r')));
+        state.paste("cc  please");
+        for _ in 0.."please".len() + 1 {
+            state.key(press(KeyCode::Left));
+        }
+        state.key(press(KeyCode::Char('@')));
+        state.key(press(KeyCode::Char('j')));
+        state.key(press(KeyCode::Tab));
+        let Mode::Compose(draft) = &state.mode else {
+            panic!("still writing");
+        };
+        assert_eq!(draft.text, "cc @jdoe  please");
+        assert_eq!(draft.cursor, "cc @jdoe ".len());
+    }
+
+    #[test]
+    fn a_word_cut_takes_the_blanks_after_it() {
+        let cut = |text: &str, cut: Cut| text[..cut.start(text)].to_string();
         assert_eq!(cut("hello world  ", Cut::Word), "hello ");
         assert_eq!(cut("hello", Cut::Word), "");
         assert_eq!(cut("one\n  ", Cut::Word), "one\n");

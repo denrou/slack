@@ -578,6 +578,7 @@ impl App<'_> {
                     Err(err) => {
                         // The text stays in the box: a timeout must not cost it.
                         self.state.mode = Mode::Compose(Draft {
+                            cursor: text.len(),
                             text,
                             thread_ts,
                             pick: None,
