@@ -797,12 +797,16 @@ fn draw_bottom(frame: &mut Frame, area: Rect, state: &State, names: &Names) {
                 put_caret(line, column);
             }
             // The caret's row stays in view once the text outgrows the box.
+            // It is counted with the rest of its word, which the wrap moves
+            // to the next row along with it.
             let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
             let inner = area.inner(Margin::new(1, 1));
+            let after = &text[*cursor..];
+            let word_rest = &after[..after.find(char::is_whitespace).unwrap_or(after.len())];
             let rows = if inner.width == 0 {
                 0
             } else {
-                Paragraph::new(format!("{before}▏"))
+                Paragraph::new(format!("{before}▏{word_rest}"))
                     .wrap(Wrap { trim: false })
                     .line_count(inner.width)
             };
@@ -1117,6 +1121,22 @@ mod tests {
         assert!(
             find(&buffer, "there▏").is_some(),
             "at the end of the last line"
+        );
+    }
+
+    #[test]
+    fn the_reply_box_keeps_the_caret_in_view_when_its_word_wraps() {
+        let mut state = history(&["hello"], None);
+        let mut draft = Draft::new(None);
+        draft.text = "1\n2\n3\n4\n5\n6\naaa bbbccc".to_string();
+        draft.cursor = draft.text.len() - "ccc".len();
+        state.mode = Mode::Compose(draft);
+        // Eight columns inside the box: `aaa bbb▏` would fit on a row,
+        // `aaa bbb▏ccc` does not, and the caret goes down with its word.
+        let (buffer, _) = render(&state, 10, 14);
+        assert!(
+            find(&buffer, "bbb▏ccc").is_some(),
+            "the caret's row is shown"
         );
     }
 
