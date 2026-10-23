@@ -61,9 +61,17 @@ pub fn fetch(client: &Client, query: &str, count: usize) -> Result<Found, api::E
 }
 
 /// Name what the hits show: their conversations, the person of a direct
-/// message, the authors and the people mentioned.
+/// message, the authors, the people mentioned and the channels linked.
 pub fn name(client: &Client, names: &mut Names, hits: &[Hit]) -> Result<(), api::Error> {
-    names.resolve_channels(client, hits.iter().map(|hit| hit.channel.clone()))?;
+    let linked = hits
+        .iter()
+        .flat_map(|hit| view::mentioned_channels(&hit.message.text));
+    let places: BTreeSet<String> = hits
+        .iter()
+        .map(|hit| hit.channel.clone())
+        .chain(linked)
+        .collect();
+    names.resolve_channels(client, places)?;
     let mut people = BTreeSet::new();
     for hit in hits {
         people.extend(names.channel(&hit.channel).and_then(|c| c.user.clone()));

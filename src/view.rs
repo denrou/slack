@@ -276,7 +276,8 @@ pub fn build(
     };
 
     // Everyone the view will name: the people behind the DMs, every
-    // author, everyone mentioned, and the channels the threads live in.
+    // author, everyone mentioned, the channels the threads live in and
+    // those linked.
     let thread_items: &mut [Thread] = threads
         .as_mut()
         .and_then(|threads| threads.items.as_deref_mut())
@@ -292,17 +293,19 @@ pub fn build(
             .iter()
             .filter_map(|c| names.channel(&c.id)?.user.clone()),
     );
+    let mut places = BTreeSet::new();
     for message in pages_by_id.values().flat_map(|page| &page.messages) {
-        collect_people(&mut people, message);
+        collect_names(&mut people, &mut places, message);
     }
     for thread in thread_items {
-        collect_people(&mut people, &thread.root);
+        collect_names(&mut people, &mut places, &thread.root);
         let whole = thread.history.iter().flat_map(|history| &history.replies);
         for reply in thread.unread_replies.iter().chain(whole) {
-            collect_people(&mut people, reply);
+            collect_names(&mut people, &mut places, reply);
         }
     }
     names.resolve_users(client, people)?;
+    names.resolve_channels(client, places)?;
 
     let names = &*names;
     let mut entries = |conversations: Vec<&Conversation>| -> Vec<Entry> {
@@ -401,22 +404,34 @@ fn sections<'a>(unread: &[&'a Conversation]) -> Sections<'a> {
     sections
 }
 
-fn collect_people(people: &mut BTreeSet<String>, message: &Message) {
+fn collect_names(people: &mut BTreeSet<String>, places: &mut BTreeSet<String>, message: &Message) {
     people.extend(message.user.clone());
     people.extend(mentioned_users(&message.text));
+    places.extend(mentioned_channels(&message.text));
 }
 
 /// The user ids named in a message, so their names can be looked up.
 pub(crate) fn mentioned_users(text: &str) -> Vec<String> {
-    text.match_indices("<@")
-        .filter_map(|(at, _)| {
-            let rest = &text[at + 2..];
-            let end = rest.find(['>', '|'])?;
-            let id = &rest[..end];
-            (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
-                .then(|| id.to_string())
-        })
+    mentions(text, "<@").map(|(id, _)| id.to_string()).collect()
+}
+
+/// The channel ids a message links without their name, so it can be looked
+/// up: Slack leaves it out of a link to a channel picked in the composer.
+pub(crate) fn mentioned_channels(text: &str) -> Vec<String> {
+    mentions(text, "<#")
+        .filter(|(_, label)| label.is_empty())
+        .map(|(id, _)| id.to_string())
         .collect()
+}
+
+/// The id and the label, empty when absent, of each `<{open}id|label>`.
+fn mentions<'t>(text: &'t str, open: &str) -> impl Iterator<Item = (&'t str, &'t str)> {
+    text.match_indices(open).filter_map(move |(at, _)| {
+        let rest = &text[at + open.len()..];
+        let inner = &rest[..rest.find('>')?];
+        let (id, label) = inner.split_once('|').unwrap_or((inner, ""));
+        (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())).then_some((id, label))
+    })
 }
 
 pub fn render(
@@ -778,6 +793,14 @@ mod tests {
         assert_eq!(
             mentioned_users("hi <@U1> and <@U2|bob>, not <#C1> or <@>"),
             ["U1", "U2"]
+        );
+    }
+
+    #[test]
+    fn mentioned_channels_are_the_unnamed_ones() {
+        assert_eq!(
+            mentioned_channels("see <#C1>, <#C2|dev>, <#C3|> and <#> or <@U1>"),
+            ["C1", "C3"]
         );
     }
 

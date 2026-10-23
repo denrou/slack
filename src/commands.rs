@@ -134,11 +134,14 @@ pub fn thread(spec: &str, json: bool, no_color: bool) -> Result<()> {
     let fetched = replies::fetch(&client, &channel, &thread_ts)?;
     names.resolve_channels(&client, [channel.clone()])?;
     let mut people = BTreeSet::new();
+    let mut places = BTreeSet::new();
     for message in std::iter::once(&fetched.root).chain(&fetched.replies) {
         people.extend(message.user.clone());
         people.extend(view::mentioned_users(&message.text));
+        places.extend(view::mentioned_channels(&message.text));
     }
     names.resolve_users(&client, people)?;
+    names.resolve_channels(&client, places)?;
     names.save();
 
     if json {
@@ -495,11 +498,14 @@ fn load_conversation(
     names.resolve_channels(client, [channel.clone()])?;
     let mut people = BTreeSet::new();
     people.extend(names.channel(&channel).and_then(|c| c.user.clone()));
+    let mut places = BTreeSet::new();
     for message in &page.messages {
         people.extend(message.user.clone());
         people.extend(view::mentioned_users(&message.text));
+        places.extend(view::mentioned_channels(&message.text));
     }
     names.resolve_users(client, people)?;
+    names.resolve_channels(client, places)?;
     Ok((channel, page, last_read))
 }
 

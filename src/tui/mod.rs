@@ -895,6 +895,9 @@ impl App<'_> {
             people.push(channel);
         }
         let _ = self.names.resolve_users(self.client, people);
+        let _ = self
+            .names
+            .resolve_channels(self.client, view::mentioned_channels(text));
         let names = &*self.names;
         let text = mrkdwn::strip(text, &|id| names.user_name(id), &|id| {
             names.channel_name(id)
@@ -1213,7 +1216,7 @@ impl App<'_> {
         from_message: usize,
     ) -> Result<ThreadPane> {
         let fetched = replies::fetch(self.client, &channel, &thread_ts)?;
-        self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
+        self.resolve_names(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         let user = |id: &str| self.names.user_name(id);
         let chan = |id: &str| self.names.channel_name(id);
         let root = mrkdwn::strip(&fetched.root.text, &user, &chan);
@@ -1235,7 +1238,7 @@ impl App<'_> {
 
     fn reload_thread(&mut self, pane: &ThreadPane) -> Result<ThreadPane> {
         let fetched = replies::fetch(self.client, &pane.channel, &pane.thread_ts)?;
-        self.resolve_people(std::iter::once(&fetched.root).chain(&fetched.replies))?;
+        self.resolve_names(std::iter::once(&fetched.root).chain(&fetched.replies))?;
         Ok(ThreadPane {
             channel: pane.channel.clone(),
             thread_ts: pane.thread_ts.clone(),
@@ -1398,17 +1401,20 @@ impl App<'_> {
     /// The recent history of a conversation, its people named.
     fn history(&mut self, channel: &str, unread_from: Option<&str>) -> Result<history::Unread> {
         let page = view::recent(self.client, channel, unread_from)?;
-        self.resolve_people(page.messages.iter())?;
+        self.resolve_names(page.messages.iter())?;
         Ok(page)
     }
 
-    fn resolve_people<'m>(&mut self, messages: impl Iterator<Item = &'m Message>) -> Result<()> {
+    fn resolve_names<'m>(&mut self, messages: impl Iterator<Item = &'m Message>) -> Result<()> {
         let mut people = BTreeSet::new();
+        let mut places = BTreeSet::new();
         for message in messages {
             people.extend(message.user.clone());
             people.extend(view::mentioned_users(&message.text));
+            places.extend(view::mentioned_channels(&message.text));
         }
         self.names.resolve_users(self.client, people)?;
+        self.names.resolve_channels(self.client, places)?;
         Ok(())
     }
 
@@ -1424,7 +1430,7 @@ impl App<'_> {
     fn show_hit(&mut self, hit: &Hit) -> Result<()> {
         let anchor = hit.anchor().to_string();
         let page = history::around(self.client, &hit.channel, &anchor, AROUND_HIT)?;
-        self.resolve_people(page.messages.iter())?;
+        self.resolve_names(page.messages.iter())?;
         self.names
             .resolve_channels(self.client, [hit.channel.clone()])?;
         let title = self.names.channel_label(&hit.channel);
