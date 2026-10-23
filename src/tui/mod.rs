@@ -655,16 +655,24 @@ impl App<'_> {
             }
             Action::ShowFile(file) => {
                 self.busy(terminal, &format!("Loading {}…", file.title))?;
-                let loaded =
-                    files::fetch(self.client, &file, Version::Thumb).and_then(|path| decode(&path));
-                match loaded {
+                let path = match files::fetch(self.client, &file, Version::Thumb) {
+                    Ok(path) => path,
+                    Err(err) => return self.fail(err),
+                };
+                match decode(&path) {
                     Ok(picture) => {
                         self.image = Some(self.graphics.new_resize_protocol(picture));
                         self.state.status = None;
                         self.state.mode = Mode::Image(file);
                         Ok(())
                     }
-                    Err(err) => self.fail(err),
+                    // A preview this build cannot read must not keep the
+                    // file from being seen: the viewer gets it, and the
+                    // preview goes, so the next try fetches it again.
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&path);
+                        self.act(Action::OpenFile(file), terminal)
+                    }
                 }
             }
             Action::OpenFile(file) => {
