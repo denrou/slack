@@ -343,16 +343,17 @@ fn poll(client: Client, live: Arc<AtomicBool>, nudges: Receiver<bool>) -> Receiv
 /// listed are read again: a status lasts hours, and the socket was not
 /// seen telling of one.
 const PROFILE_EVERY: Duration = Duration::from_secs(300);
-/// How often their presence is read while the socket, which tells of it
-/// as it moves, is down.
+/// How often the thread below wakes, and so reads their presence while
+/// the socket, which tells of it as it moves, is down.
 const PRESENCE_EVERY: Duration = Duration::from_secs(60);
 
 /// The people of the DMs listed, described on a thread of its own: the
 /// profile of each when first listed and every `PROFILE_EVERY`, and the
-/// presence of all while the socket is down. `wanted` takes the whole
-/// list each time it changes. A read that fails is tried again on the
-/// next turn, and a dead session stops it, since the poll reports that.
-/// Detached, as the poll is.
+/// presence of all once the socket has been down for a whole turn (at
+/// startup, the socket's subscription answers for them in a moment).
+/// `wanted` takes the whole list each time it changes. A read that fails
+/// is tried again on the next turn, and a dead session stops it, since
+/// the poll reports that. Detached, as the poll is.
 fn describe(
     client: Client,
     live: Arc<AtomicBool>,
@@ -362,13 +363,9 @@ fn describe(
     thread::spawn(move || {
         let mut people: Vec<String> = Vec::new();
         let mut read: BTreeMap<String, Instant> = BTreeMap::new();
+        let mut was_down = false;
         loop {
-            let every = if live.load(Ordering::Relaxed) {
-                PROFILE_EVERY
-            } else {
-                PRESENCE_EVERY
-            };
-            match wanted.recv_timeout(every) {
+            match wanted.recv_timeout(PRESENCE_EVERY) {
                 Ok(list) => people = wanted.try_iter().last().unwrap_or(list),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -392,7 +389,8 @@ fn describe(
                     read.insert(user.clone(), now);
                 }
             }
-            if !live.load(Ordering::Relaxed) {
+            let down = !live.load(Ordering::Relaxed);
+            if down && was_down {
                 match presence::presences(&client, &people) {
                     Ok(presences) => {
                         for (user, presence) in presences {
@@ -403,6 +401,7 @@ fn describe(
                     Err(_) => {}
                 }
             }
+            was_down = down;
             if !found.is_empty() && sender.send(found).is_err() {
                 return;
             }
@@ -936,8 +935,14 @@ impl App<'_> {
     /// The people of the DMs listed, each read of them, and who they are
     /// sent to the socket and to `describe` when they changed.
     fn watch_people(&mut self) {
+        // A presence read while the socket was down is older than what
+        // the socket says once it is back.
+        let live = self.live.load(Ordering::Relaxed);
         for found in self.described.try_iter() {
-            for (user, person) in found {
+            for (user, mut person) in found {
+                if live {
+                    person.presence = None;
+                }
                 self.state.people.entry(user).or_default().update(person);
             }
         }

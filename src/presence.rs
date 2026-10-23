@@ -138,7 +138,8 @@ impl Person {
         if newer.presence.is_some() {
             self.presence = newer.presence;
         }
-        // The window comes with the profile: none read then is none set.
+        // The window comes with the profile (`profiles` fails without
+        // it): none read then is none set.
         if newer.profile.is_some() {
             self.profile = newer.profile;
             self.dnd = newer.dnd;
@@ -252,7 +253,9 @@ pub fn presences(
 
 /// The status, timezone and paused notifications of each of these
 /// people, without their presence. Someone Slack would not describe is
-/// left without a profile; a dead session fails.
+/// left without a profile. The windows are one call for everyone: when
+/// it fails, so does the whole read, since an absent window would read
+/// as notifications not paused.
 pub fn profiles(client: &Client, users: &[String]) -> Result<BTreeMap<String, Person>, api::Error> {
     const METHOD: &str = "users.info";
     let read = par::map(users.to_vec(), |user| {
@@ -277,8 +280,8 @@ pub fn profiles(client: &Client, users: &[String]) -> Result<BTreeMap<String, Pe
     if users.is_empty() {
         return Ok(people);
     }
-    let body = kept(client.call("dnd.teamInfo", &[("users", &users.join(","))]))?;
-    for (user, dnd) in body.as_ref().map(parse_dnd).unwrap_or_default() {
+    let body = client.call("dnd.teamInfo", &[("users", &users.join(","))])?;
+    for (user, dnd) in parse_dnd(&body) {
         if let Some(person) = people.get_mut(&user)
             && person.profile.is_some()
         {

@@ -130,8 +130,8 @@ pub fn correspondents(client: &Client, names: &mut Names) -> Result<Vec<Person>,
     Ok(people)
 }
 
-/// The members of a channel, bots included, or None when there are more
-/// than `max`: which of them one page holds says nothing.
+/// The members of a channel, bots and you included, or None when there
+/// are more than `max`: which of them one page holds says nothing.
 pub fn members(
     client: &Client,
     channel: &str,

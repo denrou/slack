@@ -149,6 +149,9 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &State, names: &Names, now: &
                 let person = dm_person(item, names, state);
                 if let Some(person) = person {
                     spans.push(presence_dot(person.and_then(|person| person.presence)));
+                } else if names.channel(&item.channel).is_some_and(|c| c.is_mpim) {
+                    // In line with the DMs around it.
+                    spans.push(Span::raw("  "));
                 }
                 spans.push(Span::styled(item.title.as_str(), title));
                 if let Some(person) = person.flatten() {

@@ -327,6 +327,8 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
 
 /// The most people `slack who` describes: each costs two calls.
 const WHO_MAX: usize = 50;
+/// The most members of a channel read for it, bots and you among them.
+const WHO_MEMBERS: usize = 100;
 /// The people of the DMs visited last that a bare `slack who` describes,
 /// as many as the screen's `Recent people`.
 const WHO_RECENT: usize = 8;
@@ -353,8 +355,14 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
     let mut names = Names::load();
     let found = who_people(&client, &mut names, targets, me).and_then(|users| {
         names.resolve_users(&client, users.clone())?;
-        let mut people = presence::profiles(&client, &users)?;
-        for (user, presence) in presence::presences(&client, &users)? {
+        let (profiles, presences) = std::thread::scope(|scope| {
+            let presences = scope.spawn(|| presence::presences(&client, &users));
+            let profiles = presence::profiles(&client, &users);
+            let presences = presences.join().expect("the presence lookups do not panic");
+            (profiles, presences)
+        });
+        let mut people = profiles?;
+        for (user, presence) in presences? {
             people.entry(user).or_default().presence = Some(presence);
         }
         Ok((users, people))
@@ -405,7 +413,11 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
         return print_json(&value);
     }
     if described.is_empty() {
-        println!("No direct message visited lately; name the people: slack who @jane '#team'");
+        if targets.is_empty() {
+            println!("No direct message visited lately; name the people: slack who @jane '#team'");
+        } else {
+            println!("No one to describe: bots and you are left out.");
+        }
         return Ok(());
     }
     let style = Style::detect(false);
@@ -481,8 +493,8 @@ fn who_people(
             let channel = names
                 .channel_id_by_name(client, name)?
                 .ok_or_else(|| anyhow!("no channel named #{name} that you can see"))?;
-            let members = directory::members(client, &channel, WHO_MAX)?.ok_or_else(|| {
-                anyhow!("#{name} has more than {WHO_MAX} members; name the people instead: slack who @jane @bob")
+            let members = directory::members(client, &channel, WHO_MEMBERS)?.ok_or_else(|| {
+                anyhow!("#{name} has more than {WHO_MEMBERS} members; name the people instead: slack who @jane @bob")
             })?;
             names.resolve_users(client, members.clone())?;
             users.extend(members.into_iter().filter(|user| {
@@ -498,7 +510,7 @@ fn who_people(
     users.retain(|user| seen.insert(user.clone()));
     if users.len() > WHO_MAX {
         bail!(
-            "that is {} people; `slack who` describes {WHO_MAX} at most",
+            "that is {} people, bots and you left out; `slack who` describes {WHO_MAX} at most",
             users.len()
         );
     }
