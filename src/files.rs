@@ -51,7 +51,11 @@ pub fn fetch(client: &Client, file: &File, version: Version) -> Result<PathBuf> 
     let partial = partial(&path);
     let written = paths::create_private(&partial)
         .with_context(|| format!("could not write {}", partial.display()))
-        .and_then(|mut sink| Ok(client.download(url, &mut sink)?))
+        .and_then(|mut sink| {
+            let html =
+                version == Version::Original && file.mimetype.as_deref() == Some("text/html");
+            Ok(client.download(url, html, &mut sink)?)
+        })
         .and_then(|_| match version {
             Version::Original => quarantine(&partial),
             Version::Thumb => Ok(()),

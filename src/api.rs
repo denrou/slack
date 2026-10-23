@@ -235,8 +235,9 @@ impl Client {
     }
 
     /// Write a file Slack hosts into `sink`, with the session cookie as
-    /// the web client fetches it, and return its size.
-    pub fn download(&self, url: &str, sink: &mut dyn Write) -> Result<u64, Error> {
+    /// the web client fetches it, and return its size. A web page in its
+    /// place is Slack's sign-in page, unless the file is one (`html`).
+    pub fn download(&self, url: &str, html: bool, sink: &mut dyn Write) -> Result<u64, Error> {
         const WHAT: &str = "the file";
         let refused = |reason: &str| Error::File {
             reason: reason.to_string(),
@@ -272,7 +273,7 @@ impl Client {
                 status,
             });
         }
-        if response.body().mime_type() == Some("text/html") {
+        if !html && response.body().mime_type() == Some("text/html") {
             return Err(refused(
                 "a web page came back instead, which usually means the session expired (`slack whoami` checks it)",
             ));
