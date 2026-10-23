@@ -127,6 +127,13 @@ Deferred on purpose by the review of 2026-10-22 (`v0.16.1..main`):
 - `Draft::text` and `Draft::cursor` are both public, so nothing but care keeps the cursor on a boundary of the text; `ui.rs`'s tests set the text by hand. Private fields behind a constructor if a third writer appears.
 - The reply box wraps its text three times a frame (its height, the caret's row, the drawing). Drafts are a few lines; one count shared by the three if the screen shows up in Activity Monitor, with the markup cache above.
 
+Deferred on purpose by the review of 2026-10-22 (`v0.17.0..main`):
+
+- A file is downloaded on the screen's thread under one 120-second deadline: one that takes longer (a long screen recording) cannot be opened from here, and the screen is frozen meanwhile. The fix is the one `fix::run` is ready for, a thread, with a deadline per read rather than for the whole file; previews are small and videos rare, and `O` opens the message in Slack meanwhile.
+- The terminal's graphics are asked on every start, up to 2 seconds on a terminal that does not answer, for a feature used now and then. A shorter timeout would be worse: the crate's reader is not cancelled and would keep taking keys. Asking on the first image instead would race crossterm's reader. WezTerm answers at once.
+- A key typed while the startup queries run is lost, and so are bytes the graphics query leaves in std's buffered stdin.
+- The week a copy is kept is counted at the next start of the screen, not by `--count`, which the launchd job runs every 5 minutes and which must stay two calls and nothing else.
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
