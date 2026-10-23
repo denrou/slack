@@ -4,8 +4,10 @@
 //! they were fetched, so what was posted in a private channel does not
 //! pile up on disk.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -46,10 +48,14 @@ pub fn fetch(client: &Client, file: &File, version: Version) -> Result<PathBuf> 
     }
     // Written aside and renamed, so a broken download is never taken for
     // the file the next time.
-    let partial = path.with_extension("part");
+    let partial = partial(&path);
     let written = paths::create_private(&partial)
         .with_context(|| format!("could not write {}", partial.display()))
-        .and_then(|mut sink| Ok(client.download(url, &mut sink)?));
+        .and_then(|mut sink| Ok(client.download(url, &mut sink)?))
+        .and_then(|_| match version {
+            Version::Original => quarantine(&partial),
+            Version::Thumb => Ok(()),
+        });
     if let Err(err) = written {
         let _ = fs::remove_file(&partial);
         return Err(err);
@@ -58,8 +64,41 @@ pub fn fetch(client: &Client, file: &File, version: Version) -> Result<PathBuf> 
     Ok(path)
 }
 
+/// Mark the file as downloaded from the internet, as a browser does, so
+/// macOS asks before it runs anything: `open` would otherwise run a
+/// posted `.terminal` or `.command` without a word. Deliberate: a copy
+/// that cannot be marked is not handed over.
+#[cfg(target_os = "macos")]
+fn quarantine(path: &Path) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let status = Command::new("/usr/bin/xattr")
+        .args([
+            "-w",
+            "com.apple.quarantine",
+            &format!("0081;{now:x};slack;"),
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("could not run xattr to mark the download")?;
+    if !status.success() {
+        bail!("could not mark {} as downloaded", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quarantine(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Drop the copies older than a week. Each file has its own directory,
-/// whose time is that of its last copy.
+/// whose time is that of its last copy. One that cannot go does not keep
+/// the others: the first failure is reported once all were tried.
 pub fn prune() -> Result<()> {
     let dir = dir()?;
     let entries = match fs::read_dir(&dir) {
@@ -68,15 +107,37 @@ pub fn prune() -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("could not read {}", dir.display())),
     };
     let now = SystemTime::now();
-    for entry in entries {
-        let entry = entry?;
-        let modified = entry.metadata()?.modified()?;
-        if is_stale(modified, now) {
-            fs::remove_dir_all(entry.path())
-                .with_context(|| format!("could not remove {}", entry.path().display()))?;
+    let mut failed = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| is_stale(modified, now));
+        if !stale {
+            continue;
+        }
+        let removed = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        // Another screen starting at the same time may have taken it.
+        if let Err(err) = removed
+            && !paths::is_not_found(&err)
+        {
+            failed.get_or_insert_with(|| format!("could not remove {}: {err}", path.display()));
         }
     }
-    Ok(())
+    failed.map_or(Ok(()), |failed| bail!(failed))
+}
+
+/// Appended, not swapped for the extension: a file named `x.part` would
+/// be its own partial copy.
+fn partial(path: &Path) -> PathBuf {
+    let mut name = OsString::from(path);
+    name.push(".part");
+    PathBuf::from(name)
 }
 
 fn dir() -> Result<PathBuf> {
@@ -126,6 +187,8 @@ fn safe_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use super::*;
 
     fn file(id: &str, name: &str) -> File {
@@ -165,6 +228,36 @@ mod tests {
         );
         assert!(path("../F1", "shot.png", Version::Original).is_err());
         assert!(path("", "shot.png", Version::Original).is_err());
+    }
+
+    #[test]
+    fn a_partial_copy_never_has_the_name_of_a_file() {
+        assert_eq!(
+            partial(Path::new("F1/shot.png")),
+            Path::new("F1/shot.png.part")
+        );
+        assert_eq!(partial(Path::new("F1/x.part")), Path::new("F1/x.part.part"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_download_is_marked_as_one() {
+        let dir = env::temp_dir().join(format!("slack-quarantine-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("setup.terminal");
+        fs::write(&path, "x").unwrap();
+        quarantine(&path).unwrap();
+        let read = Command::new("/usr/bin/xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        let value = String::from_utf8_lossy(&read.stdout);
+        assert!(
+            value.starts_with("0081;") && value.trim_end().ends_with(";slack;"),
+            "{value}"
+        );
     }
 
     #[test]
