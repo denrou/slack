@@ -564,13 +564,20 @@ impl Draft {
         }
     }
 
-    /// The chosen entry takes the place of the word being completed, a
-    /// space after it.
+    /// The chosen entry takes the place of the word being completed, the
+    /// part after the cursor included, and the cursor goes past the space
+    /// after it, added unless one was there.
     fn accept(&mut self, start: usize, insert: &str) {
-        self.text.replace_range(start..self.cursor, "");
+        let after = &self.text[self.cursor..];
+        let end = self.cursor + after.find(char::is_whitespace).unwrap_or(after.len());
+        self.text.replace_range(start..end, "");
         self.cursor = start;
         self.insert(insert);
-        self.insert(" ");
+        if self.text[self.cursor..].starts_with(' ') {
+            self.cursor += 1;
+        } else {
+            self.insert(" ");
+        }
         self.pick = Some(0);
     }
 
@@ -3586,22 +3593,36 @@ mod tests {
     }
 
     #[test]
-    fn the_completion_reads_and_replaces_the_word_before_the_cursor() {
-        let mut state = state();
-        state.candidates = Some(vec![candidate("@jdoe", "Jane Doe", "jdoe jane doe")]);
-        state.key(press(KeyCode::Char('r')));
-        state.paste("cc  please");
-        for _ in 0.."please".len() + 1 {
-            state.key(press(KeyCode::Left));
-        }
-        state.key(press(KeyCode::Char('@')));
-        state.key(press(KeyCode::Char('j')));
-        state.key(press(KeyCode::Tab));
-        let Mode::Compose(draft) = &state.mode else {
-            panic!("still writing");
+    fn the_completion_reads_and_replaces_the_word_at_the_cursor() {
+        let completed = |pasted: &str, back: usize, typed: &str| {
+            let mut state = state();
+            state.candidates = Some(vec![candidate("@jdoe", "Jane Doe", "jdoe jane doe")]);
+            state.key(press(KeyCode::Char('r')));
+            state.paste(pasted);
+            for _ in 0..back {
+                state.key(press(KeyCode::Left));
+            }
+            for c in typed.chars() {
+                state.key(press(KeyCode::Char(c)));
+            }
+            state.key(press(KeyCode::Tab));
+            match state.mode {
+                Mode::Compose(draft) => (draft.text, draft.cursor),
+                mode => panic!("still writing, not {mode:?}"),
+            }
         };
-        assert_eq!(draft.text, "cc @jdoe  please");
-        assert_eq!(draft.cursor, "cc @jdoe ".len());
+        let after = "cc @jdoe ".len();
+        assert_eq!(
+            completed("cc  please", 7, "@j"),
+            ("cc @jdoe please".into(), after),
+            "the space there is kept, not doubled"
+        );
+        assert_eq!(
+            completed("cc @ne please", 9, "ja"),
+            ("cc @jdoe please".into(), after),
+            "the rest of the word goes"
+        );
+        assert_eq!(completed("cc @j", 0, ""), ("cc @jdoe ".into(), after));
     }
 
     #[test]
