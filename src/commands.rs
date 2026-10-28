@@ -20,8 +20,7 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, files, history, lastview, mrkdwn, notify, react, read, replies, search,
-    send, target, tui, view,
+    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, target, view,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -30,7 +29,7 @@ pub fn unreads(json: bool, no_color: bool) -> Result<()> {
     let client = workspace.client();
     let mut names = Names::load();
     let counts = counts::fetch(&client)?;
-    let view = view::build(&client, &counts, &mut names, view::Reach::Unread)?;
+    let view = view::build(&client, &counts, &mut names)?;
     names.save();
     if let Err(err) = lastview::remember(team_id, &view) {
         crate::warn::warn(format!(
@@ -71,26 +70,10 @@ pub fn count(json: bool) -> Result<()> {
         return print_json(&json!({
             "unread": counts.unread_count(),
             "me": counts.me_count(),
-            "notifying": notify::covered(),
         }));
     }
     println!("{}", counts.unread_count());
     Ok(())
-}
-
-pub fn ui() -> Result<()> {
-    let store = Workspaces::load()?;
-    let (team_id, workspace) = store.default_workspace()?;
-    let mut names = Names::load();
-    let result = tui::run(
-        &workspace.client(),
-        &mut names,
-        team_id,
-        workspace.user_id.as_deref(),
-        &workspace.url,
-    );
-    names.save();
-    result
 }
 
 pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()> {
@@ -329,8 +312,7 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
 const WHO_MAX: usize = 50;
 /// The most members of a channel read for it, bots and you among them.
 const WHO_MEMBERS: usize = 100;
-/// The people of the DMs visited last that a bare `slack who` describes,
-/// as many as the screen's `Recent people`.
+/// The people of the DMs visited last that a bare `slack who` describes.
 const WHO_RECENT: usize = 8;
 
 /// One person as `slack who --json` prints them.
@@ -827,9 +809,6 @@ pub fn logout(keep_browser_session: bool) -> Result<()> {
         println!("Removed the saved workspaces.");
     } else {
         println!("No saved workspaces.");
-    }
-    if files::clear()? {
-        println!("Deleted the files the screen downloaded.");
     }
     if keep_browser_session {
         println!(

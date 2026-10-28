@@ -1,6 +1,5 @@
-//! What a person is up to right now, for `slack who` and the screen:
-//! whether they are at their screen (`users.getPresence`; the screen
-//! hears it on the socket instead), their status and timezone
+//! What a person is up to right now, for `slack who`: whether they are
+//! at their screen (`users.getPresence`), their status and timezone
 //! (`users.info`, read fresh, since the name cache keeps a profile for
 //! good and a status lasts hours), and whether their notifications are
 //! paused (`dnd.teamInfo`, one call for everyone). Probed live on
@@ -133,19 +132,6 @@ pub struct Person {
 }
 
 impl Person {
-    /// What a newer read says, keeping what it could not read.
-    pub fn update(&mut self, newer: Person) {
-        if newer.presence.is_some() {
-            self.presence = newer.presence;
-        }
-        // The window comes with the profile (`profiles` fails without
-        // it): none read then is none set.
-        if newer.profile.is_some() {
-            self.profile = newer.profile;
-            self.dnd = newer.dnd;
-        }
-    }
-
     /// The status, unless it expired since it was read.
     pub fn status(&self, now: i64) -> Option<&Status> {
         self.profile
@@ -481,20 +467,5 @@ mod tests {
         assert_eq!(someone.notes(&now), ["🌴 (until Sat 10:00)"]);
         let someone = person(Some(status("custom-thing", "Busy", None)), None);
         assert_eq!(someone.notes(&now), [":custom-thing: Busy"]);
-    }
-
-    #[test]
-    fn an_update_keeps_what_it_could_not_read() {
-        let mut known = person(Some(status("running", "Out", None)), None);
-        known.dnd = Some(Dnd { start: 1, end: 2 });
-        known.update(Person {
-            presence: Some(Presence::Away),
-            ..Person::default()
-        });
-        assert_eq!(known.presence, Some(Presence::Away));
-        assert!(known.profile.is_some() && known.dnd.is_some());
-        known.update(person(None, None));
-        assert_eq!(known.presence, Some(Presence::Active));
-        assert_eq!(known.dnd, None);
     }
 }

@@ -1,6 +1,6 @@
 //! The default view: what is unread, grouped the way a person answers it.
-//! The model is built first and rendered second, so `--json` and the TUI
-//! read the same thing the text rendering does.
+//! The model is built first and rendered second, so `--json` reads the
+//! same thing the text rendering does.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,61 +16,7 @@ use crate::lastview::ThreadRef;
 use crate::names::Names;
 use crate::style::Style;
 use crate::threads::{self, Thread, ThreadList};
-use crate::{emoji, mrkdwn, par, replies};
-
-/// How much of each unread conversation the view reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
-    /// The unread messages only: what the text view prints.
-    Unread,
-    /// The recent history, with the read cursor to tell the new part:
-    /// what the screen shows, so a message is read with what came before.
-    Recent,
-}
-
-/// A history on the screen holds today's messages and the unread ones,
-/// never fewer than the last `RECENT_MIN` (a quiet channel keeps its
-/// context) nor more than one page of `RECENT_MAX` (a busy one is read
-/// again on every reload).
-pub const RECENT_MIN: usize = 50;
-pub const RECENT_MAX: usize = 200;
-
-/// A conversation's recent history, as the screen shows it.
-pub fn recent(
-    client: &Client,
-    channel: &str,
-    last_read: Option<&str>,
-) -> Result<history::Unread, api::Error> {
-    let page = history::fetch(client, channel, None, RECENT_MAX)?;
-    Ok(keep_recent(page, last_read, &Zoned::now()))
-}
-
-/// Today's messages and the unread ones, or the last `RECENT_MIN` when
-/// they are fewer: a backlog from before midnight is never trimmed, since
-/// `e` marks it read.
-fn keep_recent(mut page: history::Unread, last_read: Option<&str>, now: &Zoned) -> history::Unread {
-    let today = match now.start_of_day() {
-        Ok(midnight) => {
-            let midnight = format!("{}.000000", midnight.timestamp().as_second());
-            page.messages
-                .iter()
-                .filter(|message| compare_ts(&message.ts, &midnight).is_ge())
-                .count()
-        }
-        Err(_) => 0,
-    };
-    let unread = page
-        .messages
-        .iter()
-        .filter(|message| is_new(message, last_read.filter(|c| history::is_usable_cursor(c))))
-        .count();
-    let keep = today.max(unread).max(RECENT_MIN);
-    if page.messages.len() > keep {
-        page.messages.drain(..page.messages.len() - keep);
-        page.has_more = true;
-    }
-    page
-}
+use crate::{emoji, mrkdwn, par};
 
 #[derive(Serialize)]
 pub struct View {
@@ -101,10 +47,6 @@ pub struct Entry {
     pub messages: Option<Vec<Message>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more: bool,
-    /// The read cursor, when `messages` is a history rather than the
-    /// unread part alone: what follows it is new.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unread_from: Option<String>,
 }
 
 /// The Threads view: Slack's summary, and the list when it could be read.
@@ -213,12 +155,7 @@ impl Refs {
     }
 }
 
-pub fn build(
-    client: &Client,
-    counts: &Counts,
-    names: &mut Names,
-    reach: Reach,
-) -> Result<View, api::Error> {
+pub fn build(client: &Client, counts: &Counts, names: &mut Names) -> Result<View, api::Error> {
     let unread: Vec<&Conversation> = counts.unread().collect();
     names.resolve_channels(client, unread.iter().map(|c| c.id.clone()))?;
 
@@ -233,12 +170,7 @@ pub fn build(
         .map(|c| (c.id.clone(), c.last_read.clone()))
         .collect();
     let pages = par::map(cursors, |(id, last_read)| {
-        let page = match reach {
-            Reach::Unread => {
-                history::fetch(client, &id, last_read.as_deref(), history::DEFAULT_LIMIT)
-            }
-            Reach::Recent => recent(client, &id, last_read.as_deref()),
-        };
+        let page = history::fetch(client, &id, last_read.as_deref(), history::DEFAULT_LIMIT);
         (id, page)
     });
     let mut pages_by_id = BTreeMap::new();
@@ -283,9 +215,6 @@ pub fn build(
         .and_then(|threads| threads.items.as_deref_mut())
         .unwrap_or(&mut []);
     names.resolve_channels(client, thread_items.iter().map(|t| t.channel.clone()))?;
-    if reach == Reach::Recent {
-        read_whole(client, names, thread_items)?;
-    }
     let thread_items: &[Thread] = thread_items;
     let mut people = BTreeSet::new();
     people.extend(
@@ -299,8 +228,7 @@ pub fn build(
     }
     for thread in thread_items {
         collect_names(&mut people, &mut places, &thread.root);
-        let whole = thread.history.iter().flat_map(|history| &history.replies);
-        for reply in thread.unread_replies.iter().chain(whole) {
+        for reply in &thread.unread_replies {
             collect_names(&mut people, &mut places, reply);
         }
     }
@@ -321,13 +249,6 @@ pub fn build(
                     latest: c.latest.clone(),
                     has_more: page.as_ref().is_some_and(|page| page.has_more),
                     messages: page.map(|page| page.messages),
-                    unread_from: match reach {
-                        Reach::Recent => c
-                            .last_read
-                            .clone()
-                            .filter(|cursor| history::is_usable_cursor(cursor)),
-                        Reach::Unread => None,
-                    },
                 }
             })
             .collect()
@@ -339,30 +260,6 @@ pub fn build(
         threads,
         muted: counts.muted_unread_count(),
     })
-}
-
-/// Each thread whole, as a channel's recent history is read: a reply is
-/// understood with the ones before it. One that cannot be read keeps its
-/// new replies alone.
-fn read_whole(client: &Client, names: &Names, threads: &mut [Thread]) -> Result<(), api::Error> {
-    let wanted = threads
-        .iter()
-        .map(|thread| (thread.channel.clone(), thread.thread_ts.clone()))
-        .collect();
-    let fetched = par::map(wanted, |(channel, ts)| {
-        replies::fetch(client, &channel, &ts)
-    });
-    for (thread, fetched) in threads.iter_mut().zip(fetched) {
-        match fetched {
-            Ok(history) => thread.history = Some(history),
-            Err(err @ api::Error::Auth { .. }) => return Err(err),
-            Err(err) => crate::warn::warn(format!(
-                "could not read a thread in {}: {err}",
-                names.channel_label(&thread.channel)
-            )),
-        }
-    }
-    Ok(())
 }
 
 struct Sections<'a> {
@@ -849,7 +746,6 @@ mod tests {
             latest: Some(latest.into()),
             messages,
             has_more,
-            unread_from: None,
         }
     }
 
@@ -867,49 +763,6 @@ mod tests {
         Timestamp::from_second(1760900000)
             .unwrap()
             .to_zoned(TimeZone::UTC)
-    }
-
-    #[test]
-    fn the_screen_keeps_today_the_unread_and_at_least_the_minimum() {
-        // Midnight of `now()` is 1760832000.
-        let page = |older: usize, today: usize| history::Unread {
-            messages: (0..older)
-                .map(|n| 1760800000 + n)
-                .chain((0..today).map(|n| 1760832000 + n))
-                .map(|second| message(&format!("{second}.000100"), None, ""))
-                .collect(),
-            has_more: false,
-        };
-        let kept = keep_recent(page(10, 3), None, &now());
-        assert_eq!(
-            (kept.messages.len(), kept.has_more),
-            (13, false),
-            "a quiet channel"
-        );
-        let kept = keep_recent(page(100, 3), None, &now());
-        assert_eq!((kept.messages.len(), kept.has_more), (RECENT_MIN, true));
-        assert_eq!(
-            kept.messages[0].ts, "1760800053.000100",
-            "the newest of the older ones"
-        );
-        let kept = keep_recent(page(100, 80), None, &now());
-        assert_eq!(
-            (kept.messages.len(), kept.has_more),
-            (80, true),
-            "a busy day"
-        );
-        assert!(kept.messages[0].ts.starts_with("1760832000."));
-        // Read up to the 21st older message: 79 older ones and 3 of today
-        // are unread, and none of them is trimmed.
-        let kept = keep_recent(page(100, 3), Some("1760800020.000100"), &now());
-        assert_eq!(kept.messages.len(), 82, "a backlog from before midnight");
-        let never = Some("0000000000.000000");
-        let kept = keep_recent(page(100, 3), never, &now());
-        assert_eq!(
-            kept.messages.len(),
-            RECENT_MIN,
-            "never read: no cursor to keep from"
-        );
     }
 
     fn rendered(view: &View) -> String {
@@ -1056,7 +909,6 @@ mod tests {
                 "added the Q4 numbers",
             )],
             has_more: false,
-            history: None,
         };
         let mut view = View {
             threads: Some(ThreadsView {

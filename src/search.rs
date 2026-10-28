@@ -35,17 +35,6 @@ pub struct Hit {
     pub permalink: String,
 }
 
-impl Hit {
-    /// The channel message to read it around: the thread's root for a
-    /// reply, which the channel's history holds where the reply is not.
-    pub fn anchor(&self) -> &str {
-        self.message
-            .thread_ts
-            .as_deref()
-            .unwrap_or(&self.message.ts)
-    }
-}
-
 pub fn fetch(client: &Client, query: &str, count: usize) -> Result<Found, api::Error> {
     let count = count.clamp(1, MAX_COUNT).to_string();
     let body = client.call(
@@ -146,12 +135,12 @@ mod tests {
         let reply = &found.hits[0];
         assert_eq!(reply.channel, "C0A754E2V");
         assert!(reply.message.is_reply());
-        assert_eq!(reply.anchor(), "1700000010.000100");
-        let dm = &found.hits[1];
         assert_eq!(
-            (dm.channel.as_str(), dm.anchor()),
-            ("D06JANE12", "1700000020.000100")
+            reply.message.thread_ts.as_deref(),
+            Some("1700000010.000100")
         );
+        let dm = &found.hits[1];
+        assert_eq!(dm.channel, "D06JANE12");
         assert!(dm.message.thread_ts.is_none());
     }
 

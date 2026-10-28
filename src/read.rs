@@ -65,7 +65,7 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, targets: &[String]
 }
 
 /// A cursor only moves forward: when Slack already reads at or past
-/// `latest` (the app, or the screen), marking there would make the newer
+/// `latest` (the app, most likely), marking there would make the newer
 /// messages unread again.
 pub fn already_read(cursor: Option<&str>, latest: &str) -> bool {
     cursor.is_some_and(|cursor| compare_ts(cursor, latest).is_ge())

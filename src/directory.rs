@@ -1,6 +1,6 @@
 //! The directory: every conversation you are in and everyone in the
-//! workspace, behind `slack channels`, `slack people` and the TUI's
-//! picker. `client.counts` already lists what you are in with its unread
+//! workspace, behind `slack channels` and `slack people`.
+//! `client.counts` already lists what you are in with its unread
 //! state; the names come from the cache, filled in one walk when some are
 //! missing, so the first run costs a call or two and the next ones none.
 
@@ -58,11 +58,6 @@ impl Listed {
             n => notes.push(format!("{n} mentions")),
         }
         notes
-    }
-
-    /// The read cursor, when there is something new after it.
-    pub fn unread_from(&self) -> Option<&str> {
-        self.last_read.as_deref().filter(|_| self.unread)
     }
 }
 
@@ -302,10 +297,6 @@ mod tests {
         listed.muted = true;
         listed.unread = true;
         listed.mention_count = 2;
-        listed.last_read = Some("0.5".into());
         assert_eq!(listed.notes(), ["private", "muted", "unread", "2 mentions"]);
-        assert_eq!(listed.unread_from(), Some("0.5"));
-        listed.unread = false;
-        assert_eq!(listed.unread_from(), None);
     }
 }

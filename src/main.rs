@@ -4,18 +4,14 @@
 mod api;
 mod auth;
 mod commands;
-mod config;
 mod counts;
 mod directory;
 mod emoji;
-mod files;
-mod fix;
 mod history;
 mod lastview;
 mod mention;
 mod mrkdwn;
 mod names;
-mod notify;
 mod par;
 mod paths;
 mod prefs;
@@ -23,31 +19,28 @@ mod presence;
 mod react;
 mod read;
 mod replies;
-mod rtm;
 mod search;
 mod send;
 mod store;
 mod style;
 mod target;
 mod threads;
-mod tui;
 mod view;
 mod warn;
 
-use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-/// Read and answer Slack from the terminal. With no command, what is unread
-/// as an interactive view; `slack unreads` prints it instead.
+/// Read and answer Slack from the terminal. With no command, what is unread,
+/// as `slack unreads` prints it.
 #[derive(Parser)]
 #[command(name = "slack", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Print only the number of conversations, for a status bar
     #[arg(long)]
     count: bool,
-    /// With --count: the conversations, the messages aimed at you and whether the screen notifies of them, as JSON
+    /// With --count: the conversations and the messages aimed at you, as JSON
     #[arg(long, requires = "count")]
     json: bool,
     #[command(subcommand)]
@@ -184,8 +177,6 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         None if cli.count => commands::count(cli.json),
-        // A pipe or a script cannot drive a screen; it gets the text.
-        None if io::stdin().is_terminal() && io::stdout().is_terminal() => commands::ui(),
         None => commands::unreads(false, false),
         Some(Command::Unreads { json, no_color }) => commands::unreads(json, no_color),
         Some(Command::Send {
@@ -247,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn no_command_is_the_view_and_unreads_prints_it() {
+    fn no_command_is_unreads() {
         let cli = Cli::parse_from(["slack"]);
         assert!(cli.command.is_none() && !cli.count);
         let cli = Cli::parse_from(["slack", "unreads", "--json"]);

@@ -81,17 +81,7 @@ pub fn resolve(client: &Client, names: &mut Names, team_id: &str, spec: &str) ->
 
 /// The direct message with a person, opened if it did not exist yet.
 pub fn open_dm(client: &Client, user: &str) -> Result<String> {
-    open_conversation(client, user)
-}
-
-/// The group message with these people (one person is their direct
-/// message), opened if it did not exist yet.
-pub fn open_group(client: &Client, users: &[String]) -> Result<String> {
-    open_conversation(client, &users.join(","))
-}
-
-fn open_conversation(client: &Client, users: &str) -> Result<String> {
-    let opened = client.call("conversations.open", &[("users", users)])?;
+    let opened = client.call("conversations.open", &[("users", user)])?;
     let channel = opened
         .pointer("/channel/id")
         .and_then(Value::as_str)

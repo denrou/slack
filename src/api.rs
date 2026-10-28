@@ -2,19 +2,10 @@
 //! authenticated the way the web client does it, with the `xoxc` token in
 //! the body and the `xoxd` session cookie. Commands never see the headers.
 
-use std::io::{ErrorKind, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
-use tungstenite::HandshakeError;
-use tungstenite::client::IntoClientRequest;
-use tungstenite::error::UrlError;
-use tungstenite::http::{HeaderValue, Uri};
-use tungstenite::stream::MaybeTlsStream;
-
-use crate::auth::capture;
 
 /// What `encodeURIComponent` leaves unescaped: the cookie is sent exactly
 /// as the browser sends it.
@@ -44,9 +35,6 @@ const USER_AGENT: &str = concat!(
     ")"
 );
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// A file can be a video: longer than a call, and the screen says it is
-/// downloading meanwhile.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const RATE_LIMIT_RETRIES: u32 = 2;
 /// Cap on an honoured Retry-After: a status-bar poll must not hang for minutes.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -67,42 +55,6 @@ pub enum Error {
     },
     #[error("unexpected response to {method}: {reason}")]
     Shape { method: String, reason: String },
-    /// Never the URL: it carries the session's ticket.
-    #[error("could not open Slack's socket: {reason}")]
-    Socket { reason: String },
-    #[error("Slack did not hand over the file: {reason}")]
-    File { reason: String },
-}
-
-/// Slack's real-time socket, as `Client::socket` opens it.
-pub type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
-
-/// A connection to the socket's host with timeouts, which the handshake
-/// keeps: a middlebox that never answers would hold it forever otherwise.
-fn open_stream(uri: &Uri) -> std::io::Result<TcpStream> {
-    let host = uri
-        .host()
-        .ok_or_else(|| std::io::Error::from(ErrorKind::InvalidInput))?;
-    let mut failed = std::io::Error::from(ErrorKind::NotFound);
-    for addr in (host, uri.port_u16().unwrap_or(443)).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&addr, TIMEOUT) {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(TIMEOUT))?;
-                stream.set_write_timeout(Some(TIMEOUT))?;
-                return Ok(stream);
-            }
-            Err(err) => failed = err,
-        }
-    }
-    Err(failed)
-}
-
-/// Why the socket did not open, without the URL tungstenite would quote.
-fn socket_reason(err: &tungstenite::Error) -> String {
-    match err {
-        tungstenite::Error::Url(UrlError::UnableToConnect(_)) => "could not connect".to_string(),
-        other => other.to_string(),
-    }
 }
 
 pub struct Credentials<'a> {
@@ -120,8 +72,6 @@ pub struct Identity {
     pub url: String,
 }
 
-/// Cloned for the screen's poller, which runs detached (`tui::poll`).
-#[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
     base_url: String,
@@ -185,101 +135,6 @@ impl Client {
                 })?;
             return envelope(method, body);
         }
-    }
-
-    /// Slack's real-time socket for this session: `rtm.connect` names it,
-    /// and it opens with the cookie, as the web client opens its own.
-    pub fn socket(&self) -> Result<Socket, Error> {
-        const METHOD: &str = "rtm.connect";
-        let body = self.call(METHOD, &[])?;
-        let url = body
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Shape {
-                method: METHOD.to_string(),
-                reason: "missing `url`".to_string(),
-            })?;
-        if !capture::is_slack_socket_url(url) {
-            return Err(Error::Shape {
-                method: METHOD.to_string(),
-                reason: "a socket outside slack.com".to_string(),
-            });
-        }
-        let socket_error = |reason: String| Error::Socket { reason };
-        let mut request = url
-            .into_client_request()
-            .map_err(|err| socket_error(socket_reason(&err)))?;
-        let headers = request.headers_mut();
-        for (name, value) in [
-            ("Cookie", self.cookie.as_str()),
-            ("Origin", "https://app.slack.com"),
-            ("User-Agent", USER_AGENT),
-        ] {
-            let value = HeaderValue::from_str(value)
-                .map_err(|_| socket_error(format!("a `{name}` header that is not text")))?;
-            headers.insert(name, value);
-        }
-        // Deliberate: not `tungstenite::connect`, which has no timeout and
-        // follows redirects, the cookie with them, to a host
-        // `is_slack_socket_url` never saw.
-        let stream = open_stream(request.uri())
-            .map_err(|err| socket_error(format!("could not connect: {err}")))?;
-        let (socket, _response) =
-            tungstenite::client_tls(request, stream).map_err(|err| match err {
-                HandshakeError::Failure(err) => socket_error(socket_reason(&err)),
-                HandshakeError::Interrupted(_) => {
-                    socket_error("the handshake timed out".to_string())
-                }
-            })?;
-        Ok(socket)
-    }
-
-    /// Write a file Slack hosts into `sink`, with the session cookie as
-    /// the web client fetches it, and return its size. A web page in its
-    /// place is Slack's sign-in page, unless the file is one (`html`).
-    pub fn download(&self, url: &str, html: bool, sink: &mut dyn Write) -> Result<u64, Error> {
-        const WHAT: &str = "the file";
-        let refused = |reason: &str| Error::File {
-            reason: reason.to_string(),
-        };
-        if !capture::is_slack_workspace_url(url) {
-            return Err(refused("it is not on slack.com"));
-        }
-        // Deliberate: no redirect is followed, since the cookie would go
-        // along to a host `is_slack_workspace_url` never saw.
-        let mut response = self
-            .agent
-            .get(url)
-            .config()
-            .max_redirects(0)
-            .timeout_global(Some(DOWNLOAD_TIMEOUT))
-            .build()
-            .header("Cookie", &self.cookie)
-            .header("User-Agent", USER_AGENT)
-            .call()
-            .map_err(|source| Error::Transport {
-                method: WHAT.to_string(),
-                source,
-            })?;
-        let status = response.status().as_u16();
-        if (300..400).contains(&status) {
-            return Err(refused(
-                "it sent the download elsewhere, which usually means the session expired (`slack whoami` checks it)",
-            ));
-        }
-        if !(200..300).contains(&status) {
-            return Err(Error::Http {
-                method: WHAT.to_string(),
-                status,
-            });
-        }
-        if !html && response.body().mime_type() == Some("text/html") {
-            return Err(refused(
-                "a web page came back instead, which usually means the session expired (`slack whoami` checks it)",
-            ));
-        }
-        std::io::copy(&mut response.body_mut().as_reader(), sink)
-            .map_err(|err| refused(&format!("the download broke off: {err}")))
     }
 
     pub fn auth_test(&self) -> Result<Identity, Error> {
@@ -354,14 +209,6 @@ mod tests {
             cookie_header("xoxd-ab/c+d=e f"),
             "d=xoxd-ab%2Fc%2Bd%3De%20f"
         );
-    }
-
-    #[test]
-    fn a_socket_error_never_quotes_the_ticket() {
-        let err = tungstenite::Error::Url(UrlError::UnableToConnect(
-            "wss://wss-primary.slack.com/websocket/x?ticket=secret".to_string(),
-        ));
-        assert_eq!(socket_reason(&err), "could not connect");
     }
 
     #[test]

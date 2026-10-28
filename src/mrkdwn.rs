@@ -1,8 +1,7 @@
 //! Slack's message markup to terminal text. Pure: names come in through
 //! closures, and the text comes out as pieces, each with its look, which
-//! the text view paints with `Style`, the screen with its own styles, and
-//! the reply box with the markers still in sight. With styling off the
-//! markers are left as written so nothing is lost.
+//! the text view paints with `Style`. With styling off the markers are
+//! left as written so nothing is lost.
 
 use crate::style::Style;
 
@@ -60,32 +59,12 @@ pub fn render(text: &str, user: Lookup, channel: Lookup, style: &Style) -> Strin
         .collect()
 }
 
-/// The text without its markup: for a title, an excerpt or a notification,
-/// where `*` and `_` would only be noise, and a quote's bar or the line
-/// break that sets a code block apart would cut the first line short.
-pub fn strip(text: &str, user: Lookup, channel: Lookup) -> String {
-    pieces(text, user, channel)
-        .iter()
-        .map(|piece| match piece {
-            Piece::Text(text, _) => text.as_str(),
-            Piece::Marker { shown, .. } if *shown == QUOTED_BREAK => "\n",
-            Piece::Marker { .. } => "",
-        })
-        .collect()
-}
-
 /// A line break inside a `>>>` quote, which the bar follows.
 const QUOTED_BREAK: &str = "\n▎ ";
 
 /// A message's text: tokens expanded, entities decoded, markup read.
 pub fn pieces(text: &str, user: Lookup, channel: Lookup) -> Vec<Piece> {
     Markup::new(tokens(text, user, channel)).read()
-}
-
-/// A draft as typed: the markup read, nothing else, since names are linked
-/// on sending and nothing in it is escaped.
-pub fn draft(text: &str) -> Vec<Piece> {
-    Markup::new(text.chars().map(Atom::Char).collect()).read()
 }
 
 fn paint(text: &str, look: Look, style: &Style) -> String {
@@ -424,12 +403,6 @@ fn is_url(target: &str) -> bool {
     target.contains("://") || target.starts_with("mailto:") || target.starts_with("tel:")
 }
 
-fn is_openable(target: &str) -> bool {
-    ["https://", "http://", "mailto:", "tel:"]
-        .iter()
-        .any(|scheme| target.starts_with(scheme))
-}
-
 /// A mail or phone link reads better without its scheme.
 fn shown_url(target: &str) -> &str {
     target
@@ -438,51 +411,6 @@ fn shown_url(target: &str) -> &str {
         .unwrap_or(target)
 }
 
-/// A link of a message: what the opener gets, and the words it was
-/// written under when they say more than the URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Link {
-    pub url: String,
-    pub label: Option<String>,
-}
-
-/// The links of a message, in order, each URL once: Slack writes one as
-/// `<url|label>` or `<url>`. Web, mail and phone links only: the system
-/// opener takes those, and would hand any other scheme to whatever
-/// claims it.
-pub fn links(text: &str) -> Vec<Link> {
-    let mut links: Vec<Link> = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('<') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('>') else {
-            break;
-        };
-        let token = &after[..end];
-        rest = &after[end + 1..];
-        let (target, label) = match token.split_once('|') {
-            Some((target, label)) => (target, Some(label)),
-            None => (token, None),
-        };
-        if !is_openable(target) {
-            continue;
-        }
-        let url = decode_entities(target);
-        if links.iter().any(|link| link.url == url) {
-            continue;
-        }
-        links.push(Link {
-            url,
-            label: label
-                .filter(|label| !label.is_empty() && !repeats_url(label, shown_url(target)))
-                .map(decode_entities),
-        });
-    }
-    links
-}
-
-/// Slack labels most links with the URL itself, minus the scheme and often
-/// shortened with an ellipsis in the middle; showing both says it twice.
 fn repeats_url(label: &str, url: &str) -> bool {
     let bare = |s: &str| {
         s.trim_start_matches("https://")
@@ -533,32 +461,6 @@ mod tests {
             plain("<!here> <!channel> <!subteam^S1|@sre> <!date^1700000000^{date}|Nov 14>"),
             "@here @channel @sre Nov 14"
         );
-    }
-
-    #[test]
-    fn links_are_listed_once_each_with_the_label_that_says_more() {
-        let found = links(
-            "see <https://x.y/z|the doc> and <https://x.y/z> then \
-             <https://x.y/a?b=1&amp;c=2|x.y/a> <@U1|jane> <mailto:a@b.c|a@b.c>",
-        );
-        assert_eq!(
-            found,
-            [
-                Link {
-                    url: "https://x.y/z".into(),
-                    label: Some("the doc".into()),
-                },
-                Link {
-                    url: "https://x.y/a?b=1&c=2".into(),
-                    label: None,
-                },
-                Link {
-                    url: "mailto:a@b.c".into(),
-                    label: None,
-                },
-            ]
-        );
-        assert!(links("nothing <here").is_empty());
     }
 
     #[test]
@@ -655,8 +557,11 @@ mod tests {
         );
         // A link's own underscores are not markup.
         assert_eq!(
-            strip("<https://x.test/_a_>", &user, &channel),
-            "https://x.test/_a_"
+            pieces("<https://x.test/_a_>", &user, &channel),
+            [text(
+                "https://x.test/_a_",
+                look(false, false, false, Kind::Link)
+            )]
         );
     }
 
@@ -673,7 +578,6 @@ mod tests {
                 text(" now", Look::default()),
             ]
         );
-        assert_eq!(strip("```\nx\n```", &user, &channel), "x");
     }
 
     #[test]
@@ -701,33 +605,10 @@ mod tests {
                 text("three", Look::default()),
             ]
         );
-        assert_eq!(strip(quoted, &user, &channel), "one\n> two\nthree");
     }
 
     #[test]
-    fn strip_leaves_a_title_whole() {
-        assert_eq!(
-            strip("deploy with ```make release``` please", &user, &channel),
-            "deploy with make release please"
-        );
-        assert_eq!(strip("&gt; quoted words", &user, &channel), "quoted words");
-    }
-
-    #[test]
-    fn a_draft_keeps_its_markers_and_its_brackets() {
-        assert_eq!(
-            draft("*hi* <@U1> &amp;"),
-            [
-                marker("*", ""),
-                text("hi", look(true, false, false, Kind::Text)),
-                marker("*", ""),
-                text(" <@U1> &amp;", Look::default()),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_draft_gives_back_every_character_typed() {
+    fn render_plain_gives_back_every_character_typed() {
         for typed in [
             "*",
             "**",
@@ -747,37 +628,7 @@ mod tests {
             "~/a and ~/b",
             "*été* _à_ ~ça~",
         ] {
-            let back: String = draft(typed)
-                .iter()
-                .map(|piece| match piece {
-                    Piece::Text(text, _) | Piece::Marker { typed: text, .. } => text.as_str(),
-                })
-                .collect();
-            assert_eq!(back, typed);
             assert_eq!(plain(typed), typed);
         }
-    }
-
-    #[test]
-    fn strip_drops_the_markers_render_plain_keeps_them() {
-        let text = "*Release* is _today_ in <#C1>";
-        assert_eq!(strip(text, &user, &channel), "Release is today in #general");
-        assert_eq!(plain(text), "*Release* is _today_ in #general");
-    }
-
-    #[test]
-    fn a_link_with_an_entity_is_listed_once_and_decoded() {
-        let found = links("<https://x.test/?a=1&amp;b=2> then <https://x.test/?a=1&amp;b=2|again>");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].url, "https://x.test/?a=1&b=2");
-    }
-
-    #[test]
-    fn only_web_mail_and_phone_links_are_openable() {
-        let found = links(
-            "<smb://host/share> <file:///etc/hosts> <https://x.test> <mailto:a@x.test> <tel:+33123>",
-        );
-        let urls: Vec<&str> = found.iter().map(|link| link.url.as_str()).collect();
-        assert_eq!(urls, ["https://x.test", "mailto:a@x.test", "tel:+33123"]);
     }
 }

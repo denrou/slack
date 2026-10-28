@@ -7,7 +7,6 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::api::{self, Client};
-use crate::emoji;
 
 pub const DEFAULT_LIMIT: usize = 20;
 const METHOD: &str = "conversations.history";
@@ -38,32 +37,14 @@ pub struct Message {
     pub reactions: Vec<Reaction>,
 }
 
-/// A file posted with a message. Printed as its title alone, `--json`
+/// A file posted with a message, printed as its title alone, `--json`
 /// included: the URLs are fetched with the session cookie, and are of no
 /// use without it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
-    pub id: String,
     /// The title Slack shows, else the file name.
     pub title: String,
-    /// The file name, extension included, for the copy on disk.
-    pub name: String,
-    pub mimetype: Option<String>,
-    /// The file itself; None for a deleted one.
-    pub url: Option<String>,
-    /// The largest preview of an image, 1024 pixels at most.
-    pub thumb: Option<String>,
-    /// The file's page in Slack, for `y`.
-    pub permalink: Option<String>,
 }
-
-/// Thumbnails Slack makes of an image, the largest first. Above 1024 a
-/// terminal pane gains nothing, and the download grows.
-const THUMBS: &[&str] = &["thumb_1024", "thumb_720", "thumb_480", "thumb_360"];
-
-/// What the screen draws itself; GIFs go to the system viewer, since only
-/// their first frame would show here.
-const DRAWN: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
 impl File {
     fn from(raw: &Value) -> Option<File> {
@@ -73,28 +54,9 @@ impl File {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         };
-        let name = string("name");
         Some(File {
-            id: string("id").unwrap_or_default(),
-            title: string("title").or_else(|| name.clone())?,
-            name: name.unwrap_or_default(),
-            mimetype: string("mimetype"),
-            url: string("url_private"),
-            thumb: THUMBS.iter().find_map(|key| string(key)),
-            permalink: string("permalink"),
+            title: string("title").or_else(|| string("name"))?,
         })
-    }
-
-    pub fn is_image(&self) -> bool {
-        self.mimetype
-            .as_deref()
-            .is_some_and(|mimetype| mimetype.starts_with("image/"))
-    }
-
-    /// The screen draws it in the messages pane rather than handing it to
-    /// the system viewer.
-    pub fn is_drawn(&self) -> bool {
-        self.thumb.is_some() && self.mimetype.as_deref().is_some_and(|m| DRAWN.contains(&m))
     }
 }
 
@@ -114,12 +76,6 @@ pub struct Reaction {
     pub users: Vec<String>,
 }
 
-impl Reaction {
-    pub fn by(&self, user_id: &str) -> bool {
-        self.users.iter().any(|user| user == user_id)
-    }
-}
-
 impl Message {
     /// A reply posted in a thread (its own ts differs from the thread's).
     pub fn is_reply(&self) -> bool {
@@ -130,40 +86,6 @@ impl Message {
 
     pub fn mentions(&self, user_id: &str) -> bool {
         self.text.contains(&format!("<@{user_id}>")) || self.text.contains(&format!("<@{user_id}|"))
-    }
-
-    /// Put or take back one person's reaction, as Slack now has it: the
-    /// screen updates the message instead of reading it again.
-    pub fn react(&mut self, name: &str, user_id: &str, add: bool) {
-        let at = self
-            .reactions
-            .iter()
-            .position(|r| emoji::same(&r.name, name));
-        match (at, add) {
-            (Some(at), true) => {
-                let reaction = &mut self.reactions[at];
-                if !reaction.by(user_id) {
-                    reaction.count += 1;
-                    reaction.users.push(user_id.to_string());
-                }
-            }
-            (None, true) => self.reactions.push(Reaction {
-                name: name.to_string(),
-                count: 1,
-                users: vec![user_id.to_string()],
-            }),
-            (Some(at), false) => {
-                let reaction = &mut self.reactions[at];
-                if reaction.by(user_id) {
-                    reaction.users.retain(|user| user != user_id);
-                    reaction.count = reaction.count.saturating_sub(1);
-                }
-                if reaction.count == 0 {
-                    self.reactions.remove(at);
-                }
-            }
-            (None, false) => {}
-        }
     }
 }
 
@@ -188,36 +110,6 @@ pub fn fetch(
         params.push(("oldest", cursor));
     }
     parse(&client.call(METHOD, &params)?, last_read)
-}
-
-/// The messages around one, `side` on each side: the page up to it, and
-/// the page after it, since with `oldest` alone Slack answers the
-/// messages right after it rather than the newest (seen live on
-/// 2026-10-21). `has_more` says older ones exist.
-pub fn around(client: &Client, channel: &str, ts: &str, side: usize) -> Result<Unread, api::Error> {
-    let before = (side + 1).to_string();
-    let after = side.to_string();
-    let (older, newer) = std::thread::scope(|scope| {
-        let newer = scope.spawn(|| {
-            let params = [("channel", channel), ("oldest", ts), ("limit", &after)];
-            client.call(METHOD, &params)
-        });
-        let params = [
-            ("channel", channel),
-            ("latest", ts),
-            ("inclusive", "true"),
-            ("limit", &before),
-        ];
-        let older = client.call(METHOD, &params);
-        // A panic in the other call is a bug, not a condition to handle.
-        (older, newer.join().expect("the history thread panicked"))
-    });
-    let mut page = parse(&older?, None)?;
-    let newer = parse(&newer?, Some(ts))?;
-    page.messages.extend(newer.messages);
-    page.messages.sort_by(|a, b| compare_ts(&a.ts, &b.ts));
-    page.messages.dedup_by(|a, b| a.ts == b.ts);
-    Ok(page)
 }
 
 /// Whether a read cursor can be sent as `oldest`: a conversation never
@@ -386,12 +278,12 @@ mod tests {
         let reactions = &unread.messages[1].reactions;
         assert_eq!(reactions.len(), 2, "a reaction without a name is dropped");
         assert_eq!((reactions[0].name.as_str(), reactions[0].count), ("+1", 2));
-        assert!(reactions[0].by("U7"));
+        assert!(reactions[0].users.iter().any(|user| user == "U7"));
         assert_eq!(reactions[1].count, 1, "the count falls back to the users");
     }
 
     #[test]
-    fn a_file_keeps_its_largest_thumbnail_and_prints_as_its_title() {
+    fn a_file_prints_as_its_title() {
         let message = message_from(&json!({
             "ts": "1700000010.000100",
             "text": "",
@@ -408,7 +300,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let [shot, gif, pdf] = message.files.as_slice() else {
+        let [shot, _, _] = message.files.as_slice() else {
             panic!(
                 "a file without a name or title is dropped: {:?}",
                 message.files
@@ -419,41 +311,10 @@ mod tests {
             "an empty title falls back to the name"
         );
         assert_eq!(
-            shot.thumb.as_deref(),
-            Some("https://files.slack.com/t/720.png")
-        );
-        assert!(shot.is_drawn());
-        assert!(
-            gif.is_image() && !gif.is_drawn(),
-            "a GIF goes to the viewer"
-        );
-        assert!(!pdf.is_image() && !pdf.is_drawn());
-        assert_eq!(
             serde_json::to_value(&message).unwrap()["files"],
             json!(["shot.png", "party.gif", "notes.pdf"]),
             "no URL in the JSON"
         );
-    }
-
-    #[test]
-    fn a_reaction_is_put_and_taken_back() {
-        let mut message = body()["messages"][0].clone();
-        message["reactions"] = json!([{"name": "+1", "users": ["U2"], "count": 1}]);
-        let mut message = message_from(&message).unwrap();
-        message.react("+1", "U7", true);
-        message.react("+1", "U7", true);
-        assert_eq!(
-            message.reactions[0].count, 2,
-            "a second add changes nothing"
-        );
-        message.react("tada", "U7", true);
-        assert_eq!(message.reactions[1].name, "tada");
-        message.react("tada", "U7", false);
-        message.react("+1", "U2", false);
-        assert_eq!(message.reactions.len(), 1);
-        assert_eq!(message.reactions[0].users, ["U7"]);
-        message.react("eyes", "U7", false);
-        assert_eq!(message.reactions.len(), 1);
     }
 
     #[test]
