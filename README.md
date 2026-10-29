@@ -9,7 +9,7 @@ Early days, but every command below works.
 With [Homebrew](https://brew.sh/), on macOS (Apple Silicon) or Linux (x86_64):
 
 ```bash
-brew install denrou/slack/slack
+brew install denrou/tap/slack
 ```
 
 Without it: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`.
@@ -156,7 +156,7 @@ A release is a pull request that bumps `version` in `Cargo.toml` (`cargo build` 
 git fetch && git tag -a v0.8.0 --cleanup=whitespace -F notes.txt origin/main && git push origin v0.8.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version and carries notes, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them as a GitHub Release with the tag's notes, the compare link to the previous release and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-slack) to pick the release up.
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version and carries notes, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them as a GitHub Release with the tag's notes, the compare link to the previous release and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-tap) to pick the release up.
 
 ## License
 
