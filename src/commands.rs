@@ -119,6 +119,7 @@ pub fn status(
     until: Option<&str>,
     clear: bool,
     if_unset: bool,
+    json: bool,
 ) -> Result<()> {
     let store = Workspaces::load()?;
     let (_, workspace) = store.default_workspace()?;
@@ -144,6 +145,7 @@ pub fn status(
             bail!("which status? give its text, its emoji (--emoji) or both");
         }
         match status::get(&client, seconds)? {
+            current if json => print_json(&current)?,
             Some(current) => println!("{}", current.describe(&now)),
             None => println!("No status"),
         }

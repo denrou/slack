@@ -87,7 +87,7 @@ A target is `#channel`, `@person` (handle or display name), a conversation id, o
 
 `slack react <message> <emoji>` puts an emoji on a message, and `--remove` takes yours back. The message is a permalink, a thread number (its first message), or a conversation with `--ts <ts>`; the emoji is its Slack name, with or without the colons (`+1`, `:white_check_mark:`, a custom one), or the character itself. Reacting never marks anything as read.
 
-`slack status <text> -e <emoji> --until <when>` sets your status. `--until` is when Slack clears it, on your clock: `45m`, `2h`, `07:30` (the next one), `mon 07:30` (the next Monday), `2026-11-02 07:30`; without it the status stays. Slack clears it itself, so a scheduled job only has to set it, and a Mac asleep at that hour changes nothing. `--if-unset` leaves a status already set alone, so such a job never replaces one you set by hand. `--clear` clears it, and `slack status` alone prints it.
+`slack status <text> -e <emoji> --until <when>` sets your status. `--until` is when Slack clears it, on your clock: `45m`, `2h`, `07:30` (the next one), `mon 07:30` (the next Monday), `2026-11-02 07:30`; without it the status stays. Slack clears it itself, so a scheduled job only has to set it, and a Mac asleep at that hour changes nothing. `--if-unset` leaves a status already set alone, so such a job never replaces one you set by hand. `--clear` clears it, and `slack status` alone prints it (`--json`: `emoji`, `text`, `expires`, or `null`).
 
 ## Watch
 

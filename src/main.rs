@@ -101,6 +101,9 @@ enum Command {
         /// Leave a status already set alone, for a scheduled job
         #[arg(long)]
         if_unset: bool,
+        /// Print the current status as JSON (`emoji`, `text`, `expires`), or `null`
+        #[arg(long, conflicts_with_all = ["text", "emoji", "until", "if_unset", "clear"])]
+        json: bool,
     },
     /// Mark as read what the last view showed
     Read {
@@ -228,12 +231,14 @@ fn main() -> ExitCode {
             until,
             clear,
             if_unset,
+            json,
         }) => commands::status(
             &text.join(" "),
             emoji.as_deref(),
             until.as_deref(),
             clear,
             if_unset,
+            json,
         ),
         Some(Command::Read { targets }) => commands::read(&targets),
         Some(Command::Login { headless, timeout }) => commands::login(headless, timeout),
@@ -329,10 +334,12 @@ mod tests {
         ]);
         assert!(matches!(
             cli.command,
-            Some(Command::Status { text, emoji: Some(emoji), until: Some(until), clear: false, if_unset: false })
+            Some(Command::Status { text, emoji: Some(emoji), until: Some(until), clear: false, if_unset: false, json: false })
                 if text == ["Off", "for", "the", "day"] && emoji == "🌙" && until == "mon 07:30"
         ));
         assert!(Cli::try_parse_from(["slack", "status", "--clear"]).is_ok());
+        assert!(Cli::try_parse_from(["slack", "status", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["slack", "status", "Off", "--json"]).is_err());
         assert!(Cli::try_parse_from(["slack", "status", "Off", "--clear"]).is_err());
         assert!(Cli::try_parse_from(["slack", "status", "--clear", "--until", "2h"]).is_err());
     }
