@@ -1,0 +1,14 @@
+{
+  "name": "slack",
+  "version": "0.1.0",
+  "description": "A pane beside the chat where a Slack draft is edited, corrected and sent",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "fixCommand": {
+      "type": "string",
+      "title": "Fix command",
+      "description": "A shell command that reads the correction instructions and the draft on stdin and prints the corrected draft, such as `claude -p --model haiku`. Left empty, the pane has no Fix.",
+      "default": ""
+    }
+  }
+}
