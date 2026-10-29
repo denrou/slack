@@ -22,6 +22,7 @@ mod replies;
 mod rtm;
 mod search;
 mod send;
+mod status;
 mod store;
 mod style;
 mod target;
@@ -83,6 +84,23 @@ enum Command {
         /// Take your reaction back instead
         #[arg(long)]
         remove: bool,
+    },
+    /// Set your status, clear it, or show it when given nothing
+    Status {
+        /// The text, 100 characters at most
+        text: Vec<String>,
+        /// The emoji: its name (`crescent_moon`, `:palm_tree:`) or the character
+        #[arg(short, long)]
+        emoji: Option<String>,
+        /// When Slack clears it: `45m`, `2h`, `07:30` (the next one), `mon 07:30`, `2026-11-02 07:30`; never without it
+        #[arg(long)]
+        until: Option<String>,
+        /// Clear your status
+        #[arg(long, conflicts_with_all = ["text", "emoji", "until", "if_unset"])]
+        clear: bool,
+        /// Leave a status already set alone, for a scheduled job
+        #[arg(long)]
+        if_unset: bool,
     },
     /// Mark as read what the last view showed
     Read {
@@ -204,6 +222,19 @@ fn main() -> ExitCode {
             ts,
             remove,
         }) => commands::react(&message, &emoji, ts.as_deref(), remove),
+        Some(Command::Status {
+            text,
+            emoji,
+            until,
+            clear,
+            if_unset,
+        }) => commands::status(
+            &text.join(" "),
+            emoji.as_deref(),
+            until.as_deref(),
+            clear,
+            if_unset,
+        ),
         Some(Command::Read { targets }) => commands::read(&targets),
         Some(Command::Login { headless, timeout }) => commands::login(headless, timeout),
         Some(Command::Logout {
@@ -280,6 +311,30 @@ mod tests {
         ));
         let cli = Cli::parse_from(["slack", "watch"]);
         assert!(matches!(cli.command, Some(Command::Watch { command, .. }) if command.is_empty()));
+    }
+
+    #[test]
+    fn status_takes_its_words_and_refuses_clear_with_them() {
+        let cli = Cli::parse_from([
+            "slack",
+            "status",
+            "Off",
+            "for",
+            "the",
+            "day",
+            "-e",
+            "🌙",
+            "--until",
+            "mon 07:30",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status { text, emoji: Some(emoji), until: Some(until), clear: false, if_unset: false })
+                if text == ["Off", "for", "the", "day"] && emoji == "🌙" && until == "mon 07:30"
+        ));
+        assert!(Cli::try_parse_from(["slack", "status", "--clear"]).is_ok());
+        assert!(Cli::try_parse_from(["slack", "status", "Off", "--clear"]).is_err());
+        assert!(Cli::try_parse_from(["slack", "status", "--clear", "--until", "2h"]).is_err());
     }
 
     #[test]

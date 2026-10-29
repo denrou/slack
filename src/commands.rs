@@ -20,7 +20,8 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, target, view,
+    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, status,
+    target, view,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -107,6 +108,56 @@ pub fn react(message: &str, emoji: &str, ts: Option<&str>, remove: bool) -> Resu
     );
     names.save();
     result
+}
+
+/// Shows your status, sets it or clears it. With `if_unset`, a status
+/// already set is left alone, so a job run every evening never replaces
+/// one set by hand, for days off.
+pub fn status(
+    text: &str,
+    emoji: Option<&str>,
+    until: Option<&str>,
+    clear: bool,
+    if_unset: bool,
+) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let now = jiff::Zoned::now();
+    let seconds = now.timestamp().as_second();
+    if clear {
+        status::clear(&client)?;
+        println!("Status cleared");
+        return Ok(());
+    }
+    let emoji = emoji.map(crate::emoji::name_of).unwrap_or_default();
+    if text.is_empty() && emoji.is_empty() {
+        if until.is_some() || if_unset {
+            bail!("which status? give its text, its emoji (--emoji) or both");
+        }
+        match status::get(&client, seconds)? {
+            Some(current) => println!("{}", current.describe(&now)),
+            None => println!("No status"),
+        }
+        return Ok(());
+    }
+    let expires = until
+        .map(|spec| status::until(spec, &now))
+        .transpose()?
+        .map(|at| at.timestamp().as_second());
+    if if_unset && let Some(current) = status::get(&client, seconds)? {
+        println!("Kept your status: {}", current.describe(&now));
+        return Ok(());
+    }
+    let emoji = status::set(&client, text, &emoji, expires)?;
+    let set = presence::Status {
+        emoji,
+        unicode: None,
+        text: text.to_string(),
+        expires,
+    };
+    println!("Status set: {}", set.describe(&now));
+    Ok(())
 }
 
 pub fn thread(spec: &str, json: bool, no_color: bool) -> Result<()> {
