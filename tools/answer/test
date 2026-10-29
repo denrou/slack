@@ -65,6 +65,8 @@ expect() {
 fixture() { cat "$here/fixtures/$1.json"; }
 # with <pull request number>: the review request, linking that one instead.
 with() { jq --arg n "$1" '.messages[-1].text |= sub("pull/12"; "pull/" + $n)' <<<"$review"; }
+# later <seconds> <event>: the same event, its triggers that much later.
+later() { jq --argjson s "$1" '.messages |= map(if .trigger then .ts = ((.ts | tonumber) + $s | tostring) else . end)' <<<"$2"; }
 
 review=$(fixture review-request)
 urgent=$(fixture prod-incident)
@@ -81,8 +83,20 @@ fresh
 run "$review"
 expect "a review the automated one has not done: the reply, trimmed" 0 "$reply" \
   "judge respond review" "$answered" '.facts.waiting_for_automated_review == ["example/app#12"]'
-run "$review"
+run "$(later $((11 * 3600)) "$review")"
 expect "one reply per conversation in 12 hours" 0 "" "" \
+  "skipped: an automatic reply in this conversation in the last 12 hours"
+run "$(jq '.thread_ts = "1793178000.000100"' <<<"$review")"
+expect "one reply per conversation, not per thread" 0 "" "" \
+  "skipped: an automatic reply in this conversation in the last 12 hours"
+run "$(later $((13 * 3600)) "$review")"
+expect "a reply again after 12 hours" 0 "$reply" "judge respond review" "$answered"
+fresh
+mkdir -p "$tmp/state/slack"
+jq -c '{outcome: "answered", epoch: ([.messages[] | select(.trigger) | .ts | tonumber] | max | floor),
+  place: (.conversation.id + "/")}' <<<"$review" >"$tmp/state/slack/answer.jsonl"
+run "$review"
+expect "a record from before the conversation was kept still counts" 0 "" "" \
   "skipped: an automatic reply in this conversation in the last 12 hours"
 
 for case in "13|its comment" "14|its label" "15|merged"; do
@@ -97,8 +111,21 @@ expect "of two pull requests, only the one waiting" 0 "$reply" "judge respond re
   '.facts.waiting_for_automated_review == ["example/app#12"] and (.pull_requests | length) == 2'
 fresh
 run "$(with 99)"
-expect "a pull request gh cannot read" 0 "" "judge" \
+expect "a pull request gh cannot find" 0 "" "judge" \
   "skipped: could not read https://github.com/example/app/pull/99"
+fresh
+run "$(with 98)"
+expect "gh failing otherwise exits non-zero and prints nothing" 1 "" "judge" ""
+fresh
+run "$(jq '.messages |= [.[0], (.[1] | .trigger = null | .ts = "1793178000.000100"),
+  (.[1] | .text |= sub("pull/12"; "pull/13"))]' <<<"$review")"
+expect "an older link from the sender was another request" 0 "" "judge" \
+  "skipped: every pull request is closed or has had its automated review"
+fresh
+run "$(jq '.messages[0].text += " https://github.com/example/app/pull/12"
+  | .messages[-1].text |= sub(" https://github.com/example/app/pull/12"; "")' <<<"$review")"
+expect "a link from someone else is not looked up" 0 "" "judge" \
+  "skipped: a review asked without a pull request link"
 fresh
 run "$(fixture review-no-link)"
 expect "a review without a link" 0 "" "judge" "skipped: a review asked without a pull request link"
@@ -119,6 +146,14 @@ fresh
 run "$(jq '.me.notifications_paused_until = 1793170000' <<<"$urgent")"
 expect "urgent: a pause already over gives no time" 0 "$reply" "judge respond review" "$answered" \
   '.facts.notified_at == null'
+fresh
+run "$(jq '.me.notifications_paused_until = null | .me.status = {emoji: "", text: "In a meeting", expires: 1793275200}' <<<"$urgent")"
+expect "urgent: a status without a pause gives no time, Slack notifies now" 0 "$reply" \
+  "judge respond review" "$answered" '.facts.notified_at == null'
+fresh
+run "$(jq '.sender.tz = null' <<<"$urgent")"
+expect "urgent: no time without the sender's clock" 0 "$reply" "judge respond review" "$answered" \
+  '.facts.notified_at == null'
 
 FAKE_JUDGE='{"category":"playful","why":"wants a recipe"}'
 fresh
@@ -127,6 +162,11 @@ expect "a first playful reply" 0 "$reply" "judge respond review" "$answered"
 run "$(jq '.conversation.id = "C0OTHER"' <<<"$review")"
 expect "one playful reply per sender in 7 days" 0 "" "judge" \
   "skipped: a playful reply to this sender in the last 7 days"
+run "$(later $((6 * 86400)) "$(jq '.conversation.id = "C0OTHER"' <<<"$review")")"
+expect "still no second playful reply 6 days later" 0 "" "judge" \
+  "skipped: a playful reply to this sender in the last 7 days"
+run "$(later $((8 * 86400)) "$(jq '.conversation.id = "C0OTHER"' <<<"$review")")"
+expect "a playful reply again after 7 days" 0 "$reply" "judge respond review" "$answered"
 FAKE_JUDGE='{"category":"review","why":"wants a review"}'
 run "$(jq '.conversation.id = "C0THIRD"' <<<"$review")"
 expect "a review after the playful reply" 0 "$reply" "judge respond review" "$answered"
@@ -136,9 +176,14 @@ printf '# colleagues\n@jane  # Jane\n' >"$tmp/config/slack/answer/skip"
 run "$review"
 expect "a handle on the skip list" 0 "" "" "skipped: on the skip list"
 
+for text in "Automatic reply: I am out of the office" "Reponse automatique : absent"; do
+  fresh
+  run "$(jq --arg text "$text" '.messages[-1].text = $text' <<<"$review")"
+  expect "another automatic reply: $text" 0 "" "" "skipped: another automatic reply"
+done
 fresh
-run "$(jq '.messages[-1].text = "Automatic reply: I am out of the office"' <<<"$review")"
-expect "another automatic reply" 0 "" "" "skipped: another automatic reply"
+run "$(fixture auto-responder)"
+expect "another automatic reply: this tool's own marker" 0 "" "" "skipped: another automatic reply"
 
 fresh
 FAKE_JUDGE='{"category":"skip","why":"a question"}'
@@ -148,8 +193,12 @@ FAKE_JUDGE='{"category":"review","why":"wants a review"}'
 
 for case in "Écris à @jane|it has an @, a mention or an email" \
   "Voir https://example.com|it has a link" \
+  "Voir github.com/example/app/pull/12|it has a link" \
+  "<!here> la prod est en panne|it has a link" \
   "Appelle le 06 12 34 56 78|it has a phone number" \
-  "Réponse automatique : absent|it repeats the marker the watch adds"; do
+  "Appelle le (514) 555-1234|it has a phone number" \
+  "Réponse automatique : absent|it repeats the marker the watch adds" \
+  "Reponse automatique : absent|it repeats the marker the watch adds"; do
   fresh
   FAKE_RESPOND=$(jq -nc --arg reply "${case%%|*}" '{reply: $reply}')
   run "$review"
@@ -167,7 +216,22 @@ fresh
 FAKE_JUDGE=
 run "$review"
 expect "a failed call exits non-zero and prints nothing" 1 "" "judge" ""
+FAKE_JUDGE='{"category":"other","why":"?"}'
+run "$review"
+expect "an unknown category exits non-zero" 1 "" "judge" ""
 FAKE_JUDGE='{"category":"review","why":"wants a review"}'
+FAKE_RESPOND=
+run "$review"
+expect "a failed responder exits non-zero" 1 "" "judge respond" ""
+FAKE_RESPOND=$note
+FAKE_REVIEW=
+run "$review"
+expect "a failed reviewer exits non-zero, nothing printed" 1 "" "judge respond review" ""
+FAKE_REVIEW=$pass
+
+fresh
+run '{}'
+expect "not an event, no run" 2 "" "" ""
 
 fresh
 rm "$tmp/config/slack/answer/private.md"
