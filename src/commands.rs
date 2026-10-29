@@ -323,16 +323,7 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
     let mut names = Names::load();
     let found = who_people(&client, &mut names, targets, me).and_then(|users| {
         names.resolve_users(&client, users.clone())?;
-        let (profiles, presences) = std::thread::scope(|scope| {
-            let presences = scope.spawn(|| presence::presences(&client, &users));
-            let profiles = presence::profiles(&client, &users);
-            let presences = presences.join().expect("the presence lookups do not panic");
-            (profiles, presences)
-        });
-        let mut people = profiles?;
-        for (user, presence) in presences? {
-            people.entry(user).or_default().presence = Some(presence);
-        }
+        let people = presence::people(&client, &users)?;
         Ok((users, people))
     });
     names.save();
@@ -457,7 +448,7 @@ fn who_people(
             names.resolve_users(client, members.clone())?;
             users.extend(members.into_iter().filter(|user| {
                 Some(user.as_str()) != me
-                    && user != "USLACKBOT"
+                    && user != directory::SLACKBOT
                     && !names.user(user).is_some_and(|u| u.is_bot)
             }));
         } else {

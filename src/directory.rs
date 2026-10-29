@@ -17,6 +17,8 @@ use crate::names::{Names, User};
 /// Past this many unknown people, one directory walk beats one lookup
 /// each.
 const WALK_THRESHOLD: usize = 10;
+/// Slack's own bot, which writes DMs as a user.
+pub const SLACKBOT: &str = "USLACKBOT";
 
 /// A conversation you are in.
 #[derive(Debug, Clone, Serialize)]
@@ -168,7 +170,7 @@ pub fn people(client: &Client, names: &mut Names, filter: &str) -> Result<Vec<Pe
 pub fn everyone(names: &Names) -> Vec<Person> {
     let mut people: Vec<Person> = names
         .users()
-        .filter(|(id, user)| !user.is_bot && *id != "USLACKBOT")
+        .filter(|(id, user)| !user.is_bot && *id != SLACKBOT)
         .map(|(id, user)| Person::from_cache(id, user))
         .collect();
     people.sort_by_cached_key(|person| person.display.to_lowercase());

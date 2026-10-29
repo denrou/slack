@@ -251,12 +251,27 @@ fn city(tz: &str) -> String {
     tz.rsplit('/').next().unwrap_or(tz).replace('_', " ")
 }
 
+/// Everything known of these people now: profile, paused notifications
+/// and presence, read side by side. Any failed read fails it all.
+pub fn people(client: &Client, users: &[String]) -> Result<BTreeMap<String, Person>, api::Error> {
+    let (read_profiles, read_presences) = std::thread::scope(|scope| {
+        let read_presences = scope.spawn(|| presences(client, users));
+        let read_profiles = profiles(client, users);
+        let read_presences = read_presences
+            .join()
+            .expect("the presence lookups do not panic");
+        (read_profiles, read_presences)
+    });
+    let mut people = read_profiles?;
+    for (user, presence) in read_presences? {
+        people.entry(user).or_default().presence = Some(presence);
+    }
+    Ok(people)
+}
+
 /// The presence of each of these people, a few at a time. A person
 /// Slack would not answer for is left out; a dead session fails.
-pub fn presences(
-    client: &Client,
-    users: &[String],
-) -> Result<BTreeMap<String, Presence>, api::Error> {
+fn presences(client: &Client, users: &[String]) -> Result<BTreeMap<String, Presence>, api::Error> {
     const METHOD: &str = "users.getPresence";
     let read = par::map(users.to_vec(), |user| {
         let presence = client.call(METHOD, &[("user", &user)]).and_then(|body| {
@@ -281,7 +296,7 @@ pub fn presences(
 /// left without a profile. The windows are one call for everyone: when
 /// it fails, so does the whole read, since an absent window would read
 /// as notifications not paused.
-pub fn profiles(client: &Client, users: &[String]) -> Result<BTreeMap<String, Person>, api::Error> {
+fn profiles(client: &Client, users: &[String]) -> Result<BTreeMap<String, Person>, api::Error> {
     const METHOD: &str = "users.info";
     let read = par::map(users.to_vec(), |user| {
         let profile = client.call(METHOD, &[("user", &user)]).and_then(|body| {

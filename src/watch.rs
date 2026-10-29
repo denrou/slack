@@ -21,6 +21,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::api::{self, Client, Identity};
+use crate::directory::SLACKBOT;
 use crate::history::{self, Message};
 use crate::names::Names;
 use crate::rtm::{self, Posted, Signal};
@@ -41,8 +42,6 @@ const FOLLOW: Duration = Duration::from_secs(12 * 3600);
 const MAX_REPLY: usize = 2000;
 /// How much of the command's stderr the log keeps, its end.
 const STDERR_KEPT: usize = 2000;
-/// Slack's own bot, which writes DMs as a user.
-const SLACKBOT: &str = "USLACKBOT";
 
 pub struct Options {
     /// Quiet time after the last message of a burst before it is handed
@@ -371,8 +370,13 @@ fn hand_over(
     let outcome = if options.command.is_empty() {
         None
     } else {
-        let input = serde_json::to_vec(&event).unwrap_or_default();
-        Some(run_command(&options.command, &input, options.timeout))
+        Some(match serde_json::to_vec(&event) {
+            Ok(input) => run_command(&options.command, &input, options.timeout),
+            Err(err) => Outcome::Failed {
+                error: format!("could not write the event: {err}"),
+                stderr: String::new(),
+            },
+        })
     };
     let mut record = json!({
         "kind": "event",
@@ -433,30 +437,9 @@ fn build_event(
         return Ok(None);
     }
     let now = Zoned::now();
-    let pair = [pending.sender.clone(), me.clone()];
-    let (profiles, presences) = thread::scope(|scope| {
-        let presences = scope.spawn(|| presence::presences(client, &pair));
-        let profiles = presence::profiles(client, &pair);
-        let presences = presences.join().expect("the presence lookups do not panic");
-        (profiles, presences)
-    });
-    let mut people = match profiles {
-        Ok(people) => people,
-        Err(err @ api::Error::Auth { .. }) => return Err(err),
-        Err(err) => {
-            crate::warn::warn(format!("could not read the profiles: {err}"));
-            Default::default()
-        }
-    };
-    match presences {
-        Ok(presences) => {
-            for (user, presence) in presences {
-                people.entry(user).or_default().presence = Some(presence);
-            }
-        }
-        Err(err @ api::Error::Auth { .. }) => return Err(err),
-        Err(err) => crate::warn::warn(format!("could not read who is around: {err}")),
-    }
+    // Deliberate: a failed read fails the event, logged as an error, since
+    // an empty profile would read as notifications not paused and no clock.
+    let people = presence::people(client, &[pending.sender.clone(), me.clone()])?;
     let describe = |id: &str| {
         let (handle, name) = names.user(id).map_or_else(
             || (id.to_string(), id.to_string()),
@@ -475,12 +458,7 @@ fn build_event(
         value
     };
     let mut sender = describe(&pending.sender);
-    sender["external"] = json!(
-        pending
-            .team
-            .as_deref()
-            .is_some_and(|team| team != identity.team_id)
-    );
+    sender["external"] = json!(external(pending.team.as_deref(), &identity.team_id));
     let found = names.channel(channel);
     let conversational = channel.starts_with('D') || found.is_some_and(|c| c.is_mpim);
     let kind = match found {
@@ -512,6 +490,12 @@ fn build_event(
         "messages": shown_messages(&messages, &pending.triggers, me, names, &now),
     });
     Ok(Some((event, conversational)))
+}
+
+/// Whether the sender is from another organisation. A frame without a
+/// team says so too: what is not known to be a colleague is not one.
+fn external(team: Option<&str>, mine: &str) -> bool {
+    team != Some(mine)
 }
 
 /// The conversation or thread up to the burst's newest message: what the
@@ -646,8 +630,9 @@ impl Outcome {
 }
 
 /// Run the command with the event on stdin, and read its answer from
-/// stdout. It runs in a process group of its own, so a timeout stops
-/// what it started too (a `claude` it spawned would hold the pipes open).
+/// stdout. It runs in a process group of its own, so its end, or a
+/// timeout, stops what it started too (a `claude` it spawned would hold
+/// the pipes open).
 pub fn run_command(command: &[String], input: &[u8], timeout: Duration) -> Outcome {
     use std::os::unix::process::CommandExt;
 
@@ -697,11 +682,13 @@ pub fn run_command(command: &[String], input: &[u8], timeout: Duration) -> Outco
             Err(err) => return failed(format!("could not wait for it: {err}"), String::new()),
         }
     };
+    // The whole group, out of time or done: what the command started must
+    // not outlive it holding the pipes open, or the reads below never end.
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stderr(Stdio::null())
+        .status();
     if status.is_err() {
-        // The whole group: the command and whatever it started.
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", child.id())])
-            .status();
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -962,6 +949,47 @@ mod tests {
             run_command(&["/nonexistent/answer".to_string()], b"", timeout),
             Outcome::Failed { error, .. } if error.starts_with("could not start")
         ));
+    }
+
+    #[test]
+    fn a_reply_goes_out_behind_the_marker_and_a_failure_prints_none() {
+        let mut record = json!({});
+        Outcome::Reply("Il est absent.".to_string()).record(&mut record);
+        assert_eq!(record["would_send"], format!("{MARKER} Il est absent."));
+
+        let sh = |script: &str| vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        assert!(matches!(
+            run_command(
+                &sh("echo half a reply; exit 1"),
+                b"",
+                Duration::from_secs(5)
+            ),
+            Outcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn what_the_command_leaves_behind_does_not_hold_the_watch() {
+        let started = Instant::now();
+        // The background `sleep` keeps stdout open after `sh` is done.
+        let outcome = run_command(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "sleep 30 & echo done".to_string(),
+            ],
+            b"",
+            Duration::from_secs(60),
+        );
+        assert_eq!(outcome, Outcome::Reply("done".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_sender_without_a_team_counts_as_from_elsewhere() {
+        assert!(!external(Some("T1"), "T1"));
+        assert!(external(Some("T9"), "T1"));
+        assert!(external(None, "T1"));
     }
 
     #[test]
