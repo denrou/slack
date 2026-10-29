@@ -1,0 +1,161 @@
+import { expect, mock, test } from 'claude-code/testing'
+import type { On, ProcessRunResult } from 'claude-code'
+
+const TOOL = 'mcp__slack__draft'
+const PANE = {
+  plugin: 'slack',
+  component: 'Pane',
+  requestId: 'slack-draft',
+  props: {
+    title: 'Slack → #dev',
+    isFocused: true,
+    bodyColumns: 60,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows: 30 },
+    view: {},
+  },
+} as const
+
+// Stands for the engine beneath the plugin, and records each `slack` run.
+function engine(on: On): {
+  runs: { argv: readonly string[]; stdin?: string }[]
+} {
+  const runs: { argv: readonly string[]; stdin?: string }[] = []
+  on('tool.register', (_, e) => ({ value: { tool: e.name } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
+  on('process.run', (_, e) => {
+    runs.push({ argv: e.argv, stdin: e.init?.stdin })
+    const ran: ProcessRunResult = {
+      exitCode: 0,
+      stdout:
+        'Sent to #dev: https://acme.slack.com/archives/C0123456/p1730000000123456\n',
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    }
+
+    return { value: ran }
+  })
+
+  return { runs }
+}
+
+// A prompt the person typed and sent with Enter.
+function typed(text: string) {
+  return { text, wait: false, origin: { kind: 'composer' } } as const
+}
+
+test('a stale number or a flag is never a target', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  for (const target of ['2', '--help', '']) {
+    const called = await $.tool.call({ tool: TOOL, target, text: 'hi' })
+    expect(called.deny).toMatch(/target/)
+  }
+})
+
+test('Send posts the text as the person edited it, Enter never does', async ($, on) => {
+  const { runs } = engine(on)
+  const session = mock.session(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    runs.length = 0
+    await $.tool.call({ tool: TOOL, target: '#dev', text: 'Hello' })
+
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.input({ key: 'text', text: 'Hello all', kind: 'change' })
+    await ui.input({ key: 'text', text: 'Hello all,\nthe build is green' })
+    expect(runs).toHaveLength(0)
+
+    await ui.press({ key: 'send' })
+    expect(runs).toEqual([
+      {
+        argv: ['slack', 'send', '#dev'],
+        stdin: 'Hello all,\nthe build is green',
+      },
+    ])
+    expect((await ui.find({ type: 'Text', text: /^Sent\./ }))?.text).toMatch(
+      /p1730000000123456/,
+    )
+    expect(await ui.find({ key: 'send' })).toBeUndefined()
+    expect(JSON.stringify(session.appended().at(-1)?.message)).toMatch(
+      /the build is green/,
+    )
+    await ui.press({ key: 'discard' })
+    await ui.unmount()
+  }
+})
+
+test('two presses before the redraw send once', async ($, on) => {
+  const { runs } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '#dev', text: 'Once' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await Promise.all([ui.press({ key: 'send' }), ui.press({ key: 'send' })])
+  expect(runs).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a thread reply goes out with --thread', async ($, on) => {
+  const { runs } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: TOOL,
+    target: '#dev',
+    thread: '1730000000.123456',
+    text: 'Done',
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'send' })
+  expect(runs[0]?.argv).toEqual([
+    'slack',
+    'send',
+    '#dev',
+    '--thread',
+    '1730000000.123456',
+  ])
+  await ui.unmount()
+})
+
+test("the person's edit reaches Claude with their next prompt, once", async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '@jane', text: 'Hi Jane' })
+
+  const untouched = await $.prompt.submit(typed('shorter'))
+  expect(untouched.context ?? []).toHaveLength(0)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.input({ key: 'text', text: 'Hi Jane, quick one', kind: 'change' })
+  const edited = await $.prompt.submit(typed('shorter'))
+  expect(edited.context?.join('\n')).toMatch(/Hi Jane, quick one/)
+
+  const again = await $.prompt.submit(typed('and warmer'))
+  expect(again.context ?? []).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('Discard sends nothing and says so', async ($, on) => {
+  const { runs } = engine(on)
+  const session = mock.session(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '@jane', text: 'Hi Jane' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'discard' })
+  expect(runs).toHaveLength(0)
+  expect(JSON.stringify(session.appended().at(-1)?.message)).toMatch(
+    /discarded/,
+  )
+  expect((await ui.find({ type: 'Text' }))?.text).toMatch(/No draft/)
+  await ui.unmount()
+})

@@ -1,0 +1,274 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { Draft } from '../types'
+
+const PANE = 'slack-draft'
+const TOOL = 'mcp__slack__draft'
+const draft = atom({ plugin: 'slack', key: 'draft' } as const, null, {
+  shape: 'draft-1',
+})
+
+// `#channel`, `@handle`, a conversation id or a permalink. Deliberate: no
+// number from the last listing, which may be another one by the time the
+// person presses Send, and nothing `slack send` would read as a flag.
+const TARGET =
+  /^([#@]\S+|[CDG][A-Z0-9]{6,}|https:\/\/[\w-]+\.slack\.com\/archives\/\S+)$/
+const THREAD = /^(\d+\.\d+|https:\/\/[\w-]+\.slack\.com\/archives\/\S+)$/
+
+const DESCRIPTION = `Show a Slack message drafted for the user in an editable pane beside the chat, instead of in the reply. The user edits it there and presses Send, which runs \`slack send\` with their text: that press is their explicit yes, so never run \`slack send\` for a draft shown here. A note in the conversation says when it was sent (with the permalink) or discarded. Calling it again replaces the draft, for a revision. The text is Slack markup, written as the user would.`
+
+const PLACED =
+  'The draft is in the pane. Tell the user in one line it is there to edit and send; do not repeat it, and do not run `slack send` for it.'
+const WAITING =
+  'The pane could not be shown (the terminal is too narrow for a pane opened unasked). Show the draft in your reply with its target, and tell the user `/slack-draft` opens the pane to edit and send it.'
+
+function titleOf(target: string): string {
+  return `Slack → ${target.length > 40 ? `${target.slice(0, 39)}…` : target}`
+}
+
+async function tell($: EngineInterface, text: string): Promise<void> {
+  try {
+    await $.session.append({
+      message: { type: 'user', content: [{ type: 'text', text }] },
+    })
+  } catch {
+    // The toast still says what happened; a session that refuses the note
+    // only leaves Claude unaware of it.
+  }
+}
+
+async function send($: EngineInterface): Promise<void> {
+  if ((await read($, draft))?.text.trim() === '') {
+    $.ui.toast('Nothing to send.')
+    return
+  }
+  // Claimed inside the versioned write, so a second press before the redraw
+  // finds it sending and a message never goes out twice.
+  let claimed = null as Draft | null
+  await update($, draft, (d): Draft | null => {
+    const isSendable =
+      d !== null &&
+      (d.status === 'editing' || d.status === 'failed') &&
+      d.text.trim() !== ''
+    claimed = isSendable ? d : null
+    return isSendable ? { ...d, status: 'sending', outcome: undefined } : d
+  })
+  const now = claimed
+  if (now === null) {
+    return
+  }
+
+  const argv = ['slack', 'send', now.target]
+  if (now.thread !== undefined) {
+    argv.push('--thread', now.thread)
+  }
+  let isSent = false
+  let outcome: string
+  try {
+    const run = await $.process.run(argv, {
+      stdin: now.text,
+      timeoutMs: 60_000,
+    })
+    isSent = run.exitCode === 0
+    outcome =
+      (isSent ? run.stdout : run.stderr).trim() ||
+      `slack send exited with ${run.exitCode}`
+  } catch (error) {
+    outcome = `slack send did not run: ${error instanceof Error ? error.message : String(error)}`
+  }
+  await update(
+    $,
+    draft,
+    (d): Draft | null =>
+      d && { ...d, status: isSent ? 'sent' : 'failed', outcome },
+  )
+
+  if (isSent) {
+    $.ui.toast(`Sent to ${now.target}`)
+    await tell(
+      $,
+      `The user sent the Slack draft to ${now.target} from the draft pane, with this text:\n\n${now.text}\n\n\`slack send\` printed:\n${outcome}`,
+    )
+  }
+}
+
+async function discard($: EngineInterface): Promise<void> {
+  const now = await read($, draft)
+  await update($, draft, () => null)
+  await $.ui.close({ id: PANE })
+  if (now !== null && now.status !== 'sent' && now.status !== 'sending') {
+    await tell(
+      $,
+      `The user discarded the Slack draft to ${now.target}; nothing was sent.`,
+    )
+  }
+}
+
+function keep($: EngineInterface, text: string): Promise<unknown> {
+  return update($, draft, d =>
+    d && (d.status === 'editing' || d.status === 'failed') ? { ...d, text } : d,
+  )
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    await $.tool.register({
+      name: 'draft',
+      description: DESCRIPTION,
+      isDeferred: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          target: {
+            type: 'string',
+            description:
+              '`#channel`, `@handle`, a conversation id or a permalink (a reply in that thread)',
+          },
+          thread: {
+            type: 'string',
+            description: 'Reply in this thread: its ts or permalink',
+          },
+          text: { type: 'string', description: 'The message, in Slack markup' },
+        },
+        required: ['target', 'text'],
+      },
+    })
+    await $.command.register({
+      name: 'slack-draft',
+      description: 'Open the pane of the current Slack draft',
+    })
+
+    return next(e)
+  })
+
+  on('tool.call', { tool: TOOL }, async ($, e) => {
+    const { target, thread, text } = e as unknown as Record<string, unknown>
+    if (typeof target !== 'string' || !TARGET.test(target)) {
+      return {
+        deny: 'target must be `#channel`, `@handle`, a conversation id or a permalink; a number from a listing is not taken.',
+      }
+    }
+    if (
+      thread !== undefined &&
+      (typeof thread !== 'string' || !THREAD.test(thread))
+    ) {
+      return {
+        deny: 'thread must be a ts (`1730000000.123456`) or a permalink.',
+      }
+    }
+    if (typeof text !== 'string' || text.trim() === '') {
+      return { deny: 'text is empty.' }
+    }
+    if ((await read($, draft))?.status === 'sending') {
+      return { deny: 'The previous draft is being sent; wait for its note.' }
+    }
+
+    const next: Draft = { target, thread, text, seen: text, status: 'editing' }
+    await update($, draft, () => next)
+    const opened = await $.ui.open({
+      id: PANE,
+      title: titleOf(target),
+      focus: true,
+    })
+
+    return { result: opened.isPlaced ? PLACED : WAITING }
+  })
+
+  on('command.run', { command: 'slack-draft' }, async $ => {
+    const now = await read($, draft)
+    if (now === null) {
+      return { text: 'No Slack draft to show.' }
+    }
+    await $.ui.open({ id: PANE, title: titleOf(now.target), focus: true })
+
+    return { text: `Slack draft to ${now.target} opened in its pane.` }
+  })
+
+  // An edit the person made in the pane reaches Claude with their next prompt,
+  // so "shorter" revises their text rather than Claude's earlier one.
+  on('prompt.submit', async ($, e, next) => {
+    const now = await read($, draft)
+    if (
+      e.command !== undefined ||
+      now === null ||
+      (now.status !== 'editing' && now.status !== 'failed') ||
+      now.text === now.seen
+    ) {
+      return next(e)
+    }
+    await update($, draft, d => d && { ...d, seen: now.text })
+
+    return next({
+      ...e,
+      context: [
+        ...(e.context ?? []),
+        `The Slack draft pane for ${now.target} now holds this text, edited by the user; work from it:\n\n${now.text}`,
+      ],
+    })
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const now = await read($, draft)
+    const { Box, Text, Button } = $.ui.resolve(e)
+
+    if (now === null) {
+      return (
+        <Text dimColor>No draft. Ask Claude to draft a Slack message.</Text>
+      )
+    }
+
+    const isEditable = now.status === 'editing' || now.status === 'failed'
+    const lines = now.text.split('\n').length
+    const rows = Math.max(4, Math.min(lines + 1, e.props.scroll.bodyRows - 5))
+    let field = <Text>{now.text}</Text>
+    if (isEditable && e.surface !== 'mobile') {
+      const { Input } = $.ui.resolve(e)
+      field = (
+        <Input
+          key="text"
+          rows={rows}
+          value={now.text}
+          submitLabel="keep"
+          autoFocus
+          onInput={text => void keep($, text)}
+          onSubmit={text => void keep($, text)}
+        />
+      )
+    }
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text dimColor>
+          To {now.target}
+          {now.thread !== undefined ? ', in the thread' : ''}
+        </Text>
+        {field}
+        {now.status === 'sending' && <Text dimColor>Sending…</Text>}
+        {now.status === 'failed' && (
+          <Text color="error">Not sent: {now.outcome}</Text>
+        )}
+        {now.status === 'sent' && (
+          <Text color="success">Sent. {now.outcome}</Text>
+        )}
+        <Box gap={1}>
+          {isEditable && (
+            <Button
+              key="send"
+              label="Send"
+              variant="primary"
+              onPress={() => send($)}
+            />
+          )}
+          {now.status !== 'sending' && (
+            <Button
+              key="discard"
+              label={now.status === 'sent' ? 'Close' : 'Discard'}
+              onPress={() => discard($)}
+            />
+          )}
+        </Box>
+      </Box>
+    )
+  })
+}

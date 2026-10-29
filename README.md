@@ -154,6 +154,16 @@ Security notes, the short version:
 ln -s "$PWD/skills/slack" ~/.claude/skills/slack
 ```
 
+`tools/draft-pane/` is a Claude Code mod that goes with it: a draft the skill writes opens in a pane beside the chat, where you edit it and press Send (Enter only keeps the text). `/slack-draft` opens the pane again. Load it for one session, or for every session through the `env` block of `~/.claude/settings.json`:
+
+```bash
+claude --plugin-dir "$PWD/tools/draft-pane"
+```
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/slack/tools/draft-pane" } }
+```
+
 ## Files
 
 `$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json`, `browser-profile/`, and `config.toml` if you write one (its one setting is `fix_command`, above). `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, all safe to delete: names, the last view, and the files the screen opened. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.

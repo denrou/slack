@@ -1,0 +1,6 @@
+{
+  "name": "slack",
+  "version": "0.1.0",
+  "description": "A pane beside the chat where a Slack draft is edited and sent",
+  "types": "./types/index.d.ts"
+}
