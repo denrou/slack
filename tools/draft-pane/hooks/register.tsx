@@ -6,7 +6,7 @@ import type { Draft } from '../types'
 const PANE = 'slack-draft'
 const TOOL = 'mcp__slack__draft'
 const draft = atom({ plugin: 'slack', key: 'draft' } as const, null, {
-  shape: 'draft-1',
+  shape: 'draft-2',
 })
 
 // `#channel`, `@handle`, a conversation id or a permalink. Deliberate: no
@@ -107,11 +107,90 @@ async function discard($: EngineInterface): Promise<void> {
 
 function keep($: EngineInterface, text: string): Promise<unknown> {
   return update($, draft, d =>
-    d && (d.status === 'editing' || d.status === 'failed') ? { ...d, text } : d,
+    d && (d.status === 'editing' || d.status === 'failed') && d.text !== text
+      ? { ...d, text, typed: undefined, fixNote: undefined }
+      : d,
   )
 }
 
-export const register: Register = on => {
+// The instructions of the screen's Ctrl-G (`src/fix.rs` up to v0.18.1), so
+// a command set up for it reads the same prompt.
+function fixPrompt(text: string): string {
+  return `Correct the spelling, the missing accents and the grammar of the Slack message between the <message> tags, in the language it is written in. Do not rephrase: keep the words, the tone, the meaning and the line breaks. Leave Slack markup, emoji codes, mentions, code and URLs as they are. Reply with the corrected message alone, without the tags and without a comment; if nothing needs correcting, reply with the message unchanged.\n\n<message>\n${text}\n</message>\n`
+}
+
+function cleaned(output: string): string {
+  let text = output.trim()
+  if (text.startsWith('<message>')) text = text.slice('<message>'.length)
+  if (text.endsWith('</message>')) text = text.slice(0, -'</message>'.length)
+  return text.trim()
+}
+
+async function fix($: EngineInterface, command: string): Promise<void> {
+  let claimed = null as Draft | null
+  await update($, draft, (d): Draft | null => {
+    const isFixable =
+      d !== null &&
+      (d.status === 'editing' || d.status === 'failed') &&
+      d.text.trim() !== ''
+    claimed = isFixable ? d : null
+    return isFixable ? { ...d, status: 'fixing', fixNote: undefined } : d
+  })
+  const before = claimed
+  if (before === null) {
+    return
+  }
+
+  let fixed = ''
+  let fixNote: string | undefined
+  try {
+    // Deliberate: from `/`, since an agent CLI such as `claude -p` reads the
+    // project files of the directory it starts in.
+    const run = await $.process.run(['sh', '-c', command], {
+      stdin: fixPrompt(before.text),
+      cwd: '/',
+      timeoutMs: 30_000,
+    })
+    fixed = run.exitCode === 0 ? cleaned(run.stdout) : ''
+    if (run.exitCode !== 0) {
+      const last = run.stderr.trim().split('\n').at(-1)
+      fixNote = `the fix command failed: ${last || `exit ${run.exitCode}`}`
+    } else if (fixed === '') {
+      fixNote = 'the fix command printed nothing'
+    }
+  } catch (error) {
+    fixNote = `the fix command did not answer: ${error instanceof Error ? error.message : String(error)}`
+  }
+  const isChanged = fixNote === undefined && fixed !== before.text
+  await update($, draft, (d): Draft | null =>
+    d && d.status === 'fixing'
+      ? {
+          ...d,
+          status: before.status,
+          fixNote,
+          ...(isChanged ? { text: fixed, typed: before.text } : {}),
+        }
+      : d,
+  )
+  if (fixNote === undefined && !isChanged) {
+    $.ui.toast('Nothing to correct.')
+  }
+}
+
+function undoFix($: EngineInterface): Promise<unknown> {
+  return update($, draft, d =>
+    d &&
+    d.typed !== undefined &&
+    (d.status === 'editing' || d.status === 'failed')
+      ? { ...d, text: d.typed, typed: undefined }
+      : d,
+  )
+}
+
+export const register: Register = (on, options) => {
+  const fixCommand =
+    typeof options.fixCommand === 'string' ? options.fixCommand.trim() : ''
+
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'draft',
@@ -229,10 +308,13 @@ export const register: Register = on => {
           key="text"
           rows={rows}
           value={now.text}
-          submitLabel="keep"
+          submitLabel={fixCommand === '' ? 'keep' : 'fix'}
           autoFocus
           onInput={text => void keep($, text)}
-          onSubmit={text => void keep($, text)}
+          onSubmit={async text => {
+            await keep($, text)
+            if (fixCommand !== '') await fix($, fixCommand)
+          }}
         />
       )
     }
@@ -244,6 +326,10 @@ export const register: Register = on => {
           {now.thread !== undefined ? ', in the thread' : ''}
         </Text>
         {field}
+        {now.status === 'fixing' && <Text dimColor>Correcting…</Text>}
+        {now.fixNote !== undefined && (
+          <Text color="warning">Not corrected: {now.fixNote}</Text>
+        )}
         {now.status === 'sending' && <Text dimColor>Sending…</Text>}
         {now.status === 'failed' && (
           <Text color="error">Not sent: {now.outcome}</Text>
@@ -260,7 +346,13 @@ export const register: Register = on => {
               onPress={() => send($)}
             />
           )}
-          {now.status !== 'sending' && (
+          {isEditable && fixCommand !== '' && (
+            <Button key="fix" label="Fix" onPress={() => fix($, fixCommand)} />
+          )}
+          {isEditable && now.typed !== undefined && (
+            <Button key="undo" label="Undo fix" onPress={() => undoFix($)} />
+          )}
+          {now.status !== 'sending' && now.status !== 'fixing' && (
             <Button
               key="discard"
               label={now.status === 'sent' ? 'Close' : 'Discard'}

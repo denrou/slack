@@ -154,7 +154,7 @@ Security notes, the short version:
 ln -s "$PWD/skills/slack" ~/.claude/skills/slack
 ```
 
-`tools/draft-pane/` is a Claude Code mod that goes with it: a draft the skill writes opens in a pane beside the chat, where you edit it and press Send (Enter only keeps the text). `/slack-draft` opens the pane again. Load it for one session, or for every session through the `env` block of `~/.claude/settings.json`:
+`tools/draft-pane/` is a Claude Code mod that goes with it: a draft the skill writes opens in a pane beside the chat, where you edit it and press Send; Enter never sends. `/slack-draft` opens the pane again. Fix corrects the spelling, the accents and the grammar, Slack markup and mentions left alone, through a command of yours that reads the instructions and the draft on stdin and prints the correction (`claude -p --model haiku` will do); Enter in the field does the same, and Undo fix puts back what you typed. Set it as the `Fix command` row in `/config`, or under `pluginConfigs` in `~/.claude/settings.json`. Load it for one session, or for every session through the `env` block of `~/.claude/settings.json`:
 
 ```bash
 claude --plugin-dir "$PWD/tools/draft-pane"

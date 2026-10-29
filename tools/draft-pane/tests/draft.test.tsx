@@ -16,11 +16,15 @@ const PANE = {
   },
 } as const
 
-// Stands for the engine beneath the plugin, and records each `slack` run.
-function engine(on: On): {
-  runs: { argv: readonly string[]; stdin?: string }[]
-} {
-  const runs: { argv: readonly string[]; stdin?: string }[] = []
+type Run = { argv: readonly string[]; stdin?: string }
+
+// Stands for the engine beneath the plugin, and records each command run:
+// `slack send` answers where the message landed, the fix command `fixer`'s.
+function engine(
+  on: On,
+  fixer: (stdin: string) => Partial<ProcessRunResult> = () => ({}),
+): { runs: Run[] } {
+  const runs: Run[] = []
   on('tool.register', (_, e) => ({ value: { tool: e.name } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -37,6 +41,7 @@ function engine(on: On): {
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
+      ...(e.argv[0] === 'sh' ? fixer(e.init?.stdin ?? '') : {}),
     }
 
     return { value: ran }
@@ -73,6 +78,7 @@ test('Send posts the text as the person edited it, Enter never does', async ($, 
     await ui.input({ key: 'text', text: 'Hello all', kind: 'change' })
     await ui.input({ key: 'text', text: 'Hello all,\nthe build is green' })
     expect(runs).toHaveLength(0)
+    expect(await ui.find({ key: 'fix' })).toBeUndefined()
 
     await ui.press({ key: 'send' })
     expect(runs).toEqual([
@@ -157,5 +163,77 @@ test('Discard sends nothing and says so', async ($, on) => {
     /discarded/,
   )
   expect((await ui.find({ type: 'Text' }))?.text).toMatch(/No draft/)
+  await ui.unmount()
+})
+
+const FIX = { options: { fixCommand: 'spellcheck --raw' } }
+
+test(
+  'Fix corrects the text, Undo fix puts back what was typed',
+  FIX,
+  async ($, on) => {
+    const { runs } = engine(on, stdin => ({
+      stdout: stdin.includes('teh build')
+        ? '<message>\nthe build is green\n</message>\n'
+        : '',
+    }))
+    await $.session.start({
+      cwd: '/',
+      surface: 'terminal',
+      isInteractive: true,
+    })
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      runs.length = 0
+      await $.tool.call({
+        tool: TOOL,
+        target: '#dev',
+        text: 'teh build is green',
+      })
+      const ui = await $.ui.mount({ ...PANE, surface })
+
+      await ui.press({ key: 'fix' })
+      expect(runs[0]?.argv).toEqual(['sh', '-c', 'spellcheck --raw'])
+      expect(runs[0]?.stdin).toMatch(
+        /<message>\nteh build is green\n<\/message>/,
+      )
+      expect((await ui.find({ key: 'text' }))?.props.value).toBe(
+        'the build is green',
+      )
+
+      await ui.press({ key: 'undo' })
+      expect((await ui.find({ key: 'text' }))?.props.value).toBe(
+        'teh build is green',
+      )
+      expect(await ui.find({ key: 'undo' })).toBeUndefined()
+
+      // Enter in the field corrects too, and never sends.
+      await ui.input({ key: 'text', text: 'teh build is green, again' })
+      expect(runs.map(run => run.argv[0])).toEqual(['sh', 'sh'])
+      expect((await ui.find({ key: 'text' }))?.props.value).toBe(
+        'the build is green',
+      )
+      await ui.press({ key: 'discard' })
+      await ui.unmount()
+    }
+  },
+)
+
+test('a fix that fails keeps the text and says why', FIX, async ($, on) => {
+  engine(on, () => ({
+    exitCode: 1,
+    stdout: '',
+    stderr: 'API error: overloaded\n',
+  }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '#dev', text: 'teh build' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'fix' })
+  expect((await ui.find({ key: 'text' }))?.props.value).toBe('teh build')
+  expect(
+    (await ui.find({ type: 'Text', text: /Not corrected/ }))?.text,
+  ).toMatch(/overloaded/)
+  expect(await ui.find({ key: 'send' })).toBeDefined()
   await ui.unmount()
 })
