@@ -9,6 +9,8 @@ Early days, but every command below works.
 With [Homebrew](https://brew.sh/), on macOS (Apple Silicon) or Linux (x86_64):
 
 ```bash
+brew tap denrou/tap
+brew trust denrou/tap
 brew install denrou/tap/slack
 ```
 
