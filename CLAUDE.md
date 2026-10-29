@@ -93,6 +93,14 @@ Deferred on purpose with the watch (2026-10-28), to pick up once its log has bee
 - The command runs one event at a time: a slow one delays the next.
 - Whether holding the socket shows Denis as active at night is not checked yet; the first night's log (`me.presence`) tells.
 
+Deferred on purpose by the review of 2026-10-29 (`v0.18.1..main`), while nothing is sent:
+
+- A pause by hand is not read: `dnd.teamInfo` gives Slack's schedule only, and Denis's own snooze would take `dnd.info`. His nights are the schedule; the log shows whether a daytime snooze matters.
+- `answer.jsonl` is read whole for each event and never rotated, and one torn line stops every event until it is fixed by hand (closed, and logged by the watch). A few events a day; rotate once it shows in `seconds`. The watch also reloads the names cache for each event.
+- A group DM's main line answers a burst only once it has been handed over, since the watch knows a group DM as one only after reading its names.
+- Small leaks of what went wrong: a sender whose lookup failed is taken for a person (the socket already drops bots), `chat.getPermalink`'s error is dropped (the answer command strips the permalink), a socket drop does not say why, and a muted DM whose pref is not JSON is handed over (the pref item above).
+- Untested, since each needs a `Client`: the context cut at the burst's newest message, and `slack who`'s filtering (you, Slackbot, bots, the 50 cap).
+
 ## Reference implementation
 
 [slackcli](https://github.com/shaharia-lab/slackcli) (TypeScript, Bun) is installed on this machine as `slackcli` and logged in. Clone it into a scratch directory to compare how an endpoint is handled; `src/lib/browser-auth.ts`, `browser-launcher.ts`, `cdp-client.ts`, `unread.ts` and `unread-messages.ts` are the files these modules were ported from. Its `docs/user-guide/authentication.md` documents the two credential kinds.
