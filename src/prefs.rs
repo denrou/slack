@@ -1,9 +1,8 @@
-//! The user's own Slack preferences, read for three things: the
-//! conversations they muted, the emoji they use most, and the
-//! conversations they visited last. `users.prefs.get` is a web-client
-//! endpoint and all three are JSON strings inside it, so a missing or
-//! unreadable pref reads as "nothing muted", which shows more rather than
-//! less, as no emoji used yet and as nothing visited.
+//! The user's own Slack preferences, read for two things: the
+//! conversations they muted and the conversations they visited last.
+//! `users.prefs.get` is a web-client endpoint and both are JSON strings
+//! inside it, so a missing or unreadable pref reads as "nothing muted",
+//! which shows more rather than less, and as nothing visited.
 
 use std::collections::HashSet;
 
@@ -15,11 +14,8 @@ use crate::api::{self, Client};
 pub struct Prefs {
     /// Muted conversations: the app badges them for mentions only.
     pub muted: HashSet<String>,
-    /// Emoji names, the most used first: what the app's picker offers
-    /// first, and the screen's `R` too.
-    pub frequent_emoji: Vec<String>,
     /// Conversation ids, the last visited first: the app's own recent
-    /// list, which the screen lands on.
+    /// list, whose DMs `slack who` takes by default.
     pub recent: Vec<String>,
 }
 
@@ -41,7 +37,6 @@ pub fn fetch(client: &Client) -> Result<Option<Prefs>, api::Error> {
 pub fn parse(body: &Value) -> Prefs {
     Prefs {
         muted: muted(body),
-        frequent_emoji: frequent_emoji(body),
         recent: recent(body),
     }
 }
@@ -66,23 +61,6 @@ fn muted(body: &Value) -> HashSet<String> {
         .filter(|(_, pref)| pref.get("muted").and_then(Value::as_bool) == Some(true))
         .map(|(id, _)| id.clone())
         .collect()
-}
-
-/// `prefs.emoji_use` is a JSON string mapping each emoji name to how many
-/// times it was used.
-fn frequent_emoji(body: &Value) -> Vec<String> {
-    let Some(parsed) = nested(body, "emoji_use") else {
-        return Vec::new();
-    };
-    let Some(uses) = parsed.as_object() else {
-        return Vec::new();
-    };
-    let mut ranked: Vec<(&String, u64)> = uses
-        .iter()
-        .map(|(name, count)| (name, count.as_u64().unwrap_or(0)))
-        .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    ranked.into_iter().map(|(name, _)| name.clone()).collect()
 }
 
 /// `prefs.recents` is a JSON string whose `navigation` list holds what the
@@ -149,19 +127,8 @@ mod tests {
         ] {
             let prefs = parse(&body);
             assert!(prefs.muted.is_empty());
-            assert!(prefs.frequent_emoji.is_empty());
             assert!(prefs.recent.is_empty());
         }
-    }
-
-    #[test]
-    fn the_most_used_emoji_come_first() {
-        let uses = json!({"wink": 346, "+1": 415, "yolo": 7, "joy": 65, "grin": 65});
-        let body = json!({"ok": true, "prefs": {"emoji_use": uses.to_string()}});
-        assert_eq!(
-            parse(&body).frequent_emoji,
-            ["+1", "wink", "grin", "joy", "yolo"]
-        );
     }
 
     #[test]

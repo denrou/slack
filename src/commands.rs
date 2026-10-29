@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::api::{self, Client, Credentials, Identity};
@@ -14,13 +14,13 @@ use crate::auth::{capture, cdp};
 use crate::counts::Kind;
 use crate::directory::Listed;
 use crate::names::Names;
+use crate::presence::{self, Described, Person, Presence};
 use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, files, history, lastview, mrkdwn, notify, react, read, replies, search,
-    send, target, tui, view,
+    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, target, view,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -29,7 +29,7 @@ pub fn unreads(json: bool, no_color: bool) -> Result<()> {
     let client = workspace.client();
     let mut names = Names::load();
     let counts = counts::fetch(&client)?;
-    let view = view::build(&client, &counts, &mut names, view::Reach::Unread)?;
+    let view = view::build(&client, &counts, &mut names)?;
     names.save();
     if let Err(err) = lastview::remember(team_id, &view) {
         crate::warn::warn(format!(
@@ -70,26 +70,10 @@ pub fn count(json: bool) -> Result<()> {
         return print_json(&json!({
             "unread": counts.unread_count(),
             "me": counts.me_count(),
-            "notifying": notify::covered(),
         }));
     }
     println!("{}", counts.unread_count());
     Ok(())
-}
-
-pub fn ui() -> Result<()> {
-    let store = Workspaces::load()?;
-    let (team_id, workspace) = store.default_workspace()?;
-    let mut names = Names::load();
-    let result = tui::run(
-        &workspace.client(),
-        &mut names,
-        team_id,
-        workspace.user_id.as_deref(),
-        &workspace.url,
-    );
-    names.save();
-    result
 }
 
 pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()> {
@@ -324,6 +308,164 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
     })
 }
 
+/// The most people `slack who` describes: each costs two calls.
+const WHO_MAX: usize = 50;
+/// The most members of a channel read for it, bots and you among them.
+const WHO_MEMBERS: usize = 100;
+/// The people of the DMs visited last that a bare `slack who` describes.
+const WHO_RECENT: usize = 8;
+
+pub fn who(targets: &[String], json: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let me = workspace.user_id.as_deref();
+    let mut names = Names::load();
+    let found = who_people(&client, &mut names, targets, me).and_then(|users| {
+        names.resolve_users(&client, users.clone())?;
+        let people = presence::people(&client, &users)?;
+        Ok((users, people))
+    });
+    names.save();
+    let (users, mut people) = found?;
+    let mut described: Vec<(directory::Person, Person)> = users
+        .iter()
+        .map(|id| {
+            let listed = names.user(id).map_or_else(
+                || directory::Person {
+                    id: id.clone(),
+                    handle: id.clone(),
+                    display: id.clone(),
+                    real: String::new(),
+                    title: String::new(),
+                },
+                |user| directory::Person::from_cache(id, user),
+            );
+            (listed, people.remove(id).unwrap_or_default())
+        })
+        .collect();
+    // Who is around first.
+    described.sort_by_cached_key(|(listed, person)| {
+        (
+            person.presence != Some(Presence::Active),
+            listed.display.to_lowercase(),
+        )
+    });
+    let now = jiff::Zoned::now();
+    if json {
+        let value: Vec<Described> = described
+            .iter()
+            .map(|(listed, person)| {
+                person.described(&listed.id, &listed.handle, &listed.display, &now)
+            })
+            .collect();
+        return print_json(&value);
+    }
+    if described.is_empty() {
+        if targets.is_empty() {
+            println!("No direct message visited lately; name the people: slack who @jane '#team'");
+        } else {
+            println!("No one to describe: bots and you are left out.");
+        }
+        return Ok(());
+    }
+    let style = Style::detect(false);
+    let width = described
+        .iter()
+        .map(|(listed, _)| listed.display.chars().count() + 1)
+        .max()
+        .unwrap_or(0);
+    to_stdout(|out| {
+        for (listed, person) in &described {
+            let label = format!("@{}", listed.display);
+            let padding = " ".repeat(width - label.chars().count());
+            let (dot, word) = match person.presence {
+                Some(Presence::Active) => ("●", "active"),
+                Some(Presence::Away) => ("○", "away"),
+                None => ("?", "presence unknown"),
+            };
+            let mut notes = vec![style.dim(word)];
+            notes.extend(person.notes(&now));
+            if person.profile.is_none() {
+                notes.push(style.dim("status could not be read"));
+            }
+            writeln!(
+                out,
+                "{dot} {}{padding}  {}",
+                style.bold(&label),
+                notes.join(" · ")
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// Whom `slack who` describes, in the order named: the people named, the
+/// members of a channel named, else the people of the DMs visited last.
+/// Bots, and you in a list you did not name yourself in, are left out.
+fn who_people(
+    client: &Client,
+    names: &mut Names,
+    targets: &[String],
+    me: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut users = Vec::new();
+    if targets.is_empty() {
+        let counts = counts::fetch(client)?;
+        let dms: Vec<String> = counts
+            .recent
+            .iter()
+            .filter(|id| {
+                counts
+                    .conversations
+                    .iter()
+                    .any(|c| &c.id == *id && c.kind == Kind::Im)
+            })
+            .take(WHO_RECENT)
+            .cloned()
+            .collect();
+        names.resolve_channels(client, dms.clone())?;
+        users.extend(
+            dms.iter()
+                .filter_map(|dm| names.dm_user(dm))
+                .filter(|user| Some(*user) != me)
+                .map(str::to_string),
+        );
+    }
+    for target in targets {
+        if let Some(name) = target.strip_prefix('@') {
+            let user = names
+                .user_id_by_name(client, name)?
+                .ok_or_else(|| anyhow!("no one called @{name} in the workspace"))?;
+            users.push(user);
+        } else if let Some(name) = target.strip_prefix('#') {
+            let channel = names
+                .channel_id_by_name(client, name)?
+                .ok_or_else(|| anyhow!("no channel named #{name} that you can see"))?;
+            let members = directory::members(client, &channel, WHO_MEMBERS)?.ok_or_else(|| {
+                anyhow!("#{name} has more than {WHO_MEMBERS} members; name the people instead: slack who @jane @bob")
+            })?;
+            names.resolve_users(client, members.clone())?;
+            users.extend(members.into_iter().filter(|user| {
+                Some(user.as_str()) != me
+                    && user != directory::SLACKBOT
+                    && !names.user(user).is_some_and(|u| u.is_bot)
+            }));
+        } else {
+            bail!("`{target}` is not an @person or a #channel");
+        }
+    }
+    let mut seen = HashSet::new();
+    users.retain(|user| seen.insert(user.clone()));
+    if users.len() > WHO_MAX {
+        bail!(
+            "that is {} people, bots and you left out; `slack who` describes {WHO_MAX} at most",
+            users.len()
+        );
+    }
+    Ok(users)
+}
+
 pub fn search(query: &str, limit: usize, json: bool, no_color: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (_, workspace) = store.default_workspace()?;
@@ -514,6 +656,19 @@ fn send_target(names: &Names, channel: &str) -> String {
     }
 }
 
+pub fn watch(settle: u64, timeout: u64, command: Vec<String>) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let identity = client.auth_test()?;
+    let options = crate::watch::Options {
+        settle: Duration::from_secs(settle),
+        timeout: Duration::from_secs(timeout),
+        command,
+    };
+    crate::watch::run(&client, &identity, &options)
+}
+
 pub fn read(targets: &[String]) -> Result<()> {
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
@@ -634,9 +789,6 @@ pub fn logout(keep_browser_session: bool) -> Result<()> {
         println!("Removed the saved workspaces.");
     } else {
         println!("No saved workspaces.");
-    }
-    if files::clear()? {
-        println!("Deleted the files the screen downloaded.");
     }
     if keep_browser_session {
         println!(

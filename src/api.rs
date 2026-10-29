@@ -2,7 +2,7 @@
 //! authenticated the way the web client does it, with the `xoxc` token in
 //! the body and the `xoxd` session cookie. Commands never see the headers.
 
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -44,9 +44,6 @@ const USER_AGENT: &str = concat!(
     ")"
 );
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// A file can be a video: longer than a call, and the screen says it is
-/// downloading meanwhile.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const RATE_LIMIT_RETRIES: u32 = 2;
 /// Cap on an honoured Retry-After: a status-bar poll must not hang for minutes.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -70,8 +67,6 @@ pub enum Error {
     /// Never the URL: it carries the session's ticket.
     #[error("could not open Slack's socket: {reason}")]
     Socket { reason: String },
-    #[error("Slack did not hand over the file: {reason}")]
-    File { reason: String },
 }
 
 /// Slack's real-time socket, as `Client::socket` opens it.
@@ -120,7 +115,7 @@ pub struct Identity {
     pub url: String,
 }
 
-/// Cloned for the screen's poller, which runs detached (`tui::poll`).
+/// Cloned for the socket's own thread (`rtm::listen`).
 #[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
@@ -232,54 +227,6 @@ impl Client {
                 }
             })?;
         Ok(socket)
-    }
-
-    /// Write a file Slack hosts into `sink`, with the session cookie as
-    /// the web client fetches it, and return its size. A web page in its
-    /// place is Slack's sign-in page, unless the file is one (`html`).
-    pub fn download(&self, url: &str, html: bool, sink: &mut dyn Write) -> Result<u64, Error> {
-        const WHAT: &str = "the file";
-        let refused = |reason: &str| Error::File {
-            reason: reason.to_string(),
-        };
-        if !capture::is_slack_workspace_url(url) {
-            return Err(refused("it is not on slack.com"));
-        }
-        // Deliberate: no redirect is followed, since the cookie would go
-        // along to a host `is_slack_workspace_url` never saw.
-        let mut response = self
-            .agent
-            .get(url)
-            .config()
-            .max_redirects(0)
-            .timeout_global(Some(DOWNLOAD_TIMEOUT))
-            .build()
-            .header("Cookie", &self.cookie)
-            .header("User-Agent", USER_AGENT)
-            .call()
-            .map_err(|source| Error::Transport {
-                method: WHAT.to_string(),
-                source,
-            })?;
-        let status = response.status().as_u16();
-        if (300..400).contains(&status) {
-            return Err(refused(
-                "it sent the download elsewhere, which usually means the session expired (`slack whoami` checks it)",
-            ));
-        }
-        if !(200..300).contains(&status) {
-            return Err(Error::Http {
-                method: WHAT.to_string(),
-                status,
-            });
-        }
-        if !html && response.body().mime_type() == Some("text/html") {
-            return Err(refused(
-                "a web page came back instead, which usually means the session expired (`slack whoami` checks it)",
-            ));
-        }
-        std::io::copy(&mut response.body_mut().as_reader(), sink)
-            .map_err(|err| refused(&format!("the download broke off: {err}")))
     }
 
     pub fn auth_test(&self) -> Result<Identity, Error> {

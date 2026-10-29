@@ -38,20 +38,6 @@ pub fn label(name: &str) -> String {
     glyph(name).map_or_else(|| format!(":{name}:"), str::to_string)
 }
 
-/// Whether a typed part picks out a name: it begins the name or one of
-/// its words, as `check` finds `white_check_mark`.
-pub fn begins(name: &str, typed: &str) -> bool {
-    name.starts_with(typed) || name.split(['_', '-']).any(|word| word.starts_with(typed))
-}
-
-/// The standard emoji names the typed part `begins`, in gemoji's order,
-/// which keeps the faces first.
-pub fn matching(typed: &str) -> impl Iterator<Item = &'static str> {
-    emojis::iter()
-        .flat_map(Emoji::shortcodes)
-        .filter(move |code| begins(code, typed))
-}
-
 /// What a typed name means: `:+1:` and `+1` are the same.
 pub fn normalize(typed: &str) -> String {
     typed.trim().trim_matches(':').to_lowercase()
@@ -70,11 +56,6 @@ pub fn name_of(typed: &str) -> String {
         (Some(code), None) => code.to_string(),
         (None, _) => normalize(typed),
     }
-}
-
-/// Whether two names are one emoji, as `thumbsup` is Slack's `+1`.
-pub fn same(a: &str, b: &str) -> bool {
-    a == b || glyph(a).is_some_and(|drawn| glyph(b) == Some(drawn))
 }
 
 /// The other names to try when Slack refuses one: the names come from
@@ -189,24 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn typed_names_are_completed_and_normalized() {
-        assert!(matching("thumbs").any(|code| code == "thumbsup"));
-        assert!(matching("+").any(|code| code == "+1"));
-        assert!(matching("check").any(|code| code == "white_check_mark"));
-        assert!(!begins("white_check_mark", "heck"));
+    fn typed_names_are_normalized() {
         assert_eq!(normalize(" :Tada: "), "tada");
         assert_eq!(name_of("👍"), "+1");
         assert_eq!(name_of(":yolo:"), "yolo");
         assert_eq!(name_of("👍🏻"), "+1::skin-tone-2");
-    }
-
-    #[test]
-    fn one_emoji_under_several_names() {
-        assert!(same("+1", "thumbsup"));
-        assert!(same("hugging_face", "hugs"));
-        assert!(same("yolo", "yolo"));
-        assert!(!same("+1", "+1::skin-tone-2"));
-        assert!(!same("yolo", "party_parrot"), "two custom emoji");
     }
 
     #[test]

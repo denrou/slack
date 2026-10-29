@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# The command `slack watch` hands each DM and mention to: reads the event on
+# stdin and prints the automatic reply, or nothing. A reply goes out only when
+# it does something for the sender: a pull request to review that has not had
+# its automated review, an urgent matter that gets the time the owner will be
+# notified, or a joke for someone playing with the bot, once. Anything else
+# waits for the owner.
+#
+# Three `claude -p` calls in a row: a judge (which of these, if any), a
+# responder, and a reviewer that can only reject. The models get no tools:
+# what the reply rests on (the pull requests' state, the time) is read by code
+# and handed over as facts. So are the rules that must not rest on a model:
+# the skip list, other auto-replies, one reply per conversation in 12 hours,
+# one playful reply per sender in 7 days, and a draft with an @, a link or a
+# phone number.
+#
+#   slack watch -- ~/code/denrou/slack/tools/answer/answer
+#
+# Private, outside the repository, in ~/.config/slack/answer/:
+#   private.md   what a reply never shares (required; start from private.example.md)
+#   skip         a handle or user id a line, never answered (optional)
+# ~/.local/state/slack/answer.jsonl keeps one record per event, the judge's
+# reading, the facts, the draft and the review included; it is also what the
+# 12-hour and 7-day rules read. A failed call exits non-zero, which the watch
+# logs.
+set -euo pipefail
+
+model="claude-sonnet-5-5"
+here=$(dirname "$(realpath "$0")")
+config=${XDG_CONFIG_HOME:-$HOME/.config}/slack/answer
+state=${XDG_STATE_HOME:-$HOME/.local/state}/slack
+trace=$state/answer.jsonl
+# The tests and the fixtures swap in fakes.
+claude=${ANSWER_CLAUDE:-claude}
+gh=${ANSWER_GH:-gh}
+
+if [[ ! -r $config/private.md ]]; then
+  echo "answer: $config/private.md is missing; start from $here/private.example.md" >&2
+  exit 2
+fi
+
+event=$(cat)
+if ! jq -e 'type == "object" and (.sender.user | type == "string")
+    and (.conversation.id | type == "string") and any(.messages[]?; .trigger)' \
+  <<<"$event" >/dev/null 2>&1; then
+  echo "answer: stdin is not an event from slack watch" >&2
+  exit 2
+fi
+# The time of the last message that triggered it, a minute before the watch
+# hands it over: the same event always reads the same.
+now=$(jq -r '[.messages[] | select(.trigger) | .ts | tonumber] | max // empty | floor' <<<"$event")
+now=${now:-$(date +%s)}
+mkdir -p "$state"
+# Deliberate: the calls run in an empty folder, so no project's CLAUDE.md or
+# memory reaches them.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+sender=$(jq -r '.sender.user' <<<"$event")
+place=$(jq -r '.conversation.id + "/" + (.thread_ts // "")' <<<"$event")
+conversation=$(jq -r '.conversation.id' <<<"$event")
+record=$(jq -c --argjson now "$now" --arg place "$place" \
+  '{at: ($now | todate), epoch: $now, id, sender: .sender.user, conversation: .conversation.id, place: $place}' <<<"$event")
+# The replies given so far; in the dry run, the ones that would have gone out.
+if [[ -s $trace ]]; then
+  history=$(jq -sc 'map(select(.outcome == "answered"))' "$trace")
+else
+  history='[]'
+fi
+
+note() {
+  record=$(jq -c --argjson add "$1" '. + $add' <<<"$record")
+}
+
+# Records how the event ended, prints the reply when there is one, and exits.
+finish() { # finish <outcome> <why> [reply]
+  note "$(jq -nc --arg outcome "$1" --arg why "$2" '{outcome: $outcome, why: $why}')"
+  (
+    umask 077
+    printf '%s\n' "$record" >>"$trace"
+  )
+  if [[ $# -ge 3 ]]; then printf '%s\n' "$3"; fi
+  exit 0
+}
+
+ask() { # ask <prompt> <schema>, the message on stdin: prints the structured answer
+  local out
+  out=$(cd "$work" && "$claude" -p --model "$model" --tools "" --strict-mcp-config \
+    --setting-sources "" --disable-slash-commands --no-session-persistence \
+    --output-format json --system-prompt "$(cat "$here/$1.md")" --json-schema "$2") || {
+    echo "answer: the $1 call failed: $(jq -r '.result? // empty' <<<"$out" 2>/dev/null | head -c 300)" >&2
+    return 1
+  }
+  jq -ec '.structured_output // error("none")' <<<"$out" 2>/dev/null || {
+    echo "answer: the $1 call gave no answer: $(jq -r '.result? // empty' <<<"$out" 2>/dev/null | head -c 300)" >&2
+    return 1
+  }
+}
+
+if [[ -r $config/skip ]] &&
+  sed -e 's/#.*//' -e 's/[[:space:]]//g' -e 's/^@//' "$config/skip" |
+  grep -qxF -e "$sender" -e "$(jq -r '.sender.handle' <<<"$event")"; then
+  finish skipped "on the skip list"
+fi
+if jq -e 'any(.messages[] | select(.trigger); .text | test(
+    "r[ée]ponse automatique|message automatique|automatic reply|auto-?reply|out of (the )?office|absent du bureau"; "i"))' \
+  <<<"$event" >/dev/null; then
+  finish skipped "another automatic reply"
+fi
+# A record from before `conversation` was kept has it at the front of `place`.
+if jq -e --arg conversation "$conversation" --argjson since $((now - 12 * 3600)) \
+  'any(.[]; (.conversation // (.place | split("/")[0])) == $conversation and .epoch >= $since)' \
+  <<<"$history" >/dev/null; then
+  finish skipped "an automatic reply in this conversation in the last 12 hours"
+fi
+
+# What the models see: the exchange, without ids, links to it or anyone's status.
+exchange=$(jq -c --arg sender "$sender" --argjson history "$history" --argjson since $((now - 30 * 86400)) '{
+  reason,
+  conversation: {kind: .conversation.kind, name: .conversation.name, in_thread: (.thread_ts != null)},
+  sender: (.sender | {name, real_name, external, local_time}),
+  me: (.me | {name, local_time}),
+  messages: [.messages[] | {time, from, text, me, trigger, files} | with_entries(select(.value != null))],
+  previous: [$history[] | select(.sender == $sender and .epoch >= $since) | {at, category}]
+}' <<<"$event")
+
+judged=$(printf '<exchange>\n%s\n</exchange>\n' "$exchange" | ask judge \
+  '{"type":"object","properties":{"category":{"enum":["review","urgent","playful","skip"]},"why":{"type":"string"}},"required":["category","why"],"additionalProperties":false}')
+category=$(jq -r .category <<<"$judged")
+note "$(jq -c '{category, judge: .why}' <<<"$judged")"
+
+case $category in
+skip)
+  finish skipped "the judge"
+  ;;
+playful)
+  if jq -e --arg sender "$sender" --argjson since $((now - 7 * 86400)) \
+    'any(.[]; .sender == $sender and .category == "playful" and .epoch >= $since)' <<<"$history" >/dev/null; then
+    finish skipped "a playful reply to this sender in the last 7 days"
+  fi
+  facts='{}'
+  ;;
+review)
+  if [[ $(jq -r '.sender.external' <<<"$event") == true ]]; then
+    finish skipped "a review asked from another organisation"
+  fi
+  # The sender's links from the first trigger on: an older one in the same
+  # conversation was another request.
+  urls=$(jq -r --arg sender "$sender" '.messages
+    | .[([to_entries[] | select(.value.trigger) | .key] | min):][]
+    | select(.user == $sender) | .text
+    | scan("https://github\\.com/[\\w.-]+/[\\w.-]+/pull/[0-9]+")' <<<"$event" | sort -u)
+  if [[ -z $urls ]]; then
+    finish skipped "a review asked without a pull request link"
+  fi
+  pulls='[]'
+  while read -r url; do
+    if ! pull=$("$gh" pr view "$url" --json state,labels,comments,reviews 2>"$work/gh.err"); then
+      # Not there, or not visible to the owner: not one to answer for. Any
+      # other failure (an expired login) is an error the watch logs.
+      if grep -q "Could not resolve" "$work/gh.err"; then
+        finish skipped "could not read $url"
+      fi
+      echo "answer: gh could not read $url: $(head -c 300 "$work/gh.err")" >&2
+      exit 1
+    fi
+    # The automated review is the Centreon skill (/check-pr): its comment, or
+    # the label it suggests.
+    pulls=$(jq -c --arg url "$url" --argjson pull "$pull" '. + [{
+      pull_request: ($url | sub("https://github.com/"; "") | sub("/pull/"; "#")),
+      open: ($pull.state == "OPEN"),
+      automated_review: (any($pull.labels[]; .name == "ai-reviewed")
+        or any($pull.comments[], $pull.reviews[]; .body | test("Centreon automated review skill")))
+    }]' <<<"$pulls")
+  done <<<"$urls"
+  note "$(jq -c '{pull_requests: .}' <<<"$pulls")"
+  facts=$(jq -c '{waiting_for_automated_review: [.[] | select(.open and (.automated_review | not)) | .pull_request]}' <<<"$pulls")
+  if jq -e '.waiting_for_automated_review == []' <<<"$facts" >/dev/null; then
+    finish skipped "every pull request is closed or has had its automated review"
+  fi
+  ;;
+urgent)
+  # When Slack notifies the owner again, while their notifications are
+  # paused (Slack's schedule; a pause by hand is not read yet): the end of the
+  # pause, or of their status when later. Not paused, they are notified now,
+  # whatever the status says. No time without both clocks.
+  until=$(jq -r --argjson now "$now" '.me.notifications_paused_until as $pause
+    | if ($pause // 0) > $now and .me.tz != null and .sender.tz != null
+      then [$pause, .me.status.expires?] | map(select(. != null)) | max else empty end' <<<"$event")
+  if [[ -n $until ]]; then
+    clock() { TZ=$1 jq -nr --argjson at "$until" '$at | strflocaltime("%A %Y-%m-%d %H:%M")'; }
+    facts=$(jq -nc --arg owner "$(clock "$(jq -r '.me.tz' <<<"$event")")" \
+      --arg sender "$(clock "$(jq -r '.sender.tz' <<<"$event")")" \
+      '{notified_at: {owner_clock: $owner, sender_clock: $sender}}')
+  else
+    facts='{"notified_at": null}'
+  fi
+  ;;
+*)
+  echo "answer: the judge gave an unknown category: $category" >&2
+  exit 1
+  ;;
+esac
+note "$(jq -c '{facts: .}' <<<"$facts")"
+
+drafted=$(printf '<exchange>\n%s\n</exchange>\n<category>%s</category>\n<facts>\n%s\n</facts>\n' \
+  "$exchange" "$category" "$facts" | ask respond \
+  '{"type":"object","properties":{"reply":{"type":"string"}},"required":["reply"],"additionalProperties":false}')
+draft=$(jq -r '.reply | gsub("^\\s+|\\s+$"; "")' <<<"$drafted")
+note "$(jq -nc --arg draft "$draft" '{draft: $draft}')"
+
+flaw=$(jq -nr --arg d "$draft" '
+  if $d == "" then "it is empty"
+  elif ($d | length) > 400 then "it is over 400 characters"
+  elif ($d | test("@")) then "it has an @, a mention or an email"
+  elif ($d | test("https?:|www\\.|<[^>]*>|\\b[a-z0-9-]+\\.[a-z]{2,}\\b"; "i")) then "it has a link"
+  elif ($d | test("\\d([\\s.()/-]{0,2}\\d){7,}")) then "it has a phone number"
+  elif ($d | test("```")) then "it has a code block"
+  elif ($d | test("r[ée]ponse automatique"; "i")) then "it repeats the marker the watch adds"
+  else empty end')
+if [[ -n $flaw ]]; then
+  finish rejected "$flaw"
+fi
+
+reviewed=$({
+  printf '<private>\n'
+  cat "$config/private.md"
+  printf '</private>\n<exchange>\n%s\n</exchange>\n<category>%s</category>\n<facts>\n%s\n</facts>\n<draft>\n%s\n</draft>\n' \
+    "$exchange" "$category" "$facts" "$draft"
+} | ask review \
+  '{"type":"object","properties":{"verdict":{"enum":["pass","reject"]},"reason":{"type":"string"}},"required":["verdict","reason"],"additionalProperties":false}')
+note "$(jq -c '{review: .reason}' <<<"$reviewed")"
+if [[ $(jq -r .verdict <<<"$reviewed") != pass ]]; then
+  finish rejected "the reviewer"
+fi
+finish answered "the reviewer passed it" "$draft"

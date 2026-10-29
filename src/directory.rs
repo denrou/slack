@@ -1,12 +1,13 @@
 //! The directory: every conversation you are in and everyone in the
-//! workspace, behind `slack channels`, `slack people` and the TUI's
-//! picker. `client.counts` already lists what you are in with its unread
+//! workspace, behind `slack channels` and `slack people`.
+//! `client.counts` already lists what you are in with its unread
 //! state; the names come from the cache, filled in one walk when some are
 //! missing, so the first run costs a call or two and the next ones none.
 
 use std::cmp::Ordering;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::api::{self, Client};
 use crate::counts::{self, Conversation, Kind};
@@ -16,6 +17,8 @@ use crate::names::{Names, User};
 /// Past this many unknown people, one directory walk beats one lookup
 /// each.
 const WALK_THRESHOLD: usize = 10;
+/// Slack's own bot, which writes DMs as a user.
+pub const SLACKBOT: &str = "USLACKBOT";
 
 /// A conversation you are in.
 #[derive(Debug, Clone, Serialize)]
@@ -58,11 +61,6 @@ impl Listed {
         }
         notes
     }
-
-    /// The read cursor, when there is something new after it.
-    pub fn unread_from(&self) -> Option<&str> {
-        self.last_read.as_deref().filter(|_| self.unread)
-    }
 }
 
 /// Someone in the workspace.
@@ -80,7 +78,7 @@ pub struct Person {
 }
 
 impl Person {
-    fn from_cache(id: &str, user: &User) -> Person {
+    pub fn from_cache(id: &str, user: &User) -> Person {
         Person {
             id: id.to_string(),
             handle: user.name.clone(),
@@ -129,6 +127,34 @@ pub fn correspondents(client: &Client, names: &mut Names) -> Result<Vec<Person>,
     Ok(people)
 }
 
+/// The members of a channel, bots and you included, or None when there
+/// are more than `max`: which of them one page holds says nothing.
+pub fn members(
+    client: &Client,
+    channel: &str,
+    max: usize,
+) -> Result<Option<Vec<String>>, api::Error> {
+    const METHOD: &str = "conversations.members";
+    let limit = (max + 1).to_string();
+    let body = client.call(METHOD, &[("channel", channel), ("limit", &limit)])?;
+    let members: Vec<String> = body
+        .get("members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| api::Error::Shape {
+            method: METHOD.to_string(),
+            reason: "missing `members`".to_string(),
+        })?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let more = body
+        .pointer("/response_metadata/next_cursor")
+        .and_then(Value::as_str)
+        .is_some_and(|cursor| !cursor.is_empty());
+    Ok((!more && members.len() <= max).then_some(members))
+}
+
 /// Everyone in the workspace matching `filter`, from a fresh walk of the
 /// directory, by display name.
 pub fn people(client: &Client, names: &mut Names, filter: &str) -> Result<Vec<Person>, api::Error> {
@@ -144,7 +170,7 @@ pub fn people(client: &Client, names: &mut Names, filter: &str) -> Result<Vec<Pe
 pub fn everyone(names: &Names) -> Vec<Person> {
     let mut people: Vec<Person> = names
         .users()
-        .filter(|(id, user)| !user.is_bot && *id != "USLACKBOT")
+        .filter(|(id, user)| !user.is_bot && *id != SLACKBOT)
         .map(|(id, user)| Person::from_cache(id, user))
         .collect();
     people.sort_by_cached_key(|person| person.display.to_lowercase());
@@ -273,10 +299,6 @@ mod tests {
         listed.muted = true;
         listed.unread = true;
         listed.mention_count = 2;
-        listed.last_read = Some("0.5".into());
         assert_eq!(listed.notes(), ["private", "muted", "unread", "2 mentions"]);
-        assert_eq!(listed.unread_from(), Some("0.5"));
-        listed.unread = false;
-        assert_eq!(listed.unread_from(), None);
     }
 }

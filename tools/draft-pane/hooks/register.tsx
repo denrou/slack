@@ -149,8 +149,8 @@ function keep($: EngineInterface, text: string): Promise<unknown> {
   return edits
 }
 
-// The instructions of the screen's Ctrl-G (`src/fix.rs`, which goes with the
-// screen in #54), so a command set up for it reads the same prompt.
+// The instructions of the screen's Ctrl-G (`src/fix.rs` up to v0.18.1), so
+// a command set up for it reads the same prompt.
 function fixPrompt(text: string): string {
   return `Correct the spelling, the missing accents and the grammar of the Slack message between the <message> tags, in the language it is written in. Do not rephrase: keep the words, the tone, the meaning and the line breaks. Leave Slack markup, emoji codes, mentions, code and URLs as they are. Reply with the corrected message alone, without the tags and without a comment; if nothing needs correcting, reply with the message unchanged.\n\n<message>\n${text}\n</message>\n`
 }

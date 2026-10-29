@@ -4,21 +4,18 @@
 mod api;
 mod auth;
 mod commands;
-mod config;
 mod counts;
 mod directory;
 mod emoji;
-mod files;
-mod fix;
 mod history;
 mod lastview;
 mod mention;
 mod mrkdwn;
 mod names;
-mod notify;
 mod par;
 mod paths;
 mod prefs;
+mod presence;
 mod react;
 mod read;
 mod replies;
@@ -29,24 +26,23 @@ mod store;
 mod style;
 mod target;
 mod threads;
-mod tui;
 mod view;
 mod warn;
+mod watch;
 
-use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-/// Read and answer Slack from the terminal. With no command, what is unread
-/// as an interactive view; `slack unreads` prints it instead.
+/// Read and answer Slack from the terminal. With no command, what is unread,
+/// as `slack unreads` prints it.
 #[derive(Parser)]
 #[command(name = "slack", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Print only the number of conversations, for a status bar
     #[arg(long)]
     count: bool,
-    /// With --count: the conversations, the messages aimed at you and whether the screen notifies of them, as JSON
+    /// With --count: the conversations and the messages aimed at you, as JSON
     #[arg(long, requires = "count")]
     json: bool,
     #[command(subcommand)]
@@ -140,6 +136,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show who is around: presence, status, their clock, paused notifications
+    Who {
+        /// `@person`s, or a `#channel` for its members; the people of the DMs you visited last when omitted
+        targets: Vec<String>,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Search the messages, newest first; Slack's operators work (`in:#dev from:@jane after:2026-10-01`)
     Search {
         /// What to look for, Slack's search syntax
@@ -169,14 +173,24 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
+    /// Listen for DMs and mentions of you, hand each to a command, log what it would answer; sends nothing
+    Watch {
+        /// Seconds without a new message from the sender before the exchange is handed over
+        #[arg(long, default_value_t = 60)]
+        settle: u64,
+        /// Seconds the command may take before it is stopped
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// The program to run for each, with its arguments (after `--`); it reads the exchange as JSON on stdin and prints the reply, or nothing. Without one, the events are only logged
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         None if cli.count => commands::count(cli.json),
-        // A pipe or a script cannot drive a screen; it gets the text.
-        None if io::stdin().is_terminal() && io::stdout().is_terminal() => commands::ui(),
         None => commands::unreads(false, false),
         Some(Command::Unreads { json, no_color }) => commands::unreads(json, no_color),
         Some(Command::Send {
@@ -203,6 +217,7 @@ fn main() -> ExitCode {
         }) => commands::thread(&thread, json, no_color),
         Some(Command::Channels { filter, json }) => commands::channels(&filter.join(" "), json),
         Some(Command::People { filter, json }) => commands::people(&filter.join(" "), json),
+        Some(Command::Who { targets, json }) => commands::who(&targets, json),
         Some(Command::Search {
             query,
             limit,
@@ -215,6 +230,11 @@ fn main() -> ExitCode {
             json,
             no_color,
         }) => commands::show(&target, usize::from(limit), json, no_color),
+        Some(Command::Watch {
+            settle,
+            timeout,
+            command,
+        }) => commands::watch(settle, timeout, command),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -237,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn no_command_is_the_view_and_unreads_prints_it() {
+    fn no_command_is_unreads() {
         let cli = Cli::parse_from(["slack"]);
         assert!(cli.command.is_none() && !cli.count);
         let cli = Cli::parse_from(["slack", "unreads", "--json"]);
@@ -247,6 +267,19 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["slack", "ui"]).is_err());
         assert!(Cli::try_parse_from(["slack", "--json"]).is_err());
+    }
+
+    #[test]
+    fn watch_takes_the_command_with_its_flags() {
+        let cli = Cli::parse_from([
+            "slack", "watch", "--settle", "30", "--", "answer", "--judge", "-v",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Watch { settle: 30, timeout: 600, command }) if command == ["answer", "--judge", "-v"]
+        ));
+        let cli = Cli::parse_from(["slack", "watch"]);
+        assert!(matches!(cli.command, Some(Command::Watch { command, .. }) if command.is_empty()));
     }
 
     #[test]

@@ -99,6 +99,15 @@ impl Names {
         self.users.get(id)
     }
 
+    /// The other person of a DM; None for any other conversation.
+    pub fn dm_user(&self, channel: &str) -> Option<&str> {
+        self.channels
+            .get(channel)
+            .filter(|channel| channel.is_im)?
+            .user
+            .as_deref()
+    }
+
     /// A cache with these entries, for the tests of other modules.
     #[cfg(test)]
     pub fn with(users: Vec<(&str, User)>, channels: Vec<(&str, Channel)>) -> Names {

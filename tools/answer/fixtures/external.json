@@ -1,0 +1,45 @@
+{
+  "id": "C0SHARED-1793218500.000100",
+  "reason": "mention",
+  "workspace": "Example",
+  "conversation": {
+    "id": "C0SHARED",
+    "kind": "channel",
+    "name": "#ext-acme"
+  },
+  "thread_ts": null,
+  "permalink": "https://example.slack.com/archives/C0SHARED/p1793218500000100",
+  "sender": {
+    "presence": "active",
+    "status": null,
+    "notifications_paused_until": null,
+    "external": true,
+    "user": "W0KIM",
+    "handle": "kim",
+    "name": "Kim Lee",
+    "real_name": "Kim Lee",
+    "tz": "America/Los_Angeles",
+    "local_time": "2026-10-28T13:15:00-07:00"
+  },
+  "me": {
+    "user": "U0OWNER",
+    "handle": "alex",
+    "name": "Alex Durand",
+    "presence": "away",
+    "status": null,
+    "tz": "America/New_York",
+    "local_time": "2026-10-28T16:15:00-04:00",
+    "notifications_paused_until": null,
+    "real_name": "Alex Durand"
+  },
+  "messages": [
+    {
+      "ts": "1793218500.000100",
+      "time": "16:15",
+      "from": "Kim Lee",
+      "user": "W0KIM",
+      "trigger": true,
+      "text": "@Alex Durand any update on the forecasting issue we reported last week? Our renewal decision is on Friday and the team is asking."
+    }
+  ]
+}

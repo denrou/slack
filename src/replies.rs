@@ -21,15 +21,6 @@ pub struct Replies {
     pub has_more: bool,
 }
 
-impl Replies {
-    /// The thread as it reads: the root, then the replies.
-    pub fn into_messages(self) -> Vec<Message> {
-        let mut messages = vec![self.root];
-        messages.extend(self.replies);
-        messages
-    }
-}
-
 pub fn fetch(client: &Client, channel: &str, thread_ts: &str) -> Result<Replies, api::Error> {
     let limit = PAGE.to_string();
     let mut messages: Vec<Message> = Vec::new();

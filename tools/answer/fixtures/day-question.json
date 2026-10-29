@@ -1,0 +1,45 @@
+{
+  "id": "D0JANE-1793214300.000100",
+  "reason": "direct_message",
+  "workspace": "Example",
+  "conversation": {
+    "id": "D0JANE",
+    "kind": "direct_message",
+    "name": "@jane"
+  },
+  "thread_ts": null,
+  "permalink": "https://example.slack.com/archives/D0JANE/p1793214300000100",
+  "sender": {
+    "presence": "active",
+    "status": null,
+    "notifications_paused_until": null,
+    "external": false,
+    "user": "U0JANE",
+    "handle": "jane",
+    "name": "Jane Martin",
+    "real_name": "Jane Martin",
+    "tz": "Europe/Paris",
+    "local_time": "2026-10-28T20:05:00+01:00"
+  },
+  "me": {
+    "user": "U0OWNER",
+    "handle": "alex",
+    "name": "Alex Durand",
+    "presence": "away",
+    "status": null,
+    "tz": "America/New_York",
+    "local_time": "2026-10-28T15:05:00-04:00",
+    "notifications_paused_until": null,
+    "real_name": "Alex Durand"
+  },
+  "messages": [
+    {
+      "ts": "1793214300.000100",
+      "time": "15:05",
+      "from": "Jane Martin",
+      "user": "U0JANE",
+      "trigger": true,
+      "text": "Hello ! Est-ce que tu sais où sont rangés les résultats du dernier entraînement ? Je ne les trouve pas sur le bucket"
+    }
+  ]
+}

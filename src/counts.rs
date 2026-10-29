@@ -64,11 +64,7 @@ pub struct Counts {
     pub conversations: Vec<Conversation>,
     /// None when Slack sent no usable block: "not reported" is not "none".
     pub threads: Option<Threads>,
-    /// From the preferences read beside the counts, for the screen's `R`.
-    #[serde(skip)]
-    pub frequent_emoji: Vec<String>,
-    /// The conversations visited last in the app, for the screen's recent
-    /// sections.
+    /// The conversations visited last in the app, for `slack who`.
     #[serde(skip)]
     pub recent: Vec<String>,
     /// The preferences could not be read, so nothing reads as muted.
@@ -104,7 +100,6 @@ impl Counts {
         Ok(Counts {
             conversations,
             threads: body.get("threads").and_then(threads),
-            frequent_emoji: Vec::new(),
             recent: Vec::new(),
             prefs_missing: false,
         })
@@ -115,7 +110,6 @@ impl Counts {
         for conversation in &mut self.conversations {
             conversation.muted = prefs.muted.contains(&conversation.id);
         }
-        self.frequent_emoji.clone_from(&prefs.frequent_emoji);
         self.recent.clone_from(&prefs.recent);
     }
 
