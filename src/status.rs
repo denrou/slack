@@ -4,7 +4,7 @@
 //! asleep at that hour changes nothing.
 
 use anyhow::{Result, bail};
-use jiff::civil::{Date, DateTime, Time, Weekday};
+use jiff::civil::{Date, Time, Weekday};
 use jiff::{Span, ToSpan, Zoned};
 use serde_json::json;
 
@@ -31,40 +31,35 @@ pub fn get(client: &Client, now: i64) -> Result<Option<Status>, api::Error> {
         .filter(|status| status.current(now)))
 }
 
+/// The most Slack keeps of a status text.
+pub const MAX_TEXT: usize = 100;
+
 /// Sets your status, until `expires` (in seconds) or for good, and
-/// returns the emoji name Slack took: one it refuses is tried again under
-/// its other names, as for a reaction.
+/// returns it as Slack stored it, None when its answer carries none. An
+/// emoji Slack refuses is tried again under its other names, as for a
+/// reaction.
 pub fn set(
     client: &Client,
     text: &str,
     emoji: &str,
     expires: Option<i64>,
-) -> Result<String, api::Error> {
-    let call = |emoji: &str| {
+) -> Result<Option<Status>, api::Error> {
+    let write = |emoji: &str| {
         let profile = json!({
             "status_text": text,
             "status_emoji": if emoji.is_empty() { String::new() } else { format!(":{emoji}:") },
             "status_expiration": expires.unwrap_or(0),
         });
-        client
-            .call("users.profile.set", &[("profile", &profile.to_string())])
-            .map(drop)
+        client.call("users.profile.set", &[("profile", &profile.to_string())])
     };
-    let refused = match call(emoji) {
-        Err(err) if is_refused_emoji(&err) => err,
-        result => return result.map(|()| emoji.to_string()),
-    };
-    for other in emoji::other_names(emoji) {
-        match call(&other) {
-            Err(err) if is_refused_emoji(&err) => {}
-            result => return result.map(|()| other),
-        }
-    }
-    Err(refused)
+    let (_, body) = emoji::with_other_names(emoji, is_refused_emoji, write)?;
+    Ok(Profile::parse(&body).status)
 }
 
 /// Slack documents `invalid_emoji_not_allowed` only, not the code for a
 /// name it does not know; every code about the emoji says so in its name.
+/// Deliberate: a policy refusal costs a few vain retries on a write that
+/// fails anyway, which is cheaper than missing the unknown-name code.
 fn is_refused_emoji(err: &api::Error) -> bool {
     matches!(err, api::Error::Slack { code, .. }
         if code.contains("emoji") && code != "must_clear_both_status_text_and_status_emoji")
@@ -75,23 +70,12 @@ pub fn clear(client: &Client) -> Result<(), api::Error> {
 }
 
 /// The moment `--until` names, on the local clock: a duration (`45m`,
-/// `2h`, `1h30m`), a time (`07:30`, the next one), a day and a time
-/// (`mon 07:30`, the next Monday at 07:30, today while that time is
+/// `2h`, `1h30m`), a time (`07:30` or `7:30`, the next one), a day and a
+/// time (`mon 07:30`, the next Monday at 07:30, today while that time is
 /// ahead), or a date and a time (`2026-11-02 07:30`).
 pub fn until(spec: &str, now: &Zoned) -> Result<Zoned> {
     let spec = spec.trim();
-    // The date first: jiff reads the time out of a whole date and time.
-    let at = if let Ok(at) = spec.parse::<DateTime>() {
-        at.to_zoned(now.time_zone().clone())?
-    } else if let Ok(time) = spec.parse::<Time>() {
-        next(now, time, |_| true)?
-    } else if let Some((day, time)) = spec.split_once(' ')
-        && let (Some(day), Ok(time)) = (weekday(day), time.trim().parse::<Time>())
-    {
-        next(now, time, |date| date.weekday() == day)?
-    } else if let Ok(span) = spec.parse::<Span>() {
-        now.checked_add(span)?
-    } else {
+    let Some(at) = moment(spec, now)? else {
         bail!(
             "`{spec}` is not a time: give a duration (45m, 2h), a time (07:30), a day and a time (mon 07:30) or a date and a time (2026-11-02 07:30)"
         );
@@ -100,6 +84,38 @@ pub fn until(spec: &str, now: &Zoned) -> Result<Zoned> {
         bail!("`{spec}` is already past");
     }
     Ok(at)
+}
+
+fn moment(spec: &str, now: &Zoned) -> Result<Option<Zoned>> {
+    if let Some(time) = time(spec) {
+        return next(now, time, |_| true).map(Some);
+    }
+    if let Some((day, at)) = spec.split_once(' ').or_else(|| spec.split_once('T'))
+        && let Some(time) = time(at.trim())
+    {
+        if let Some(day) = weekday(day) {
+            return next(now, time, |date| date.weekday() == day).map(Some);
+        }
+        if let Ok(date) = day.parse::<Date>() {
+            return Ok(Some(
+                date.to_datetime(time).to_zoned(now.time_zone().clone())?,
+            ));
+        }
+        return Ok(None);
+    }
+    Ok(spec
+        .parse::<Span>()
+        .ok()
+        .and_then(|span| now.checked_add(span).ok()))
+}
+
+/// `07:30` or `7:30`: jiff's own parser wants the hour on two digits.
+fn time(text: &str) -> Option<Time> {
+    let (hour, minute) = text.split_once(':')?;
+    if !(1..=2).contains(&hour.len()) || minute.len() != 2 {
+        return None;
+    }
+    Time::new(hour.parse().ok()?, minute.parse().ok()?, 0, 0).ok()
 }
 
 /// The first day from today on that `day` accepts, at `time`, still ahead.
@@ -117,22 +133,21 @@ fn next(now: &Zoned, time: Time, day: impl Fn(Date) -> bool) -> Result<Zoned> {
     bail!("no such day in the week ahead")
 }
 
+/// `mon`, `Monday`: three letters at least of an English day.
 fn weekday(name: &str) -> Option<Weekday> {
+    const DAYS: [(&str, Weekday); 7] = [
+        ("monday", Weekday::Monday),
+        ("tuesday", Weekday::Tuesday),
+        ("wednesday", Weekday::Wednesday),
+        ("thursday", Weekday::Thursday),
+        ("friday", Weekday::Friday),
+        ("saturday", Weekday::Saturday),
+        ("sunday", Weekday::Sunday),
+    ];
     let name = name.to_lowercase();
-    [
-        Weekday::Monday,
-        Weekday::Tuesday,
-        Weekday::Wednesday,
-        Weekday::Thursday,
-        Weekday::Friday,
-        Weekday::Saturday,
-        Weekday::Sunday,
-    ]
-    .into_iter()
-    .find(|day| {
-        let full = format!("{day:?}").to_lowercase();
-        name.len() >= 3 && full.starts_with(&name)
-    })
+    DAYS.iter()
+        .find(|(full, _)| name.len() >= 3 && full.starts_with(&name))
+        .map(|(_, day)| *day)
 }
 
 #[cfg(test)]
@@ -154,6 +169,8 @@ mod tests {
     #[test]
     fn a_time_is_the_next_one() {
         assert_eq!(at("07:30", &thursday()), "Fri 2026-10-30 07:30");
+        assert_eq!(at("7:30", &thursday()), "Fri 2026-10-30 07:30");
+        assert_eq!(at("mon 7:30", &thursday()), "Mon 2026-11-02 07:30");
         assert_eq!(at("18:15", &thursday()), "Thu 2026-10-29 18:15");
     }
 
@@ -180,6 +197,35 @@ mod tests {
     }
 
     #[test]
+    fn an_end_past_the_week_shows_its_date() {
+        let status = Status {
+            emoji: "palm_tree".to_string(),
+            unicode: None,
+            text: "Vacation".to_string(),
+            expires: Some(
+                until("2026-11-15 07:30", &thursday())
+                    .unwrap()
+                    .timestamp()
+                    .as_second(),
+            ),
+        };
+        assert_eq!(
+            status.describe(&thursday()),
+            "🌴 Vacation (until Sun 15 Nov 07:30)"
+        );
+        let soon = Status {
+            expires: Some(
+                until("sun 07:30", &thursday())
+                    .unwrap()
+                    .timestamp()
+                    .as_second(),
+            ),
+            ..status
+        };
+        assert_eq!(soon.describe(&thursday()), "🌴 Vacation (until Sun 07:30)");
+    }
+
+    #[test]
     fn the_clock_change_keeps_the_hour() {
         // Quebec leaves daylight saving time on Sunday 2026-11-01.
         let saturday: Zoned = "2026-10-31T17:00[America/Toronto]".parse().unwrap();
@@ -197,5 +243,7 @@ mod tests {
         assert!(until("soon", &thursday()).is_err());
         assert!(until("mo 07:30", &thursday()).is_err());
         assert!(until("mon", &thursday()).is_err());
+        assert!(until("25:00", &thursday()).is_err());
+        assert!(until("someday 07:30", &thursday()).is_err());
     }
 }

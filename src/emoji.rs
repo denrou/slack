@@ -58,6 +58,27 @@ pub fn name_of(typed: &str) -> String {
     }
 }
 
+/// Writes with `name`, then, while Slack `refused` it, with each of its
+/// other names: the name Slack took with what the write gave, or the
+/// first refusal.
+pub fn with_other_names<T, E>(
+    name: &str,
+    refused: impl Fn(&E) -> bool,
+    write: impl Fn(&str) -> Result<T, E>,
+) -> Result<(String, T), E> {
+    let first = match write(name) {
+        Err(err) if refused(&err) => err,
+        result => return result.map(|done| (name.to_string(), done)),
+    };
+    for other in other_names(name) {
+        match write(&other) {
+            Err(err) if refused(&err) => {}
+            result => return result.map(|done| (other, done)),
+        }
+    }
+    Err(first)
+}
+
 /// The other names to try when Slack refuses one: the names come from
 /// gemoji, and Slack calls a few otherwise (`thinking` is
 /// `thinking_face`), its alias first, then the Unicode name.

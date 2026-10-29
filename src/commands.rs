@@ -130,7 +130,15 @@ pub fn status(
         println!("Status cleared");
         return Ok(());
     }
+    let text = text.trim();
     let emoji = emoji.map(crate::emoji::name_of).unwrap_or_default();
+    if text.chars().count() > status::MAX_TEXT {
+        bail!(
+            "a status is {} characters at most, this one has {}",
+            status::MAX_TEXT,
+            text.chars().count()
+        );
+    }
     if text.is_empty() && emoji.is_empty() {
         if until.is_some() || if_unset {
             bail!("which status? give its text, its emoji (--emoji) or both");
@@ -149,13 +157,14 @@ pub fn status(
         println!("Kept your status: {}", current.describe(&now));
         return Ok(());
     }
-    let emoji = status::set(&client, text, &emoji, expires)?;
-    let set = presence::Status {
+    // What Slack stored, which is what the workspace sees; what was asked
+    // when its answer carries no profile.
+    let set = status::set(&client, text, &emoji, expires)?.unwrap_or(presence::Status {
         emoji,
         unicode: None,
         text: text.to_string(),
         expires,
-    };
+    });
     println!("Status set: {}", set.describe(&now));
     Ok(())
 }

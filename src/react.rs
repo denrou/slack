@@ -36,17 +36,7 @@ pub fn set(
         }
         result => result.map(drop),
     };
-    let refused = match call(name) {
-        Err(err) if is_invalid_name(&err) => err,
-        result => return result.map(|()| name.to_string()),
-    };
-    for other in emoji::other_names(name) {
-        match call(&other) {
-            Err(err) if is_invalid_name(&err) => {}
-            result => return result.map(|()| other),
-        }
-    }
-    Err(refused)
+    emoji::with_other_names(name, is_invalid_name, call).map(|(name, ())| name)
 }
 
 fn is_invalid_name(err: &api::Error) -> bool {

@@ -92,7 +92,7 @@ enum Command {
         /// The emoji: its name (`crescent_moon`, `:palm_tree:`) or the character
         #[arg(short, long)]
         emoji: Option<String>,
-        /// When Slack clears it: `45m`, `2h`, `07:30` (the next one), `mon 07:30`, `2026-11-02 07:30`; never without it
+        /// When Slack clears it: `45m`, `2h`, `07:30` (the next one), `mon 07:30`, `2026-11-02 07:30`; without it, the status stays until changed
         #[arg(long)]
         until: Option<String>,
         /// Clear your status

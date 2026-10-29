@@ -241,16 +241,18 @@ impl Person {
     }
 }
 
-/// A time to come, on your clock, with the day when it is not today.
+/// A time to come, on your clock, with the day when it is not today, and
+/// the date when a weekday alone would read as this week's.
 fn clock(at: i64, now: &Zoned) -> String {
     let Ok(stamp) = Timestamp::from_second(at) else {
         return at.to_string();
     };
     let zoned = stamp.to_zoned(now.time_zone().clone());
-    let format = if zoned.date() == now.date() {
-        "%H:%M"
-    } else {
-        "%a %H:%M"
+    let days = (zoned.date() - now.date()).get_days();
+    let format = match days {
+        0 => "%H:%M",
+        1..=6 => "%a %H:%M",
+        _ => "%a %-d %b %H:%M",
     };
     zoned.strftime(format).to_string()
 }
