@@ -1,0 +1,45 @@
+{
+  "id": "C0DEV-1761667200.000100",
+  "reason": "mention",
+  "workspace": "Example",
+  "conversation": {
+    "id": "C0DEV",
+    "kind": "channel",
+    "name": "#dev-team"
+  },
+  "thread_ts": null,
+  "permalink": "https://example.slack.com/archives/C0DEV/p1761667200000100",
+  "sender": {
+    "presence": "active",
+    "status": null,
+    "notifications_paused_until": null,
+    "external": false,
+    "user": "U0SAM",
+    "handle": "sam",
+    "name": "Sam Roux",
+    "real_name": "Sam Roux",
+    "tz": "Europe/Paris",
+    "local_time": "2026-10-28T17:00:00+01:00"
+  },
+  "me": {
+    "user": "U0OWNER",
+    "handle": "alex",
+    "name": "Alex Durand",
+    "presence": "away",
+    "status": null,
+    "tz": "America/New_York",
+    "local_time": "2026-10-28T12:00:00-04:00",
+    "notifications_paused_until": null,
+    "real_name": "Alex Durand"
+  },
+  "messages": [
+    {
+      "ts": "1761667200.000100",
+      "time": "12:00",
+      "from": "Sam Roux",
+      "user": "U0SAM",
+      "trigger": true,
+      "text": "La 4.6.0 est en prod 🎉 Merci à @Alex Durand, @Bob Leroy et à toute l'équipe pour le sprint !"
+    }
+  ]
+}

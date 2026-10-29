@@ -1,0 +1,45 @@
+{
+  "id": "D0BOB-1761640800.000100",
+  "reason": "direct_message",
+  "workspace": "Example",
+  "conversation": {
+    "id": "D0BOB",
+    "kind": "direct_message",
+    "name": "@bob"
+  },
+  "thread_ts": null,
+  "permalink": "https://example.slack.com/archives/D0BOB/p1761640800000100",
+  "sender": {
+    "presence": "active",
+    "status": null,
+    "notifications_paused_until": null,
+    "external": false,
+    "user": "U0BOB",
+    "handle": "bob",
+    "name": "Bob Leroy",
+    "real_name": "Bob Leroy",
+    "tz": "Europe/Paris",
+    "local_time": "2026-10-28T09:40:00+01:00"
+  },
+  "me": {
+    "user": "U0OWNER",
+    "handle": "alex",
+    "name": "Alex Durand",
+    "presence": "away",
+    "status": null,
+    "tz": "America/New_York",
+    "local_time": "2026-10-28T04:40:00-04:00",
+    "notifications_paused_until": null,
+    "real_name": "Alex Durand"
+  },
+  "messages": [
+    {
+      "ts": "1761640800.000100",
+      "time": "04:40",
+      "from": "Bob Leroy",
+      "user": "U0BOB",
+      "trigger": true,
+      "text": "Salut Alex"
+    }
+  ]
+}

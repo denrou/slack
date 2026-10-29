@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# The command `slack watch` hands each DM and mention to: reads the event on
+# stdin and prints the automatic reply, or nothing. Three `claude -p` calls in
+# a row: a judge (reply or not, and how), a responder, and a reviewer that can
+# only reject. What must not rest on a model is code: the skip list, other
+# auto-replies, one reply per conversation in 12 hours, one playful reply per
+# sender in 7 days, and a draft with an @, a link or a phone number.
+#
+#   slack watch -- ~/code/denrou/slack/tools/answer/answer
+#
+# Private, outside the repository, in ~/.config/slack/answer/:
+#   private.md   what a reply never shares (required; start from private.example.md)
+#   skip         a handle or user id a line, never answered (optional)
+# ~/.local/state/slack/answer.jsonl keeps one record per event, the judge's
+# reading, the draft and the review included; it is also what the 12-hour and
+# 7-day rules read. A failed call exits non-zero, which the watch logs.
+set -euo pipefail
+
+model="claude-sonnet-5-5"
+here=$(dirname "$(realpath "$0")")
+config=${XDG_CONFIG_HOME:-$HOME/.config}/slack/answer
+state=${XDG_STATE_HOME:-$HOME/.local/state}/slack
+trace=$state/answer.jsonl
+claude=${ANSWER_CLAUDE:-claude} # the tests swap in a fake
+
+if [[ ! -r $config/private.md ]]; then
+  echo "answer: $config/private.md is missing; start from $here/private.example.md" >&2
+  exit 2
+fi
+
+event=$(cat)
+now=$(date +%s)
+mkdir -p "$state"
+# Deliberate: the calls run in an empty folder, so no project's CLAUDE.md or
+# memory reaches them.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+sender=$(jq -r '.sender.user' <<<"$event")
+place=$(jq -r '.conversation.id + "/" + (.thread_ts // "")' <<<"$event")
+record=$(jq -c --argjson now "$now" --arg place "$place" \
+  '{at: ($now | todate), epoch: $now, id, sender: .sender.user, place: $place}' <<<"$event")
+# The replies given so far; in the dry run, the ones that would have gone out.
+if [[ -s $trace ]]; then
+  history=$(jq -sc 'map(select(.outcome == "answered"))' "$trace")
+else
+  history='[]'
+fi
+
+note() {
+  record=$(jq -c --argjson add "$1" '. + $add' <<<"$record")
+}
+
+# Records how the event ended, prints the reply when there is one, and exits.
+finish() { # finish <outcome> <why> [reply]
+  note "$(jq -nc --arg outcome "$1" --arg why "$2" '{outcome: $outcome, why: $why}')"
+  (
+    umask 077
+    printf '%s\n' "$record" >>"$trace"
+  )
+  if [[ $# -ge 3 ]]; then printf '%s\n' "$3"; fi
+  exit 0
+}
+
+ask() { # ask <prompt> <schema>, the message on stdin: prints the structured answer
+  local out
+  out=$(cd "$work" && "$claude" -p --model "$model" --tools "" --strict-mcp-config \
+    --setting-sources "" --disable-slash-commands --no-session-persistence \
+    --output-format json --system-prompt "$(cat "$here/$1.md")" --json-schema "$2") || {
+    echo "answer: the $1 call failed" >&2
+    return 1
+  }
+  jq -ec '.structured_output // error("none")' <<<"$out" 2>/dev/null || {
+    echo "answer: the $1 call gave no answer: $(jq -r '.result? // empty' <<<"$out" 2>/dev/null | head -c 300)" >&2
+    return 1
+  }
+}
+
+if [[ -r $config/skip ]] &&
+  sed -e 's/#.*//' -e 's/[[:space:]]//g' -e 's/^@//' "$config/skip" |
+  grep -qxF -e "$sender" -e "$(jq -r '.sender.handle' <<<"$event")"; then
+  finish skipped "on the skip list"
+fi
+if jq -e 'any(.messages[] | select(.trigger); .text | test(
+    "réponse automatique|message automatique|automatic reply|auto-?reply|out of (the )?office|absent du bureau"; "i"))' \
+  <<<"$event" >/dev/null; then
+  finish skipped "another automatic reply"
+fi
+if jq -e --arg place "$place" --argjson since $((now - 12 * 3600)) \
+  'any(.[]; .place == $place and .epoch >= $since)' <<<"$history" >/dev/null; then
+  finish skipped "an automatic reply in this conversation in the last 12 hours"
+fi
+
+# What the models see: the exchange, without ids, links or anyone's status.
+exchange=$(jq -c --arg sender "$sender" --argjson history "$history" --argjson since $((now - 30 * 86400)) '{
+  reason,
+  conversation: {kind: .conversation.kind, name: .conversation.name, in_thread: (.thread_ts != null)},
+  sender: (.sender | {name, real_name, external, local_time}),
+  me: (.me | {name, local_time}),
+  messages: [.messages[] | {time, from, text, me, trigger, files} | with_entries(select(.value != null))],
+  previous: [$history[] | select(.sender == $sender and .epoch >= $since) | {at, category}]
+}' <<<"$event")
+
+judged=$(printf '<exchange>\n%s\n</exchange>\n' "$exchange" | ask judge \
+  '{"type":"object","properties":{"category":{"enum":["away","playful","skip"]},"why":{"type":"string"}},"required":["category","why"],"additionalProperties":false}')
+category=$(jq -r .category <<<"$judged")
+note "$(jq -c '{category, judge: .why}' <<<"$judged")"
+if [[ $category == skip ]]; then
+  finish skipped "the judge"
+fi
+if [[ $category == playful ]] && jq -e --arg sender "$sender" --argjson since $((now - 7 * 86400)) \
+  'any(.[]; .sender == $sender and .category == "playful" and .epoch >= $since)' <<<"$history" >/dev/null; then
+  finish skipped "a playful reply to this sender in the last 7 days"
+fi
+
+drafted=$(printf '<exchange>\n%s\n</exchange>\n<category>%s</category>\n' "$exchange" "$category" | ask respond \
+  '{"type":"object","properties":{"reply":{"type":"string"}},"required":["reply"],"additionalProperties":false}')
+draft=$(jq -r '.reply | gsub("^\\s+|\\s+$"; "")' <<<"$drafted")
+note "$(jq -nc --arg draft "$draft" '{draft: $draft}')"
+
+flaw=$(jq -nr --arg d "$draft" '
+  if $d == "" then "it is empty"
+  elif ($d | length) > 400 then "it is over 400 characters"
+  elif ($d | test("@")) then "it has an @, a mention or an email"
+  elif ($d | test("https?:|www\\.|<[^>]*>"; "i")) then "it has a link"
+  elif ($d | test("(\\d[ .-]?){8,}")) then "it has a phone number"
+  elif ($d | test("```")) then "it has a code block"
+  elif ($d | test("réponse automatique"; "i")) then "it repeats the marker the watch adds"
+  else empty end')
+if [[ -n $flaw ]]; then
+  finish rejected "$flaw"
+fi
+
+reviewed=$({
+  printf '<private>\n'
+  cat "$config/private.md"
+  printf '</private>\n<exchange>\n%s\n</exchange>\n<category>%s</category>\n<draft>\n%s\n</draft>\n' \
+    "$exchange" "$category" "$draft"
+} | ask review \
+  '{"type":"object","properties":{"verdict":{"enum":["pass","reject"]},"reason":{"type":"string"}},"required":["verdict","reason"],"additionalProperties":false}')
+note "$(jq -c '{review: .reason}' <<<"$reviewed")"
+if [[ $(jq -r .verdict <<<"$reviewed") != pass ]]; then
+  finish rejected "the reviewer"
+fi
+finish answered "the reviewer passed it" "$draft"

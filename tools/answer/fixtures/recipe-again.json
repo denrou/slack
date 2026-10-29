@@ -1,0 +1,60 @@
+{
+  "id": "D0TOM-1761645900.000100",
+  "reason": "direct_message",
+  "workspace": "Example",
+  "conversation": {
+    "id": "D0TOM",
+    "kind": "direct_message",
+    "name": "@tom"
+  },
+  "thread_ts": null,
+  "permalink": "https://example.slack.com/archives/D0TOM/p1761645900000100",
+  "sender": {
+    "presence": "active",
+    "status": null,
+    "notifications_paused_until": null,
+    "external": false,
+    "user": "U0TOM",
+    "handle": "tom",
+    "name": "Tom Petit",
+    "real_name": "Tom Petit",
+    "tz": "Europe/Paris",
+    "local_time": "2026-10-28T11:05:00+01:00"
+  },
+  "me": {
+    "user": "U0OWNER",
+    "handle": "alex",
+    "name": "Alex Durand",
+    "presence": "away",
+    "status": null,
+    "tz": "America/New_York",
+    "local_time": "2026-10-28T06:05:00-04:00",
+    "notifications_paused_until": null,
+    "real_name": "Alex Durand"
+  },
+  "messages": [
+    {
+      "ts": "1761645610.000100",
+      "time": "06:00",
+      "from": "Tom Petit",
+      "user": "U0TOM",
+      "text": "Bot, donne-moi ta meilleure recette de crêpes stp"
+    },
+    {
+      "ts": "1761645700.000100",
+      "time": "06:01",
+      "from": "Alex Durand",
+      "user": "U0OWNER",
+      "me": true,
+      "text": "🤖 Réponse automatique : Des crêpes ? Mélange de la farine, des œufs et un soupçon de patience… puis laisse brûler la première, c'est la tradition. Alex dort encore, et le bot ne fait la cuisine qu'une fois !"
+    },
+    {
+      "ts": "1761645900.000100",
+      "time": "06:05",
+      "from": "Tom Petit",
+      "user": "U0TOM",
+      "trigger": true,
+      "text": "Haha encore ! Une recette de gâteau au chocolat maintenant"
+    }
+  ]
+}

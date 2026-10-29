@@ -66,17 +66,21 @@ Each module knows one thing, and the dependencies point down this list:
 - `watch.rs`: `slack watch`. `reason` and `Watcher` are pure (what triggers, the bursts, your replies); `hand_over` and `build_event` read the exchange; `run_command` runs the command with a timeout; `Log` appends to `watch.jsonl`. Sends nothing: there is no call to `chat.postMessage` in it, and `MARKER` is only written into the log's `would_send`.
 - `send.rs`, `react.rs` and `read.rs`: the commands that write to Slack (`chat.postMessage`, `reactions.add` and `reactions.remove`, `conversations.mark`); `react::set` takes `already_reacted` and `no_reaction` as done, since the message ends up as asked, tries `emoji::other_names` on `invalid_name` and returns the name Slack took, and `target::open_dm` opens a direct message (`conversations.open`) for an `@person` target. `read` only ever marks what `lastview` recorded, and never moves a cursor back (`read::already_read`).
 - `mention.rs`: the `@handle` and `#channel` words of a message become `<@U…>` and `<#C…>` when the name cache knows them, from the cache alone (never a call; `@here` and `@channel` stay text), for `slack send`.
+- `tools/answer/` (Bash and `jq`, outside the crate): the command the watch runs for Denis. `answer` reads the event, applies the rules that are code (the skip list, another auto-reply, one reply per conversation in 12 hours, one playful reply per sender in 7 days), hands a trimmed exchange (no ids, links or statuses) to three `claude -p` calls, `judge.md`, `respond.md` and `review.md`, rejects a draft with an `@`, a link or a phone number before the reviewer sees it, and prints the reply only once the reviewer passes it. `answer.jsonl` is both its trace and what the 12-hour and 7-day rules read.
 - `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups. `warn.rs`: warnings on the way to a result, on stderr.
 
 ## Files on disk
 
-| File                                      | Written by                          | Read by                      | Deleting it                                    |
-| ----------------------------------------- | ----------------------------------- | ---------------------------- | ---------------------------------------------- |
-| `~/.config/slack/workspaces.json` (0600)  | `login`, `logout`                   | every command (`store.rs`)   | logs you out                                   |
-| `~/.config/slack/browser-profile/`        | `login` (Chrome)                    | `login --headless`           | the next login needs the window again          |
-| `~/.cache/slack/names.json`               | every command that names something  | the same                     | safe, refilled on demand                       |
-| `~/.cache/slack/last-view.json`           | the view, `show` and `read` (drops) | `read`, `thread N`, `send N` | safe; `read` and the numbers need a new output |
-| `~/.local/state/slack/watch.jsonl` (0600) | `watch`, appended                   | you, to tune the command     | loses what the watch logged                    |
+| File                                       | Written by                          | Read by                      | Deleting it                                                      |
+| ------------------------------------------ | ----------------------------------- | ---------------------------- | ---------------------------------------------------------------- |
+| `~/.config/slack/workspaces.json` (0600)   | `login`, `logout`                   | every command (`store.rs`)   | logs you out                                                     |
+| `~/.config/slack/browser-profile/`         | `login` (Chrome)                    | `login --headless`           | the next login needs the window again                            |
+| `~/.cache/slack/names.json`                | every command that names something  | the same                     | safe, refilled on demand                                         |
+| `~/.cache/slack/last-view.json`            | the view, `show` and `read` (drops) | `read`, `thread N`, `send N` | safe; `read` and the numbers need a new output                   |
+| `~/.local/state/slack/watch.jsonl` (0600)  | `watch`, appended                   | you, to tune the command     | loses what the watch logged                                      |
+| `~/.local/state/slack/answer.jsonl` (0600) | `tools/answer/answer`, appended     | the same, and you            | forgets who was answered: the 12-hour and 7-day rules start over |
+| `~/.config/slack/answer/private.md`        | you                                 | `tools/answer/answer`        | the command refuses to run                                       |
+| `~/.config/slack/answer/skip`              | you                                 | `tools/answer/answer`        | nobody is skipped                                                |
 
 `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME` and `$XDG_STATE_HOME` move the three directories; `$SLACK_BROWSER_PROFILE` moves the profile alone.
 
@@ -97,4 +101,4 @@ An error must never look like "nothing to do", above all for `--count` in a stat
 
 ## Tests
 
-`cargo test` never talks to Slack. The pure modules (the parsers, the view model, `mrkdwn`, the capture extractors, the target syntax) are tested in-module, with `tests/fixtures/` for the response shapes. The transport and the CDP session are checked by hand: the read-only commands against a live session.
+`cargo test` never talks to Slack. The pure modules (the parsers, the view model, `mrkdwn`, the capture extractors, the target syntax) are tested in-module, with `tests/fixtures/` for the response shapes. The transport and the CDP session are checked by hand: the read-only commands against a live session. `tools/answer/test` runs the answer command against a fake `claude`, for the rules that are code; the prompts are tuned by hand, on `tools/answer/fixtures/` (made-up events) and on the watch log.
