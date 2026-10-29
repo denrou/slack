@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` prints what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around, `slack watch` hands the messages aimed at you to a command of yours. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` prints what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack status` sets your status, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around, `slack watch` hands the messages aimed at you to a command of yours. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -55,6 +55,8 @@ slack react <permalink> +1                          # react to a message
 slack react <permalink> +1 --remove                 # ...or take your reaction back
 slack read                                          # mark as read what the last view showed
 slack read '#sre-alerts' @jane                      # ...only these, or a conversation `slack show` printed
+slack status Lunch -e 🍔 --until 1h                 # set your status, cleared by Slack in an hour
+slack status --clear                                # ...or clear it; bare, it prints the current one
 
 slack watch -- ~/bin/answer                         # hand each DM and mention of you to a command, log what it would answer
 ```
@@ -84,6 +86,8 @@ To find the name, `slack channels` lists the channels and group messages you are
 A target is `#channel`, `@person` (handle or display name), a conversation id, or a Slack permalink; a permalink means "answer in that message's thread", and `--thread <ts|permalink>` does the same for a channel target. The text is the argument, or stdin when there is none, and is sent as Slack markup (`*bold*`, `<@U123>`). The command prints where the message landed and its permalink. Quote `#channel` in zsh, or the shell reads it as a comment.
 
 `slack react <message> <emoji>` puts an emoji on a message, and `--remove` takes yours back. The message is a permalink, a thread number (its first message), or a conversation with `--ts <ts>`; the emoji is its Slack name, with or without the colons (`+1`, `:white_check_mark:`, a custom one), or the character itself. Reacting never marks anything as read.
+
+`slack status <text> -e <emoji> --until <when>` sets your status. `--until` is when Slack clears it, on your clock: `45m`, `2h`, `07:30` (the next one), `mon 07:30` (the next Monday), `2026-11-02 07:30`; without it the status stays. Slack clears it itself, so a scheduled job only has to set it, and a Mac asleep at that hour changes nothing. `--if-unset` leaves a status already set alone, so such a job never replaces one you set by hand. `--clear` clears it, and `slack status` alone prints it (`--json`: `emoji`, `text`, `expires`, or `null`).
 
 ## Watch
 

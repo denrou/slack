@@ -54,6 +54,24 @@ impl Status {
             .or_else(|| emoji::glyph(&self.emoji).map(str::to_string))
     }
 
+    /// Whether it still holds: Slack may hand back one past its end.
+    pub fn current(&self, now: i64) -> bool {
+        self.expires.is_none_or(|at| at > now)
+    }
+
+    /// The emoji, the text and when it ends, as printed.
+    pub fn describe(&self, now: &Zoned) -> String {
+        let mut said = match self.glyph() {
+            Some(glyph) if self.text.is_empty() => glyph,
+            Some(glyph) => format!("{glyph} {}", self.text),
+            None => self.text.clone(),
+        };
+        if let Some(at) = self.expires {
+            said.push_str(&format!(" (until {})", clock(at, now)));
+        }
+        said
+    }
+
     /// The emoji as drawn: its character, `:name:` for a custom one.
     pub fn glyph(&self) -> Option<String> {
         if self.emoji.is_empty() {
@@ -81,8 +99,8 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// From a `users.info` user.
-    fn parse(user: &Value) -> Profile {
+    /// From a `users.info` user, or the answer of `users.profile.get`.
+    pub fn parse(user: &Value) -> Profile {
         let profile = user.get("profile");
         let field = |key: &str| {
             profile
@@ -138,7 +156,7 @@ impl Person {
             .as_ref()?
             .status
             .as_ref()
-            .filter(|status| status.expires.is_none_or(|at| at > now))
+            .filter(|status| status.current(now))
     }
 
     /// When their notifications come back, while they are paused.
@@ -161,15 +179,7 @@ impl Person {
         let seconds = now.timestamp().as_second();
         let mut notes = Vec::new();
         if let Some(status) = self.status(seconds) {
-            let mut note = match status.glyph() {
-                Some(glyph) if status.text.is_empty() => glyph,
-                Some(glyph) => format!("{glyph} {}", status.text),
-                None => status.text.clone(),
-            };
-            if let Some(at) = status.expires {
-                note.push_str(&format!(" (until {})", clock(at, now)));
-            }
-            notes.push(note);
+            notes.push(status.describe(now));
         }
         if let Some(local) = self.local(now)
             && local.offset() != now.offset()
@@ -231,16 +241,18 @@ impl Person {
     }
 }
 
-/// A time to come, on your clock, with the day when it is not today.
+/// A time to come, on your clock, with the day when it is not today, and
+/// the date when a weekday alone would read as this week's.
 fn clock(at: i64, now: &Zoned) -> String {
     let Ok(stamp) = Timestamp::from_second(at) else {
         return at.to_string();
     };
     let zoned = stamp.to_zoned(now.time_zone().clone());
-    let format = if zoned.date() == now.date() {
-        "%H:%M"
-    } else {
-        "%a %H:%M"
+    let days = (zoned.date() - now.date()).get_days();
+    let format = match days {
+        0 => "%H:%M",
+        1..=6 => "%a %H:%M",
+        _ => "%a %-d %b %H:%M",
     };
     zoned.strftime(format).to_string()
 }
