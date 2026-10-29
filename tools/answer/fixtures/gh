@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Stands in for `gh pr view <url> --json …` on the fixtures' made-up pull
+# requests: example/app#12 has had no automated review, #13 has its comment,
+# #14 its label, #15 is merged; any other cannot be read.
+case $3 in
+*/example/app/pull/12) echo '{"state":"OPEN","labels":[{"name":"enhancement"}],"comments":[{"body":"Rebased on develop"}],"reviews":[]}' ;;
+*/example/app/pull/13) echo '{"state":"OPEN","labels":[],"comments":[{"body":"🤖 Reviewed with the Centreon automated review skill — no findings."}],"reviews":[]}' ;;
+*/example/app/pull/14) echo '{"state":"OPEN","labels":[{"name":"ai-reviewed"}],"comments":[],"reviews":[]}' ;;
+*/example/app/pull/15) echo '{"state":"MERGED","labels":[],"comments":[],"reviews":[]}' ;;
+*)
+  echo "GraphQL: Could not resolve to a PullRequest" >&2
+  exit 1
+  ;;
+esac

@@ -1,0 +1,52 @@
+{
+  "id": "C0PROD-1793179800.000100",
+  "reason": "mention",
+  "workspace": "Example",
+  "conversation": {
+    "id": "C0PROD",
+    "kind": "channel",
+    "name": "#prod-incidents"
+  },
+  "thread_ts": null,
+  "permalink": "https://example.slack.com/archives/C0PROD/p1793179800000100",
+  "sender": {
+    "user": "U0MAX",
+    "handle": "max",
+    "name": "Max Girard",
+    "real_name": "Max Girard",
+    "presence": "active",
+    "status": null,
+    "tz": "Europe/Paris",
+    "local_time": "2026-10-28T10:30:00+01:00",
+    "notifications_paused_until": null,
+    "external": false
+  },
+  "me": {
+    "user": "U0OWNER",
+    "handle": "alex",
+    "name": "Alex Durand",
+    "presence": "away",
+    "status": null,
+    "tz": "America/New_York",
+    "local_time": "2026-10-28T05:30:00-04:00",
+    "notifications_paused_until": 1793188800,
+    "real_name": "Alex Durand"
+  },
+  "messages": [
+    {
+      "ts": "1793179500.000100",
+      "time": "05:25",
+      "from": "Max Girard",
+      "user": "U0MAX",
+      "text": "Les prédictions ne sont plus mises à jour en prod depuis 3h du matin, le job plante en boucle avec un OOM"
+    },
+    {
+      "ts": "1793179800.000100",
+      "time": "05:30",
+      "from": "Max Girard",
+      "user": "U0MAX",
+      "trigger": true,
+      "text": "@Alex Durand c'est ton service je crois, tu peux regarder dès que possible ? Plusieurs clients ont des dashboards vides"
+    }
+  ]
+}

@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # The command `slack watch` hands each DM and mention to: reads the event on
-# stdin and prints the automatic reply, or nothing. Three `claude -p` calls in
-# a row: a judge (reply or not, and how), a responder, and a reviewer that can
-# only reject. What must not rest on a model is code: the skip list, other
-# auto-replies, one reply per conversation in 12 hours, one playful reply per
-# sender in 7 days, and a draft with an @, a link or a phone number.
+# stdin and prints the automatic reply, or nothing. A reply goes out only when
+# it does something for the sender: a pull request to review that has not had
+# its automated review, an urgent matter that gets the time the owner will be
+# notified, or a joke for someone playing with the bot, once. Anything else
+# waits for the owner.
+#
+# Three `claude -p` calls in a row: a judge (which of these, if any), a
+# responder, and a reviewer that can only reject. The models get no tools:
+# what the reply rests on (the pull requests' state, the time) is read by code
+# and handed over as facts. So are the rules that must not rest on a model:
+# the skip list, other auto-replies, one reply per conversation in 12 hours,
+# one playful reply per sender in 7 days, and a draft with an @, a link or a
+# phone number.
 #
 #   slack watch -- ~/code/denrou/slack/tools/answer/answer
 #
@@ -12,8 +20,9 @@
 #   private.md   what a reply never shares (required; start from private.example.md)
 #   skip         a handle or user id a line, never answered (optional)
 # ~/.local/state/slack/answer.jsonl keeps one record per event, the judge's
-# reading, the draft and the review included; it is also what the 12-hour and
-# 7-day rules read. A failed call exits non-zero, which the watch logs.
+# reading, the facts, the draft and the review included; it is also what the
+# 12-hour and 7-day rules read. A failed call exits non-zero, which the watch
+# logs.
 set -euo pipefail
 
 model="claude-sonnet-5-5"
@@ -21,7 +30,9 @@ here=$(dirname "$(realpath "$0")")
 config=${XDG_CONFIG_HOME:-$HOME/.config}/slack/answer
 state=${XDG_STATE_HOME:-$HOME/.local/state}/slack
 trace=$state/answer.jsonl
-claude=${ANSWER_CLAUDE:-claude} # the tests swap in a fake
+# The tests and the fixtures swap in fakes.
+claude=${ANSWER_CLAUDE:-claude}
+gh=${ANSWER_GH:-gh}
 
 if [[ ! -r $config/private.md ]]; then
   echo "answer: $config/private.md is missing; start from $here/private.example.md" >&2
@@ -29,7 +40,10 @@ if [[ ! -r $config/private.md ]]; then
 fi
 
 event=$(cat)
-now=$(date +%s)
+# The time of the last message that triggered it, a minute before the watch
+# hands it over: the same event always reads the same.
+now=$(jq -r '[.messages[] | select(.trigger) | .ts | tonumber] | max // empty | floor' <<<"$event")
+now=${now:-$(date +%s)}
 mkdir -p "$state"
 # Deliberate: the calls run in an empty folder, so no project's CLAUDE.md or
 # memory reaches them.
@@ -91,7 +105,7 @@ if jq -e --arg place "$place" --argjson since $((now - 12 * 3600)) \
   finish skipped "an automatic reply in this conversation in the last 12 hours"
 fi
 
-# What the models see: the exchange, without ids, links or anyone's status.
+# What the models see: the exchange, without ids, links to it or anyone's status.
 exchange=$(jq -c --arg sender "$sender" --argjson history "$history" --argjson since $((now - 30 * 86400)) '{
   reason,
   conversation: {kind: .conversation.kind, name: .conversation.name, in_thread: (.thread_ts != null)},
@@ -102,18 +116,69 @@ exchange=$(jq -c --arg sender "$sender" --argjson history "$history" --argjson s
 }' <<<"$event")
 
 judged=$(printf '<exchange>\n%s\n</exchange>\n' "$exchange" | ask judge \
-  '{"type":"object","properties":{"category":{"enum":["away","playful","skip"]},"why":{"type":"string"}},"required":["category","why"],"additionalProperties":false}')
+  '{"type":"object","properties":{"category":{"enum":["review","urgent","playful","skip"]},"why":{"type":"string"}},"required":["category","why"],"additionalProperties":false}')
 category=$(jq -r .category <<<"$judged")
 note "$(jq -c '{category, judge: .why}' <<<"$judged")"
-if [[ $category == skip ]]; then
-  finish skipped "the judge"
-fi
-if [[ $category == playful ]] && jq -e --arg sender "$sender" --argjson since $((now - 7 * 86400)) \
-  'any(.[]; .sender == $sender and .category == "playful" and .epoch >= $since)' <<<"$history" >/dev/null; then
-  finish skipped "a playful reply to this sender in the last 7 days"
-fi
 
-drafted=$(printf '<exchange>\n%s\n</exchange>\n<category>%s</category>\n' "$exchange" "$category" | ask respond \
+case $category in
+skip)
+  finish skipped "the judge"
+  ;;
+playful)
+  if jq -e --arg sender "$sender" --argjson since $((now - 7 * 86400)) \
+    'any(.[]; .sender == $sender and .category == "playful" and .epoch >= $since)' <<<"$history" >/dev/null; then
+    finish skipped "a playful reply to this sender in the last 7 days"
+  fi
+  facts='{}'
+  ;;
+review)
+  if [[ $(jq -r '.sender.external' <<<"$event") == true ]]; then
+    finish skipped "a review asked from another organisation"
+  fi
+  urls=$(jq -r --arg sender "$sender" '[.messages[] | select(.user == $sender) | .text
+    | scan("https://github\\.com/[\\w.-]+/[\\w.-]+/pull/[0-9]+")] | unique[]' <<<"$event")
+  if [[ -z $urls ]]; then
+    finish skipped "a review asked without a pull request link"
+  fi
+  pulls='[]'
+  while read -r url; do
+    pull=$("$gh" pr view "$url" --json state,labels,comments,reviews 2>/dev/null) ||
+      finish skipped "could not read $url"
+    # The automated review is the Centreon skill (/check-pr): its comment, or
+    # the label it suggests.
+    pulls=$(jq -c --arg url "$url" --argjson pull "$pull" '. + [{
+      pull_request: ($url | sub("https://github.com/"; "") | sub("/pull/"; "#")),
+      open: ($pull.state == "OPEN"),
+      automated_review: (any($pull.labels[]; .name == "ai-reviewed")
+        or any($pull.comments[], $pull.reviews[]; .body | test("Centreon automated review skill")))
+    }]' <<<"$pulls")
+  done <<<"$urls"
+  note "$(jq -c '{pull_requests: .}' <<<"$pulls")"
+  facts=$(jq -c '{waiting_for_automated_review: [.[] | select(.open and (.automated_review | not)) | .pull_request]}' <<<"$pulls")
+  if jq -e '.waiting_for_automated_review == []' <<<"$facts" >/dev/null; then
+    finish skipped "every pull request is closed or has had its automated review"
+  fi
+  ;;
+urgent)
+  # When Slack notifies the owner again: the end of the pause (the
+  # notification schedule at night, or a pause by hand), or of a status that
+  # says they are away, whichever comes last.
+  until=$(jq -r --argjson now "$now" '[.me.notifications_paused_until, .me.status.expires?]
+    | map(select(. != null and . > $now)) | max // empty' <<<"$event")
+  if [[ -n $until ]]; then
+    clock() { TZ=$1 jq -nr --argjson at "$until" '$at | strflocaltime("%A %Y-%m-%d %H:%M")'; }
+    facts=$(jq -nc --arg owner "$(clock "$(jq -r '.me.tz // "UTC"' <<<"$event")")" \
+      --arg sender "$(clock "$(jq -r '.sender.tz // "UTC"' <<<"$event")")" \
+      '{notified_at: {owner_clock: $owner, sender_clock: $sender}}')
+  else
+    facts='{"notified_at": null}'
+  fi
+  ;;
+esac
+note "$(jq -c '{facts: .}' <<<"$facts")"
+
+drafted=$(printf '<exchange>\n%s\n</exchange>\n<category>%s</category>\n<facts>\n%s\n</facts>\n' \
+  "$exchange" "$category" "$facts" | ask respond \
   '{"type":"object","properties":{"reply":{"type":"string"}},"required":["reply"],"additionalProperties":false}')
 draft=$(jq -r '.reply | gsub("^\\s+|\\s+$"; "")' <<<"$drafted")
 note "$(jq -nc --arg draft "$draft" '{draft: $draft}')"
@@ -134,8 +199,8 @@ fi
 reviewed=$({
   printf '<private>\n'
   cat "$config/private.md"
-  printf '</private>\n<exchange>\n%s\n</exchange>\n<category>%s</category>\n<draft>\n%s\n</draft>\n' \
-    "$exchange" "$category" "$draft"
+  printf '</private>\n<exchange>\n%s\n</exchange>\n<category>%s</category>\n<facts>\n%s\n</facts>\n<draft>\n%s\n</draft>\n' \
+    "$exchange" "$category" "$facts" "$draft"
 } | ask review \
   '{"type":"object","properties":{"verdict":{"enum":["pass","reject"]},"reason":{"type":"string"}},"required":["verdict","reason"],"additionalProperties":false}')
 note "$(jq -c '{review: .reason}' <<<"$reviewed")"

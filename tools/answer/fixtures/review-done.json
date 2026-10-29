@@ -1,5 +1,5 @@
 {
-  "id": "D0JANE-1761642720.000100",
+  "id": "D0JANE-1793178720.000100",
   "reason": "direct_message",
   "workspace": "Example",
   "conversation": {
@@ -8,7 +8,7 @@
     "name": "@jane"
   },
   "thread_ts": null,
-  "permalink": "https://example.slack.com/archives/D0JANE/p1761642720000100",
+  "permalink": "https://example.slack.com/archives/D0JANE/p1793178720000100",
   "sender": {
     "presence": "active",
     "status": null,
@@ -29,12 +29,12 @@
     "status": null,
     "tz": "America/New_York",
     "local_time": "2026-10-28T05:12:00-04:00",
-    "notifications_paused_until": null,
+    "notifications_paused_until": 1793188800,
     "real_name": "Alex Durand"
   },
   "messages": [
     {
-      "ts": "1761580000.000100",
+      "ts": "1793116000.000100",
       "time": "2026-10-27 11:46",
       "from": "Alex Durand",
       "user": "U0OWNER",
@@ -42,12 +42,12 @@
       "text": "Je regarde ça demain, promis"
     },
     {
-      "ts": "1761642720.000100",
+      "ts": "1793178720.000100",
       "time": "05:12",
       "from": "Jane Martin",
       "user": "U0JANE",
       "trigger": true,
-      "text": "Salut, tu pourrais regarder ma PR sur le modèle de prévision ? La démo client est à 14h, c'est un peu urgent 🙏"
+      "text": "Hello, quand tu as un moment, tu peux relire https://github.com/example/app/pull/13 ? Merci !"
     }
   ]
 }
