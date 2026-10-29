@@ -99,7 +99,19 @@ pub struct Pending {
     pub team: Option<String>,
     /// The messages that triggered it, oldest first.
     pub triggers: Vec<String>,
+    /// Its newest message, where the context stops: a follow-up without
+    /// your name is not a trigger but is part of what they asked.
+    pub latest: String,
     last: Instant,
+}
+
+/// Whether your message answers an exchange in this place: in its
+/// thread, or beside it in a direct or group message.
+fn answers(place: &Place, triggers: &[String], conversational: bool, posted: &Posted) -> bool {
+    let reply_to = posted.reply_to();
+    place.channel == posted.channel
+        && (reply_to.is_some_and(|root| triggers.iter().any(|ts| ts == root))
+            || (reply_to == place.thread_ts.as_deref() && (conversational || reply_to.is_some())))
 }
 
 /// An event handed over, followed for your replies.
@@ -121,6 +133,20 @@ pub struct YourReply {
     pub text: String,
 }
 
+/// What one of your messages is to the watch.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Heard {
+    /// Your reply to an event handed over there.
+    Reply(YourReply),
+    /// You answered these bursts before they settled, so they are not
+    /// handed over: you were there.
+    First {
+        bursts: Vec<Pending>,
+        ts: String,
+        text: String,
+    },
+}
+
 /// What the socket said, sorted into bursts and replies. No I/O.
 pub struct Watcher {
     me: String,
@@ -140,24 +166,42 @@ impl Watcher {
     }
 
     /// Take a message in: a trigger starts or extends a burst, a message
-    /// from the same person in the same place extends one, and yours is
-    /// your reply to an event there, if one was handed over lately.
-    pub fn hear(&mut self, posted: &Posted, now: Instant) -> Option<YourReply> {
+    /// from the same person in the same place extends one, and yours
+    /// answers the bursts still waiting there or, failing that, is your
+    /// reply to an event there, if one was handed over lately.
+    pub fn hear(&mut self, posted: &Posted, now: Instant) -> Option<Heard> {
         if posted.user == self.me {
+            // A group message is only known as one once its names are read:
+            // until then, only a DM's main line counts as beside a burst.
+            let (answered, waiting): (Vec<Pending>, Vec<Pending>) =
+                std::mem::take(&mut self.pending)
+                    .into_iter()
+                    .partition(|pending| {
+                        answers(
+                            &pending.place,
+                            &pending.triggers,
+                            pending.place.channel.starts_with('D'),
+                            posted,
+                        )
+                    });
+            self.pending = waiting;
+            if !answered.is_empty() {
+                return Some(Heard::First {
+                    bursts: answered,
+                    ts: posted.ts.clone(),
+                    text: posted.text.clone(),
+                });
+            }
             self.fired
                 .retain(|fired| now.duration_since(fired.at) < FOLLOW);
-            let reply_to = posted.reply_to();
             let fired = self.fired.iter().rev().find(|fired| {
-                fired.place.channel == posted.channel
-                    && (reply_to.is_some_and(|root| fired.triggers.iter().any(|ts| ts == root))
-                        || (reply_to == fired.place.thread_ts.as_deref()
-                            && (fired.conversational || reply_to.is_some())))
+                answers(&fired.place, &fired.triggers, fired.conversational, posted)
             })?;
-            return Some(YourReply {
+            return Some(Heard::Reply(YourReply {
                 event: fired.id.clone(),
                 ts: posted.ts.clone(),
                 text: posted.text.clone(),
-            });
+            }));
         }
         let place = Place::of(posted);
         let burst = self
@@ -167,6 +211,7 @@ impl Watcher {
         match (burst, reason(posted, &self.me)) {
             (Some(burst), reason) => {
                 burst.last = now;
+                burst.latest = posted.ts.clone();
                 if reason.is_some() {
                     burst.triggers.push(posted.ts.clone());
                 }
@@ -177,6 +222,7 @@ impl Watcher {
                 reason,
                 team: posted.team.clone(),
                 triggers: vec![posted.ts.clone()],
+                latest: posted.ts.clone(),
                 last: now,
             }),
             (None, None) => {}
@@ -221,16 +267,33 @@ pub fn run(client: &Client, identity: &Identity, options: &Options) -> Result<()
     let mut watcher = Watcher::new(&identity.user_id, options.settle);
     loop {
         match signals.recv_timeout(Duration::from_secs(1)) {
-            Ok(Signal::Message(posted)) => {
-                if let Some(reply) = watcher.hear(&posted, Instant::now()) {
-                    log.write(&json!({
-                        "kind": "your_reply",
-                        "event": reply.event,
-                        "ts": reply.ts,
-                        "text": reply.text,
-                    }));
+            Ok(Signal::Message(posted)) => match watcher.hear(&posted, Instant::now()) {
+                Some(Heard::Reply(reply)) => log.write(&json!({
+                    "kind": "your_reply",
+                    "event": reply.event,
+                    "ts": reply.ts,
+                    "text": reply.text,
+                })),
+                Some(Heard::First { bursts, ts, text }) => {
+                    for burst in bursts {
+                        println!(
+                            "{} answered by you before it settled, in {}",
+                            Zoned::now().strftime("%H:%M"),
+                            burst.place.channel
+                        );
+                        log.write(&json!({
+                            "kind": "answered_first",
+                            "channel": burst.place.channel,
+                            "thread_ts": burst.place.thread_ts,
+                            "sender": burst.sender,
+                            "triggers": burst.triggers,
+                            "ts": ts,
+                            "text": text,
+                        }));
+                    }
                 }
-            }
+                None => {}
+            },
             Ok(Signal::Up { again: false }) => eprintln!("slack watch: connected"),
             Ok(Signal::Up { again: true }) => {
                 eprintln!("slack watch: connected again; what came meanwhile was not heard");
@@ -358,7 +421,7 @@ fn build_event(
         .last()
         .map(String::as_str)
         .unwrap_or_default();
-    let messages = context(client, &pending.place, last)?;
+    let messages = context(client, &pending.place, &pending.latest)?;
     let mut people = BTreeSet::from([pending.sender.clone(), me.clone()]);
     let mut places = BTreeSet::from([channel.clone()]);
     for message in &messages {
@@ -451,8 +514,9 @@ fn build_event(
     Ok(Some((event, conversational)))
 }
 
-/// The conversation or thread up to the last trigger: what the sender
-/// saw when they wrote, never what came after, your answer included.
+/// The conversation or thread up to the burst's newest message: what the
+/// sender saw when they wrote, never what came after, your answer
+/// included.
 fn context(client: &Client, place: &Place, last: &str) -> Result<Vec<Message>, api::Error> {
     let mut messages = match &place.thread_ts {
         Some(root) => {
@@ -792,6 +856,30 @@ mod tests {
             ["1.0"],
             "the follow-up is context, not a trigger"
         );
+        assert_eq!(due[0].latest, "2.0", "the context reaches the follow-up");
+    }
+
+    #[test]
+    fn your_answer_before_a_burst_settles_drops_it() {
+        let start = Instant::now();
+        let mut watcher = Watcher::new(ME, Duration::from_secs(60));
+        watcher.hear(&posted("D1", "UJANE", "1.0", None, "tu peux ?"), start);
+        watcher.hear(&posted("C1", "UBOB", "2.0", None, "<@UME> ?"), start);
+        assert_eq!(
+            watcher.hear(&posted("C1", ME, "2.5", None, "beside, not in it"), start),
+            None,
+            "in a channel, only the thread answers"
+        );
+        let heard = watcher.hear(&posted("D1", ME, "3.0", None, "oui je regarde"), start);
+        let Some(Heard::First { bursts, ts, .. }) = heard else {
+            panic!("{heard:?}");
+        };
+        assert_eq!(bursts.len(), 1);
+        assert_eq!(bursts[0].sender, "UJANE");
+        assert_eq!(ts, "3.0");
+        let in_thread = watcher.hear(&posted("C1", ME, "4.0", Some("2.0"), "oui"), start);
+        assert!(matches!(in_thread, Some(Heard::First { .. })));
+        assert!(watcher.due(start + Duration::from_secs(60)).is_empty());
     }
 
     #[test]
@@ -824,11 +912,11 @@ mod tests {
         let reply = watcher.hear(&posted("D1", ME, "5.0", None, "je regarde"), start);
         assert_eq!(
             reply,
-            Some(YourReply {
+            Some(Heard::Reply(YourReply {
                 event: "D1-1.0".to_string(),
                 ts: "5.0".to_string(),
                 text: "je regarde".to_string(),
-            })
+            }))
         );
 
         watcher.hear(&posted("C1", "UJANE", "7.0", None, "<@UME> ?"), start);
@@ -840,7 +928,7 @@ mod tests {
             "in a channel, only the thread is a reply"
         );
         let in_thread = watcher.hear(&posted("C1", ME, "9.0", Some("7.0"), "oui"), start);
-        assert_eq!(in_thread.map(|r| r.event).as_deref(), Some("C1-7.0"));
+        assert!(matches!(in_thread, Some(Heard::Reply(r)) if r.event == "C1-7.0"));
 
         let late = start + FOLLOW + Duration::from_secs(1);
         assert_eq!(
