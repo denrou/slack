@@ -4,15 +4,15 @@ How `slack` is put together, for a first read of the code. README.md says what t
 
 ## Shape
 
-One crate, one binary, blocking I/O throughout: a run is a handful of HTTP calls (`ureq`), the login holds one WebSocket (`tungstenite`), and the few lookups that run side by side go through `std::thread::scope` (`par.rs`, eight threads at most). No async runtime, deliberately: switching later would cost `api.rs` and `auth/cdp.rs`, not the pure modules.
+One crate, one binary, blocking I/O throughout: a run is a handful of HTTP calls (`ureq`), the login and `slack watch` each hold one WebSocket (`tungstenite`; the CDP session plain, Slack's socket over rustls), and the few lookups that run side by side go through `std::thread::scope` (`par.rs`, eight threads at most). No async runtime, deliberately: switching later would cost `api.rs` and `auth/cdp.rs`, not the pure modules.
 
 Each module knows one thing, and the dependencies point down this list:
 
-1. **Entry points.** `main.rs` parses the command line (clap) and dispatches. `commands.rs` has one function per command and prints the output (`send.rs` and `read.rs` print their own outcome).
+1. **Entry points.** `main.rs` parses the command line (clap) and dispatches. `commands.rs` has one function per command and prints the output (`send.rs` and `read.rs` print their own outcome; `watch.rs` runs its own loop).
 2. **One module per thing asked of Slack.** `counts`, `prefs`, `history`, `threads`, `replies`, `directory`, `presence`, `target`, `search`, `send`, `react`, `read`. Each turns one or two API methods into a typed value and knows nothing about printing.
 3. **The shared model.** `view.rs` builds a `View` from the counts; the text rendering and `--json` both read that same value. `mrkdwn.rs` and `style.rs` turn Slack markup into terminal text, `emoji.rs` an emoji name into its character.
 4. **Files on disk.** `store.rs` (credentials), `names.rs` (the id-to-name cache), `lastview.rs` (what the last output showed), all through `paths.rs`.
-5. **Transport.** `api.rs`: `Client::call(method, params)` and nothing else. No module above it sees a header or a token.
+5. **Transport.** `api.rs`: `Client::call(method, params)`, and `Client::socket` for `rtm.rs`. No module above it sees a header or a token.
 6. **Login.** `auth/`, used by `login` and `logout` only: `chrome.rs` runs the browser, `cdp.rs` talks to it, `capture.rs` picks the credentials out of what it sees.
 
 ## A run, step by step
@@ -34,6 +34,8 @@ Each module knows one thing, and the dependencies point down this list:
 **`slack channels`, `slack people`.** `directory.rs`. The conversations you are in are the `client.counts` ids, named from the cache (one `users.conversations` walk fills it). The people are those you have a DM with, or the whole directory (`users.list`) when a filter is given.
 
 **`slack who`.** The people named (`@person` through the names cache), the members of a `#channel` (`directory::members`, one page of `conversations.members`, refused past 100; bots and you dropped, then refused past 50), else the people of the DMs in `Counts::recent`. Then `presence::profiles` (`users.info` per person, a few at a time, and one `dnd.teamInfo` for all) and `presence::presences` (`users.getPresence` per person); the ones there first. `Person::notes` writes what follows each name.
+
+**`slack watch`.** `auth.test` says who you are, then `rtm::listen` holds Slack's socket (`rtm.connect`) in a thread of its own, pinging it, reconnecting with a backoff, and passing on each new message from a person (`Posted::parse`: no edits, deletions, joins or bots). `Watcher::hear` sorts them: a DM or a `<@you>` (`watch::reason`) starts a burst for that sender in that place (conversation and thread), any message of theirs there extends it, and one of yours is logged as your reply to the event last handed over there. Each second, `Watcher::due` takes out the bursts quiet for `--settle`; `hand_over` drops a DM muted in Slack (`prefs::fetch`) or an app writing as a user, reads the context (`conversations.history` up to the last trigger, or `conversations.replies` cut there), the names, both people's profile and presence (`presence`), and the permalink, builds the event JSON, and runs the command on it (`run_command`, in a process group of its own so a timeout stops what it started). The event and the outcome go to the log. A dead session ends the run; anything else is logged and the watch goes on.
 
 **`slack login`.** `chrome::launch` starts the browser on the CLI's own profile with remote debugging on a free port; `cdp::Session` connects to the page; `capture::capture` loads Slack, waits for the sign-in, and collects the `d` cookie, the `xoxc` token from the web client's own requests and the workspace list from `localConfig_v2`; `auth.test` checks each workspace and `Workspaces::upsert` saves them. `logout` deletes the store and the profile when the sentinel says the CLI created it.
 
@@ -60,20 +62,23 @@ Each module knows one thing, and the dependencies point down this list:
 - `search.rs`: `search.messages` into `Hit`s (the channel, the message, its permalink).
 - `replies.rs`: `conversations.replies`, root first then every reply, up to five pages; behind `slack thread`.
 - `target.rs`: what a conversation argument means (`#channel`, `@person`, an id, a permalink, a thread number); the name walks (`conversations.list`, `users.list`) live in `names.rs` and fill the cache.
+- `rtm.rs`: Slack's real-time socket, brought back from v0.18.1 (the screen's), trimmed to new messages from people. `Posted::parse` is pure; `listen` runs the socket in a detached thread and reports `Up` (`again` after a drop: what came meanwhile was missed), `Down`, `Off` after three failed opens, `Dead` when Slack refuses the session.
+- `watch.rs`: `slack watch`. `reason` and `Watcher` are pure (what triggers, the bursts, your replies); `hand_over` and `build_event` read the exchange; `run_command` runs the command with a timeout; `Log` appends to `watch.jsonl`. Sends nothing: there is no call to `chat.postMessage` in it, and `MARKER` is only written into the log's `would_send`.
 - `send.rs`, `react.rs` and `read.rs`: the commands that write to Slack (`chat.postMessage`, `reactions.add` and `reactions.remove`, `conversations.mark`); `react::set` takes `already_reacted` and `no_reaction` as done, since the message ends up as asked, tries `emoji::other_names` on `invalid_name` and returns the name Slack took, and `target::open_dm` opens a direct message (`conversations.open`) for an `@person` target. `read` only ever marks what `lastview` recorded, and never moves a cursor back (`read::already_read`).
 - `mention.rs`: the `@handle` and `#channel` words of a message become `<@U…>` and `<#C…>` when the name cache knows them, from the cache alone (never a call; `@here` and `@channel` stay text), for `slack send`.
 - `style.rs`: ANSI styling, off under `--no-color`, `NO_COLOR` or a non-terminal stdout. `par.rs`: a small ordered parallel map over a few threads for the lookups. `warn.rs`: warnings on the way to a result, on stderr.
 
 ## Files on disk
 
-| File                                     | Written by                          | Read by                      | Deleting it                                    |
-| ---------------------------------------- | ----------------------------------- | ---------------------------- | ---------------------------------------------- |
-| `~/.config/slack/workspaces.json` (0600) | `login`, `logout`                   | every command (`store.rs`)   | logs you out                                   |
-| `~/.config/slack/browser-profile/`       | `login` (Chrome)                    | `login --headless`           | the next login needs the window again          |
-| `~/.cache/slack/names.json`              | every command that names something  | the same                     | safe, refilled on demand                       |
-| `~/.cache/slack/last-view.json`          | the view, `show` and `read` (drops) | `read`, `thread N`, `send N` | safe; `read` and the numbers need a new output |
+| File                                      | Written by                          | Read by                      | Deleting it                                    |
+| ----------------------------------------- | ----------------------------------- | ---------------------------- | ---------------------------------------------- |
+| `~/.config/slack/workspaces.json` (0600)  | `login`, `logout`                   | every command (`store.rs`)   | logs you out                                   |
+| `~/.config/slack/browser-profile/`        | `login` (Chrome)                    | `login --headless`           | the next login needs the window again          |
+| `~/.cache/slack/names.json`               | every command that names something  | the same                     | safe, refilled on demand                       |
+| `~/.cache/slack/last-view.json`           | the view, `show` and `read` (drops) | `read`, `thread N`, `send N` | safe; `read` and the numbers need a new output |
+| `~/.local/state/slack/watch.jsonl` (0600) | `watch`, appended                   | you, to tune the command     | loses what the watch logged                    |
 
-`$XDG_CONFIG_HOME` and `$XDG_CACHE_HOME` move the two directories; `$SLACK_BROWSER_PROFILE` moves the profile alone.
+`$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME` and `$XDG_STATE_HOME` move the three directories; `$SLACK_BROWSER_PROFILE` moves the profile alone.
 
 ## Contracts between modules
 
@@ -83,7 +88,8 @@ Each module knows one thing, and the dependencies point down this list:
 - **A number refers to the last output that printed one.** `View::thread_refs` numbers the threads in reading order; `show` replaces the numbering with its own; `last-view.json` keeps one numbering per workspace.
 - **A missing name never fails a run.** `channel_label` and `user_label` fall back to the id, and `resolve_*`, which fetches per id on a miss, swallows a lookup that fails for one id. The directory walks (`walk_*`, when a directory is needed) do propagate their errors. The cache is written back at the end of the run.
 - **Tokens stay below `api.rs`.** `Workspace` has no `Debug`, `api::Error` carries the method and Slack's error code but never the request, and nothing above the transport builds a header.
-- **Only `https://*.slack.com` origins** are paired with the session cookie: `capture::is_slack_workspace_url` is the gate.
+- **Only `https://*.slack.com` origins** are paired with the session cookie: `capture::is_slack_workspace_url` is the gate, and `is_slack_socket_url` its `wss://` twin for the socket.
+- **The watch's command never touches Slack.** It gets the event on stdin and gives text back on stdout; where that text would go is the watch's decision, from the event alone, and the marker is the watch's, not the command's.
 
 ## Error direction
 

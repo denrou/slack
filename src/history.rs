@@ -85,8 +85,13 @@ impl Message {
     }
 
     pub fn mentions(&self, user_id: &str) -> bool {
-        self.text.contains(&format!("<@{user_id}>")) || self.text.contains(&format!("<@{user_id}|"))
+        mentions(&self.text, user_id)
     }
+}
+
+/// Whether Slack markup names this user: `<@U…>`, never `@here`.
+pub fn mentions(text: &str, user_id: &str) -> bool {
+    text.contains(&format!("<@{user_id}>")) || text.contains(&format!("<@{user_id}|"))
 }
 
 /// A page of a conversation: its unread part, or its recent history.

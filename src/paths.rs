@@ -20,6 +20,11 @@ pub fn cache_dir() -> Result<PathBuf> {
     base_dir("XDG_CACHE_HOME", ".cache")
 }
 
+/// What a run leaves to be read later, not safe to delete: the watch log.
+pub fn state_dir() -> Result<PathBuf> {
+    base_dir("XDG_STATE_HOME", ".local/state")
+}
+
 fn base_dir(var: &str, fallback: &str) -> Result<PathBuf> {
     let base = match env::var_os(var).filter(|value| !value.is_empty()) {
         Some(value) => PathBuf::from(value),
@@ -63,6 +68,20 @@ pub fn create_private(path: &Path) -> io::Result<fs::File> {
     }
     let file = options.open(path)?;
     // The mode above applies on creation only; an existing file keeps its own.
+    restrict(path, 0o600)?;
+    Ok(file)
+}
+
+/// Open `path` to add to its end, owner-readable from the first byte.
+pub fn append_private(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
     restrict(path, 0o600)?;
     Ok(file)
 }

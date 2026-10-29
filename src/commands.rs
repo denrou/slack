@@ -14,7 +14,7 @@ use crate::auth::{capture, cdp};
 use crate::counts::Kind;
 use crate::directory::Listed;
 use crate::names::Names;
-use crate::presence::{self, Person, Presence, Status};
+use crate::presence::{self, Described, Person, Presence};
 use crate::store::{Workspace, Workspaces};
 use crate::style::Style;
 use crate::target::parse_permalink;
@@ -315,20 +315,6 @@ const WHO_MEMBERS: usize = 100;
 /// The people of the DMs visited last that a bare `slack who` describes.
 const WHO_RECENT: usize = 8;
 
-/// One person as `slack who --json` prints them.
-#[derive(serde::Serialize)]
-struct Described<'a> {
-    user: &'a str,
-    handle: &'a str,
-    name: &'a str,
-    presence: Option<Presence>,
-    status: Option<&'a Status>,
-    tz: Option<&'a str>,
-    /// Their clock now, with its offset.
-    local_time: Option<String>,
-    notifications_paused_until: Option<i64>,
-}
-
 pub fn who(targets: &[String], json: bool) -> Result<()> {
     let store = Workspaces::load()?;
     let (_, workspace) = store.default_workspace()?;
@@ -375,21 +361,11 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
         )
     });
     let now = jiff::Zoned::now();
-    let seconds = now.timestamp().as_second();
     if json {
         let value: Vec<Described> = described
             .iter()
-            .map(|(listed, person)| Described {
-                user: &listed.id,
-                handle: &listed.handle,
-                name: &listed.display,
-                presence: person.presence,
-                status: person.status(seconds),
-                tz: person.profile.as_ref().and_then(|p| p.tz.as_deref()),
-                local_time: person
-                    .local(&now)
-                    .map(|local| local.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()),
-                notifications_paused_until: person.paused_until(seconds),
+            .map(|(listed, person)| {
+                person.described(&listed.id, &listed.handle, &listed.display, &now)
             })
             .collect();
         return print_json(&value);
@@ -687,6 +663,19 @@ fn send_target(names: &Names, channel: &str) -> String {
         Some(c) if !c.is_mpim && !c.name.is_empty() => format!("'#{}'", c.name),
         _ => channel.to_string(),
     }
+}
+
+pub fn watch(settle: u64, timeout: u64, command: Vec<String>) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let identity = client.auth_test()?;
+    let options = crate::watch::Options {
+        settle: Duration::from_secs(settle),
+        timeout: Duration::from_secs(timeout),
+        command,
+    };
+    crate::watch::run(&client, &identity, &options)
 }
 
 pub fn read(targets: &[String]) -> Result<()> {

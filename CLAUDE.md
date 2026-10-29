@@ -32,7 +32,7 @@ Denis leads the project as product owner; Claude is the developer and owns the c
 
   The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version and reads its notes (a tag without them fails there, before the builds), lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with the tag's notes and the compare link, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
 
-- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, `unreads`) can be run from here to check the output. **Never run `send`, `react` or `read` from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user.
+- **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, `unreads`) can be run from here to check the output. **Never run `send`, `react` or `read` from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user. `slack watch` sends nothing and can be run from here, with `XDG_STATE_HOME` in the scratchpad so Denis's own log stays his.
 
 ## Ideas
 
@@ -61,6 +61,7 @@ Written down because none of them can be read from the code.
 - **Search is Slack's own (2026-10-21).** `slack search` sends the query to `search.messages` as typed, so Slack's operators work and nothing is indexed here; the newest matches first, not Slack's relevance, since what is looked for from a terminal is usually recent. One page, 20 by default and 100 at most: Slack's operators narrow rather than a second page.
 - **Who is around, for the people in view (2026-10-23).** What Denis wants is whether he can write to someone now, which status and the other person's clock answer better than the dot. So `slack who` takes named people, a channel's members (50 at most) or the recent DMs, never the whole workspace: Slack has no bulk presence call any more (one `users.getPresence` each, hundreds at Centreon) and keeps no history, so "who was online at 10:00" cannot be answered at all. Left out on purpose: group DMs, and someone else's snooze, which `dnd.teamInfo` does not give.
 - **No interactive screen (2026-10-28).** `slack` alone opened a ratatui screen since 2026-10-19 (list and messages panes, replies, reactions, the picker, Slack's socket, notifications, images, the Ctrl-G correction): about 11,000 lines with its socket, notifier and file viewer. In use Denis rarely opened it: the correction he valued moved to a Hammerspoon key that works in the Slack app itself, and the use that stuck is Claude Code through the skill, which only needs the commands. So the screen went, and `slack` alone prints `slack unreads`. A terminal client is slk's job if one is ever wanted; bringing the screen back would be `git show v0.18.1:src/tui/`, not a port.
+- **Watch, a dry run first (2026-10-28).** Denis works six hours behind most of his colleagues, so a question asked during his night waits for his morning. `slack watch` hands each DM and each mention of him (`<@him>`, never `@here`, `@channel` or a group) to a command of his, which reads the exchange on stdin and prints a reply. The prompts (a judge, a responder, a leak check) live in that command, outside this repository. Three things are deliberate. The command never gets Slack, only text, and the CLI alone decides where a reply would go. The marker `🤖 Réponse automatique :` is added by the CLI, so no prompt can drop it. And nothing is sent yet: the watch runs all day and logs what it would send next to what Denis wrote afterwards, so the prompts are tuned on real exchanges before security and IT look at it. Sending, when it comes, is a decision of its own, with a window (his nights, his days off, which France does not share) and a limit per conversation so two auto-responders cannot answer each other. Slack's socket came back for it (`rtm.rs`, from v0.18.1): it hears a message whether or not it was read since, and a mention in any thread, which polling `client.counts` cannot.
 - **Binary name `slack`**, kept because it is fast to type. Slack's platform CLI (`brew install slack-cli`) also installs a `slack` binary; it is not on this machine.
 - **Public repo, MIT**, like gh-prs.
 
@@ -68,7 +69,7 @@ Kept from slackcli: the browser-session credentials and their capture (`auth/`).
 
 ## Not planned yet
 
-`--workspace`, a `watch` mode.
+`--workspace`. Sending from the watch (see its decision). A status set from the calendar, since Slack does not change it by itself.
 
 Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the view with its error instead of dropping it, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
 
@@ -83,6 +84,12 @@ Deferred on purpose by the review of 2026-10-23 (`v0.18.0..main`):
 - The channels a message links are found by a scan of their own (`view::mentions`), beside `mrkdwn`'s token pass that draws them, so odd markup could be looked up and drawn differently. The scan is the one `mentioned_users` always was; one parser for both if a raw id ever shows.
 - The lookup rounds stay one after another: on a cold cache, `view::build` waits on the conversations, the threads' channels, the people, then the linked channels. A warm cache makes each a no-op, so this is felt on a first run only.
 - Untested end to end, since resolution needs a `Client`: a linked channel shown by name. `mentioned_channels`, the `refused` set and the drawing with a known name are each tested.
+
+Deferred on purpose with the watch (2026-10-28), to pick up once its log has been read:
+
+- A socket drop loses what was posted meanwhile; the log says so (`gap`) but nothing is read back from `client.counts`.
+- The command runs one event at a time: a slow one delays the next.
+- Whether holding the socket shows Denis as active at night is not checked yet; the first night's log (`me.presence`) tells.
 
 ## Reference implementation
 

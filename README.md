@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` prints what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` prints what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around, `slack watch` hands the messages aimed at you to a command of yours. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -55,6 +55,8 @@ slack react <permalink> +1                          # react to a message
 slack react <permalink> +1 --remove                 # ...or take your reaction back
 slack read                                          # mark as read what the last view showed
 slack read '#sre-alerts' @jane                      # ...only these, or a conversation `slack show` printed
+
+slack watch -- ~/bin/answer                         # hand each DM and mention of you to a command, log what it would answer
 ```
 
 ## Unreads
@@ -82,6 +84,21 @@ To find the name, `slack channels` lists the channels and group messages you are
 A target is `#channel`, `@person` (handle or display name), a conversation id, or a Slack permalink; a permalink means "answer in that message's thread", and `--thread <ts|permalink>` does the same for a channel target. The text is the argument, or stdin when there is none, and is sent as Slack markup (`*bold*`, `<@U123>`). The command prints where the message landed and its permalink. Quote `#channel` in zsh, or the shell reads it as a comment.
 
 `slack react <message> <emoji>` puts an emoji on a message, and `--remove` takes yours back. The message is a permalink, a thread number (its first message), or a conversation with `--ts <ts>`; the emoji is its Slack name, with or without the colons (`+1`, `:white_check_mark:`, a custom one), or the character itself. Reacting never marks anything as read.
+
+## Watch
+
+`slack watch -- <command> [args]` stays connected to Slack's real-time socket and, for each direct message and each message that names you (`@you`, not `@here`, `@channel` or a group), runs the command with the exchange as JSON on stdin. Whatever the command prints is the reply it proposes; printing nothing means no reply. It is a dry run: **nothing is ever sent**, and the command gets no access to Slack, only the text. Everything goes to `~/.local/state/slack/watch.jsonl` (mode `0600`), one JSON record a line:
+
+- `event`: the exchange handed over, the command's `outcome` (`reply`, `no_reply`, `failed`), the `reply`, and `would_send`, the reply as it would go out, behind the marker `🤖 Réponse automatique :` the CLI adds itself;
+- `your_reply`: what you wrote in that place in the 12 hours after, to compare with what the command proposed;
+- `gap`: the socket dropped, and what was posted meanwhile was not heard;
+- `error`: the exchange could not be read.
+
+A burst is one event: the command runs once the sender has been quiet for `--settle` seconds (60), and is stopped after `--timeout` (600) with what it started. A reply over 2,000 characters is logged as a failure. Your own messages, Slackbot, bots and apps, and DMs you muted in Slack never trigger it. Without a command, the events are only logged.
+
+The JSON on stdin is `id`, `reason` (`direct_message` or `mention`), `workspace`, `conversation` (`id`, `kind`: `direct_message`, `group_message`, `channel` or `private_channel`, `name`), `thread_ts`, `permalink`, `sender` and `me` (as `slack who --json` describes a person: `presence`, `status`, `tz`, `local_time`, `notifications_paused_until`; `sender` adds `real_name` and `external`, true for someone from another organisation), and `messages`: up to 20 of the conversation or thread, oldest first, ending with the last message that triggered it, so the command never sees what came after, your own answer included. Each message is `ts`, `time` (your clock), `from`, `user`, `text` (mentions spelled out as names), and `me`, `bot`, `trigger`, `files` where they apply.
+
+Under launchd, a `KeepAlive` job runs it at login; the Mac has to stay awake for it to hear anything.
 
 ## How login works
 
@@ -112,7 +129,7 @@ ln -s "$PWD/skills/slack" ~/.claude/skills/slack
 
 ## Files
 
-`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, both safe to delete: names and the last view. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
+`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, both safe to delete: names and the last view. `$XDG_STATE_HOME/slack/` (default `~/.local/state/slack/`) holds the watch log. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
 
 ## Releasing
 

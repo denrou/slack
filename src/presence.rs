@@ -192,6 +192,45 @@ impl Person {
     }
 }
 
+/// One person as `slack who --json` prints them, and as `slack watch`
+/// hands them to its command.
+#[derive(Serialize)]
+pub struct Described<'a> {
+    user: &'a str,
+    handle: &'a str,
+    name: &'a str,
+    presence: Option<Presence>,
+    status: Option<&'a Status>,
+    tz: Option<&'a str>,
+    /// Their clock now, with its offset.
+    local_time: Option<String>,
+    notifications_paused_until: Option<i64>,
+}
+
+impl Person {
+    pub fn described<'a>(
+        &'a self,
+        user: &'a str,
+        handle: &'a str,
+        name: &'a str,
+        now: &Zoned,
+    ) -> Described<'a> {
+        let seconds = now.timestamp().as_second();
+        Described {
+            user,
+            handle,
+            name,
+            presence: self.presence,
+            status: self.status(seconds),
+            tz: self.profile.as_ref().and_then(|p| p.tz.as_deref()),
+            local_time: self
+                .local(now)
+                .map(|local| local.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()),
+            notifications_paused_until: self.paused_until(seconds),
+        }
+    }
+}
+
 /// A time to come, on your clock, with the day when it is not today.
 fn clock(at: i64, now: &Zoned) -> String {
     let Ok(stamp) = Timestamp::from_second(at) else {

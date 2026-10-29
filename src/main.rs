@@ -19,6 +19,7 @@ mod presence;
 mod react;
 mod read;
 mod replies;
+mod rtm;
 mod search;
 mod send;
 mod store;
@@ -27,6 +28,7 @@ mod target;
 mod threads;
 mod view;
 mod warn;
+mod watch;
 
 use std::process::ExitCode;
 
@@ -171,6 +173,18 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
+    /// Listen for DMs and mentions of you, hand each to a command, log what it would answer; sends nothing
+    Watch {
+        /// Seconds without a new message from the sender before the exchange is handed over
+        #[arg(long, default_value_t = 60)]
+        settle: u64,
+        /// Seconds the command may take before it is stopped
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// The program to run for each, with its arguments (after `--`); it reads the exchange as JSON on stdin and prints the reply, or nothing. Without one, the events are only logged
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -216,6 +230,11 @@ fn main() -> ExitCode {
             json,
             no_color,
         }) => commands::show(&target, usize::from(limit), json, no_color),
+        Some(Command::Watch {
+            settle,
+            timeout,
+            command,
+        }) => commands::watch(settle, timeout, command),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -248,6 +267,19 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["slack", "ui"]).is_err());
         assert!(Cli::try_parse_from(["slack", "--json"]).is_err());
+    }
+
+    #[test]
+    fn watch_takes_the_command_with_its_flags() {
+        let cli = Cli::parse_from([
+            "slack", "watch", "--settle", "30", "--", "answer", "--judge", "-v",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Watch { settle: 30, timeout: 600, command }) if command == ["answer", "--judge", "-v"]
+        ));
+        let cli = Cli::parse_from(["slack", "watch"]);
+        assert!(matches!(cli.command, Some(Command::Watch { command, .. }) if command.is_empty()));
     }
 
     #[test]
