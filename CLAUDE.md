@@ -16,22 +16,23 @@ shellcheck tools/answer/answer tools/answer/test tools/answer/fixtures/gh && too
 
 ## Workflow
 
-Denis's personal project (`github.com/denrou/slack`), outside the Centreon organisation. The Centreon conventions (feature branch, pull request, `/create-pr`, `/check-pr`, Jira references) do not apply, and `/create-pr` must not be used.
+Denis's personal project (`github.com/denrou/slack`), outside the Centreon organisation. The Centreon conventions (`/create-pr`, `/check-pr`, Jira references) do not apply, and `/create-pr` must not be used.
 
 Denis leads the project as product owner; Claude is the developer and owns the code, its architecture and its quality.
 
-- **Commit straight on the local `main`**, one conventional commit per change (`feat:`, `fix:`, `docs:`, `chore: release X.Y.Z`). Format, lint and test before committing; run Prettier on any Markdown touched. `ARCHITECTURE.md` and the decisions below change in the same commit as the code they describe. So does `skills/slack/SKILL.md`, the manual an agent reads before using the CLI: a command, an output or a rule it states changes in the same commit as the code. From a worktree (background sessions), rebase its branch on the local `main`, commit there, and hand Denis the one line to run in his own terminal: `cd ~/code/denrou/slack && git merge --ff-only <branch>`. Such a session must not merge, and its isolation refuses any git command aimed at the main checkout, a `!` line typed into the session included (it failed that way on 2026-10-20).
-- **A push is a release (since 2026-10-20).** Nothing is pushed between releases: commits pile up on the local `main`, and Denis's one push sends `main` and the new tag together. Never ask him to push anything else, never push a branch or open a pull request to get around it, and never bump the version or create a tag on your own. He tries the batch from the local checkout (`cargo install --path ~/code/denrou/slack` puts it in `~/.cargo/bin`) and says when it is ready.
+- **One branch and one pull request per change (since 2026-10-23).** Committing straight on `main` kept one session working at a time, made the review of a release cover every change at once, and turned each change into a release. Now each session works on its own branch (`feat/…`, `fix/…`, `docs/…`, `chore/…`), from `origin/main` after a fetch, in its own worktree when sessions run side by side. Format, lint and test before each commit; run Prettier on any Markdown touched. `ARCHITECTURE.md`, the decisions below and `skills/slack/SKILL.md` (the manual an agent reads before using the CLI: a command, an output or a rule it states) change in the same pull request as the code they describe.
+- **`main` takes squash-merged pull requests only.** A ruleset requires the pull request and CI's `check` job, and the pull request's title and body become the commit on `main`: the title is a conventional commit (`feat:`, `fix:`, `docs:`, `chore:`), the body is written as a commit body (writing-voice rule), with `Closes #N` for the issues it settles.
+- **The branch is pushed and the pull request opened when Denis asks** ("open the PR"); until then the work stays local. When `main` moves under an open pull request, merge `main` into the branch: rebasing a pushed branch would take a force push.
+- **Each pull request is reviewed on its own**: `/code-review` on it, plus the pr-review-toolkit agents when it is large. Fix what matters in the branch; what is left out on purpose becomes an issue labelled `deferred`, with its reason and the review it came from, linked from the pull request.
+- **Denis tries and merges.** He tries the branch (`cargo install --path <checkout>` puts it in `~/.cargo/bin`) and merges it himself; never merge on your own.
+- **Merging is not releasing.** Denis runs `main`; a release is the Homebrew binary, cut when a batch is worth it. Never bump the version or create a tag on your own.
 - **A release, when Denis asks for it**:
-  1. Review the batch: `/code-review` over everything since the last tag (`git log v<previous>..main`), plus the pr-review-toolkit agents when the batch is large. Fix what matters in their own commits; what is deferred on purpose goes to "Not planned yet" below with its reason.
-  2. `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, `cargo build --release`: CI only sees the code at release time, so it has to pass here first.
-  3. Bump `version` in `Cargo.toml`, `cargo build` so `Cargo.lock` follows, commit `chore: release X.Y.Z`, create the annotated tag with the release notes as its message (`git tag -a vX.Y.Z --cleanup=whitespace -F <file>`), and hand Denis the one line: `! git push origin main vX.Y.Z` (`git push origin main` is denied by the global permission settings).
-
-     The message is `vX.Y.Z`, a blank line, then the notes the GitHub Release shows (since 2026-10-21): a few Markdown bullets on what changed for whoever uses the tool, new commands and keys, a behaviour that moved, a fix that was felt, not the commit list, which the compare link GitHub adds below them already gives. Show them to Denis with the push line. `--cleanup=whitespace` keeps a line that starts with `#`, which git would otherwise strip as a comment.
-
+  1. Read the pull requests merged since the last tag (`git log v<previous>..origin/main`, one squash commit each) and draft the notes the GitHub Release shows: a few Markdown bullets on what changed for whoever uses the tool, new commands and keys, a behaviour that moved, a fix that was felt, not the list of pull requests, which the compare link GitHub adds below them already gives.
+  2. Open a `chore: release X.Y.Z` pull request that bumps `version` in `Cargo.toml` (`cargo build` so `Cargo.lock` follows), with the notes in its body, and show them to Denis.
+  3. Once he has merged it, fetch and create the annotated tag on its merge commit, the message being `vX.Y.Z`, a blank line, then the notes: `git tag -a vX.Y.Z --cleanup=whitespace -F <file> origin/main` (`--cleanup=whitespace` keeps a line that starts with `#`, which git would otherwise strip as a comment). Hand Denis the one line: `! git push origin vX.Y.Z`.
   4. Once he has pushed, watch the release with `gh run watch` and the tap with `gh run watch --repo denrou/homebrew-slack`, then report what shipped.
 
-  The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version and reads its notes (a tag without them fails there, before the builds), lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with the tag's notes and the compare link, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every push to `main`.
+  The tag push runs `.github/workflows/release.yml`: it checks the tag against the crate version and reads its notes (a tag without them fails there, before the builds), lints and tests, builds the macOS arm64 and Linux x86_64 binaries, and publishes the GitHub Release with the tag's notes and the compare link, the archives (`slack-vX.Y.Z-<target>.tar.gz`) and `checksums.txt`. Its last job asks the Homebrew tap (`denrou/homebrew-slack`, same shape as the gh-prs and ggit taps) to rewrite its formula from `checksums.txt`; that job needs the `GH_TOKEN` secret on the repository and is skipped without it, in which case run `gh workflow run update-formula.yml --repo denrou/homebrew-slack -f version=X.Y.Z` by hand and watch it with `gh run watch --repo denrou/homebrew-slack`. `.github/workflows/ci.yml` runs fmt, clippy and the tests on every pull request and every push to `main`.
 
 - **Live checks.** `slack login` needs a human in the Chrome window; once the session is saved, every read-only command (`whoami`, `--count`, `unreads`) can be run from here to check the output. **Never run `send`, `react` or `read` from here**, not even to see an error path: `read` acts on whatever `~/.cache/slack/last-view.json` holds, and on 2026-10-19 a run meant to show the "nothing to mark" message marked eight channels as read instead. Inspect the cache file; leave the writes to the user. `slack watch` sends nothing and can be run from here, with `XDG_STATE_HOME` in the scratchpad so Denis's own log stays his. So can `tools/answer/answer` on its fixtures, with `ANSWER_GH=tools/answer/fixtures/gh` and `XDG_STATE_HOME` and `XDG_CONFIG_HOME` in the scratchpad: it never reaches Slack, and each event costs three Sonnet calls on Denis's subscription.
 
@@ -42,7 +43,7 @@ Denis asks for enhancements, fixes and features as they come to him in use, and 
 - When it is right as stated, build it, no question asked; one line on why it holds is enough.
 - When it needs more thought, or another approach serves the same want better (a smaller change, another key, a different place in the flow, a cost it would carry later), say so first: the want as understood, the concern, the alternative with its trade-off, and a lean. Then build what he picks.
 
-A concern about one of several asks never holds up the others. A reversal is fine, because use decides: the screen's picker opened on its list on request, then in its filter a day later, and the screen itself went once the skill turned out to be the use.
+An idea not built now becomes an issue labelled `enhancement`, with the concern and the lean when there is one. A concern about one of several asks never holds up the others. A reversal is fine, because use decides: the screen's picker opened on its list on request, then in its filter a day later, and the screen itself went once the skill turned out to be the use.
 
 ## Security rules
 
@@ -69,37 +70,9 @@ Written down because none of them can be read from the code.
 
 Kept from slackcli: the browser-session credentials and their capture (`auth/`). Deliberately not ported: app tokens, `parse-curl`, drafts, scheduling, canvases, the custom emoji list, file uploads and listings, saved items, user groups, the update checker, log files, Windows. If one becomes needed, it is a feature, not a port.
 
-## Not planned yet
+## Backlog
 
-`--workspace`. Sending from the watch (see its decision). A status set from the calendar, since Slack does not change it by itself. The calendar as the answer command's source for when Denis is back, if the dry run shows days off that neither Slack's pause nor his status tells.
-
-Deferred on purpose by the review of 2026-10-20 (`7a4bfc8..065ccde`), to pick up when the code around them moves: keeping a conversation that fails to load in the view with its error instead of dropping it, newtypes for the workspace origin and the message `ts`, a warning when the name lookups fail wholesale.
-
-Deferred on purpose by the reviews of 2026-10-21 (`v0.9.0..main`, `v0.14.0..main`):
-
-- A pref that is present but not JSON is read as absent without a warning (from before that batch).
-- `slack react --remove` says "Took back" when there was nothing to take back.
-- `slack search` indents the permalink by copying `render_messages`' gutter (`commands.rs`); it drifts if that gutter changes, which a glance at the output shows.
-
-Deferred on purpose by the review of 2026-10-23 (`v0.18.0..main`):
-
-- The channels a message links are found by a scan of their own (`view::mentions`), beside `mrkdwn`'s token pass that draws them, so odd markup could be looked up and drawn differently. The scan is the one `mentioned_users` always was; one parser for both if a raw id ever shows.
-- The lookup rounds stay one after another: on a cold cache, `view::build` waits on the conversations, the threads' channels, the people, then the linked channels. A warm cache makes each a no-op, so this is felt on a first run only.
-- Untested end to end, since resolution needs a `Client`: a linked channel shown by name. `mentioned_channels`, the `refused` set and the drawing with a known name are each tested.
-
-Deferred on purpose with the watch (2026-10-28), to pick up once its log has been read:
-
-- A socket drop loses what was posted meanwhile; the log says so (`gap`) but nothing is read back from `client.counts`.
-- The command runs one event at a time: a slow one delays the next.
-- Whether holding the socket shows Denis as active at night is not checked yet; the first night's log (`me.presence`) tells.
-
-Deferred on purpose by the review of 2026-10-29 (`v0.18.1..main`), while nothing is sent:
-
-- A pause by hand is not read: `dnd.teamInfo` gives Slack's schedule only, and Denis's own snooze would take `dnd.info`. His nights are the schedule; the log shows whether a daytime snooze matters.
-- `answer.jsonl` is read whole for each event and never rotated, and one torn line stops every event until it is fixed by hand (closed, and logged by the watch). A few events a day; rotate once it shows in `seconds`. The watch also reloads the names cache for each event.
-- A group DM's main line answers a burst only once it has been handed over, since the watch knows a group DM as one only after reading its names.
-- Small leaks of what went wrong: a sender whose lookup failed is taken for a person (the socket already drops bots), `chat.getPermalink`'s error is dropped (the answer command strips the permalink), a socket drop does not say why, and a muted DM whose pref is not JSON is handed over (the pref item above).
-- Untested, since each needs a `Client`: the context cut at the burst's newest message, and `slack who`'s filtering (you, Slackbot, bots, the 50 cap).
+In GitHub issues (since 2026-10-23): `enhancement` for an idea not built yet, `deferred` for what a review left out on purpose, with its reason and the review it came from. Before changing a module, `gh issue list --label deferred --search <module or symbol>` shows what was left there to pick up when the code around it moves.
 
 ## Reference implementation
 
