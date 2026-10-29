@@ -38,24 +38,38 @@ async function tell($: EngineInterface, text: string): Promise<void> {
   }
 }
 
-async function send($: EngineInterface): Promise<void> {
-  if ((await read($, draft))?.text.trim() === '') {
-    $.ui.toast('Nothing to send.')
-    return
-  }
-  // Claimed inside the versioned write, so a second press before the redraw
-  // finds it sending and a message never goes out twice.
+// Where the person can still change the draft, correct it or send it.
+function isOpen(d: Draft | null): d is Draft {
+  return d !== null && (d.status === 'editing' || d.status === 'failed')
+}
+
+// Edits land in order and before a Send or a Fix reads the text: a keystroke
+// still on its way would otherwise miss the claim and be dropped.
+let edits: Promise<unknown> = Promise.resolve()
+
+// Claimed inside the versioned write, so a second press before the redraw
+// finds the draft busy and a message never goes out twice.
+async function claim(
+  $: EngineInterface,
+  status: 'sending' | 'fixing',
+): Promise<Draft | null> {
+  await edits
   let claimed = null as Draft | null
   await update($, draft, (d): Draft | null => {
-    const isSendable =
-      d !== null &&
-      (d.status === 'editing' || d.status === 'failed') &&
-      d.text.trim() !== ''
-    claimed = isSendable ? d : null
-    return isSendable ? { ...d, status: 'sending', outcome: undefined } : d
+    claimed = isOpen(d) && d.text.trim() !== '' ? d : null
+    return claimed
+      ? { ...claimed, status, outcome: undefined, fixNote: undefined }
+      : d
   })
-  const now = claimed
+  return claimed
+}
+
+async function send($: EngineInterface): Promise<void> {
+  const now = await claim($, 'sending')
   if (now === null) {
+    if ((await read($, draft))?.text.trim() === '') {
+      $.ui.toast('Nothing to send.')
+    }
     return
   }
 
@@ -84,37 +98,59 @@ async function send($: EngineInterface): Promise<void> {
       d && { ...d, status: isSent ? 'sent' : 'failed', outcome },
   )
 
-  if (isSent) {
-    $.ui.toast(`Sent to ${now.target}`)
-    await tell(
-      $,
-      `The user sent the Slack draft to ${now.target} from the draft pane, with this text:\n\n${now.text}\n\n\`slack send\` printed:\n${outcome}`,
-    )
+  if (!isSent) {
+    $.ui.toast(`Not sent to ${now.target}`)
+    return
   }
+  $.ui.toast(`Sent to ${now.target}`)
+  await tell(
+    $,
+    `The user sent the Slack draft to ${now.target} from the draft pane, with this text:\n\n${now.text}\n\n\`slack send\` printed:\n${outcome}`,
+  )
 }
 
 async function discard($: EngineInterface): Promise<void> {
-  const now = await read($, draft)
-  await update($, draft, () => null)
+  let dropped = null as Draft | null
+  await update($, draft, (d): Draft | null => {
+    const isBusy = d?.status === 'sending' || d?.status === 'fixing'
+    dropped = isBusy ? null : d
+    return isBusy ? d : null
+  })
+  const was = dropped
+  if (was === null) {
+    return
+  }
   await $.ui.close({ id: PANE })
-  if (now !== null && now.status !== 'sent' && now.status !== 'sending') {
+  if (was.status !== 'sent') {
     await tell(
       $,
-      `The user discarded the Slack draft to ${now.target}; nothing was sent.`,
+      `The user discarded the Slack draft to ${was.target}; nothing was sent.`,
     )
   }
 }
 
 function keep($: EngineInterface, text: string): Promise<unknown> {
-  return update($, draft, d =>
-    d && (d.status === 'editing' || d.status === 'failed') && d.text !== text
-      ? { ...d, text, typed: undefined, fixNote: undefined }
-      : d,
-  )
+  edits = edits
+    .then(() =>
+      update($, draft, (d): Draft | null =>
+        isOpen(d) && d.text !== text
+          ? {
+              ...d,
+              text,
+              status: 'editing',
+              outcome: undefined,
+              typed: undefined,
+              fixNote: undefined,
+            }
+          : d,
+      ),
+    )
+    .catch(() => undefined)
+  return edits
 }
 
-// The instructions of the screen's Ctrl-G (`src/fix.rs` up to v0.18.1), so
-// a command set up for it reads the same prompt.
+// The instructions of the screen's Ctrl-G (`src/fix.rs`, which goes with the
+// screen in #54), so a command set up for it reads the same prompt.
 function fixPrompt(text: string): string {
   return `Correct the spelling, the missing accents and the grammar of the Slack message between the <message> tags, in the language it is written in. Do not rephrase: keep the words, the tone, the meaning and the line breaks. Leave Slack markup, emoji codes, mentions, code and URLs as they are. Reply with the corrected message alone, without the tags and without a comment; if nothing needs correcting, reply with the message unchanged.\n\n<message>\n${text}\n</message>\n`
 }
@@ -127,16 +163,7 @@ function cleaned(output: string): string {
 }
 
 async function fix($: EngineInterface, command: string): Promise<void> {
-  let claimed = null as Draft | null
-  await update($, draft, (d): Draft | null => {
-    const isFixable =
-      d !== null &&
-      (d.status === 'editing' || d.status === 'failed') &&
-      d.text.trim() !== ''
-    claimed = isFixable ? d : null
-    return isFixable ? { ...d, status: 'fixing', fixNote: undefined } : d
-  })
-  const before = claimed
+  const before = await claim($, 'fixing')
   if (before === null) {
     return
   }
@@ -151,10 +178,12 @@ async function fix($: EngineInterface, command: string): Promise<void> {
       cwd: '/',
       timeoutMs: 30_000,
     })
-    fixed = run.exitCode === 0 ? cleaned(run.stdout) : ''
+    fixed = cleaned(run.stdout)
     if (run.exitCode !== 0) {
       const last = run.stderr.trim().split('\n').at(-1)
       fixNote = `the fix command failed: ${last || `exit ${run.exitCode}`}`
+    } else if (run.isStdoutTruncated) {
+      fixNote = 'the fix command printed more than a message holds'
     } else if (fixed === '') {
       fixNote = 'the fix command printed nothing'
     }
@@ -166,7 +195,7 @@ async function fix($: EngineInterface, command: string): Promise<void> {
     d && d.status === 'fixing'
       ? {
           ...d,
-          status: before.status,
+          status: 'editing',
           fixNote,
           ...(isChanged ? { text: fixed, typed: before.text } : {}),
         }
@@ -179,9 +208,7 @@ async function fix($: EngineInterface, command: string): Promise<void> {
 
 function undoFix($: EngineInterface): Promise<unknown> {
   return update($, draft, d =>
-    d &&
-    d.typed !== undefined &&
-    (d.status === 'editing' || d.status === 'failed')
+    isOpen(d) && d.typed !== undefined
       ? { ...d, text: d.typed, typed: undefined }
       : d,
   )
@@ -192,6 +219,19 @@ export const register: Register = (on, options) => {
     typeof options.fixCommand === 'string' ? options.fixCommand.trim() : ''
 
   on('session.start', async ($, e, next) => {
+    // A run cut short by a reload or a crash leaves no answer behind: the
+    // draft is handed back, and a send that may have gone out says so.
+    await update($, draft, (d): Draft | null =>
+      d?.status === 'sending'
+        ? {
+            ...d,
+            status: 'failed',
+            outcome: 'interrupted, it may have gone out: check Slack first',
+          }
+        : d?.status === 'fixing'
+          ? { ...d, status: 'editing' }
+          : d,
+    )
     await $.tool.register({
       name: 'draft',
       description: DESCRIPTION,
@@ -239,8 +279,16 @@ export const register: Register = (on, options) => {
     if (typeof text !== 'string' || text.trim() === '') {
       return { deny: 'text is empty.' }
     }
-    if ((await read($, draft))?.status === 'sending') {
+    await edits
+    const current = await read($, draft)
+    if (current?.status === 'sending') {
       return { deny: 'The previous draft is being sent; wait for its note.' }
+    }
+    if (isOpen(current) && current.text !== current.seen) {
+      await update($, draft, d => d && { ...d, seen: current.text })
+      return {
+        deny: `The user edited the draft in the pane since you last read it, and it is kept as they left it:\n\n${current.text}\n\nRevise from this text if a change is still wanted, then call the tool again.`,
+      }
     }
 
     const next: Draft = { target, thread, text, seen: text, status: 'editing' }
@@ -268,12 +316,7 @@ export const register: Register = (on, options) => {
   // so "shorter" revises their text rather than Claude's earlier one.
   on('prompt.submit', async ($, e, next) => {
     const now = await read($, draft)
-    if (
-      e.command !== undefined ||
-      now === null ||
-      (now.status !== 'editing' && now.status !== 'failed') ||
-      now.text === now.seen
-    ) {
+    if (e.command !== undefined || !isOpen(now) || now.text === now.seen) {
       return next(e)
     }
     await update($, draft, d => d && { ...d, seen: now.text })
@@ -297,7 +340,7 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const isEditable = now.status === 'editing' || now.status === 'failed'
+    const isEditable = isOpen(now)
     const lines = now.text.split('\n').length
     const rows = Math.max(4, Math.min(lines + 1, e.props.scroll.bodyRows - 5))
     let field = <Text>{now.text}</Text>

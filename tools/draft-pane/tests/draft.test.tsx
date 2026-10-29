@@ -19,10 +19,12 @@ const PANE = {
 type Run = { argv: readonly string[]; stdin?: string }
 
 // Stands for the engine beneath the plugin, and records each command run:
-// `slack send` answers where the message landed, the fix command `fixer`'s.
+// `slack send` answers `sender`'s, by default where the message landed, and
+// the fix command `fixer`'s.
 function engine(
   on: On,
   fixer: (stdin: string) => Partial<ProcessRunResult> = () => ({}),
+  sender: () => Partial<ProcessRunResult> = () => ({}),
 ): { runs: Run[] } {
   const runs: Run[] = []
   on('tool.register', (_, e) => ({ value: { tool: e.name } }))
@@ -41,7 +43,7 @@ function engine(
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
-      ...(e.argv[0] === 'sh' ? fixer(e.init?.stdin ?? '') : {}),
+      ...(e.argv[0] === 'sh' ? fixer(e.init?.stdin ?? '') : sender()),
     }
 
     return { value: ran }
@@ -237,3 +239,68 @@ test('a fix that fails keeps the text and says why', FIX, async ($, on) => {
   expect(await ui.find({ key: 'send' })).toBeDefined()
   await ui.unmount()
 })
+
+test('Discard pressed with Send never says nothing was sent', async ($, on) => {
+  const { runs } = engine(on)
+  const session = mock.session(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '#dev', text: 'Hello' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await Promise.all([ui.press({ key: 'send' }), ui.press({ key: 'discard' })])
+  // Whichever press wins, the note says what happened.
+  const notes = session.appended().map(row => JSON.stringify(row.message))
+  expect(notes.some(note => note.includes('discarded'))).toBe(runs.length === 0)
+  expect(runs.length).toBeLessThanOrEqual(1)
+  await ui.unmount()
+})
+
+test("a new draft never overwrites the user's unread edit", async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '@jane', text: 'Hi Jane' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.input({ key: 'text', text: 'Hi Jane, quick one', kind: 'change' })
+  const refused = await $.tool.call({
+    tool: TOOL,
+    target: '@jane',
+    text: 'Hey',
+  })
+  expect(refused.deny).toMatch(/Hi Jane, quick one/)
+  expect((await ui.find({ key: 'text' }))?.props.value).toBe(
+    'Hi Jane, quick one',
+  )
+
+  const revised = await $.tool.call({
+    tool: TOOL,
+    target: '@jane',
+    text: 'Hey Jane, quick one',
+  })
+  expect(revised.deny).toBeUndefined()
+  await ui.unmount()
+})
+
+test(
+  'a correction drops the error of the send before it',
+  FIX,
+  async ($, on) => {
+    engine(
+      on,
+      () => ({ stdout: 'the build' }),
+      () => ({ exitCode: 1, stdout: '', stderr: 'channel_not_found' }),
+    )
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await $.tool.call({ tool: TOOL, target: '#dev', text: 'teh build' })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'send' })
+    expect((await ui.find({ type: 'Text', text: /Not sent/ }))?.text).toMatch(
+      /channel_not_found/,
+    )
+    await ui.press({ key: 'fix' })
+    expect(await ui.find({ type: 'Text', text: /Not sent/ })).toBeUndefined()
+    expect((await ui.find({ key: 'text' }))?.props.value).toBe('the build')
+    await ui.unmount()
+  },
+)
