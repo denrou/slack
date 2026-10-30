@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { On, ProcessRunResult } from 'claude-code'
+import type { On, ProcessRunResult, UiCopyResult } from 'claude-code'
 
 const TOOL = 'mcp__slack__draft'
 const PANE = {
@@ -18,15 +18,27 @@ const PANE = {
 
 type Run = { argv: readonly string[]; stdin?: string }
 
-// Stands for the engine beneath the plugin, and records each command run:
-// `slack send` answers `sender`'s, by default where the message landed, and
-// the fix command `fixer`'s.
+// Stands for the engine beneath the plugin, and records each command run,
+// what went in the prompt box and on the clipboard: `slack send` answers
+// `sender`'s, by default where the message landed, and the fix command
+// `fixer`'s.
 function engine(
   on: On,
   fixer: (stdin: string) => Partial<ProcessRunResult> = () => ({}),
   sender: () => Partial<ProcessRunResult> = () => ({}),
-): { runs: Run[] } {
+  clipboard: UiCopyResult = { isCopied: true },
+): { runs: Run[]; filled: string[]; copied: string[] } {
   const runs: Run[] = []
+  const filled: string[] = []
+  const copied: string[] = []
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+    return { isFilled: true }
+  })
+  on('ui.copy', (_, e) => {
+    copied.push(e.text)
+    return { value: clipboard }
+  })
   on('tool.register', (_, e) => ({ value: { tool: e.name } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -49,7 +61,7 @@ function engine(
     return { value: ran }
   })
 
-  return { runs }
+  return { runs, filled, copied }
 }
 
 // A prompt the person typed and sent with Enter.
@@ -304,3 +316,58 @@ test(
     await ui.unmount()
   },
 )
+
+test('Chat quotes the draft in the prompt box and keeps it', async ($, on) => {
+  const { runs, filled } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '@jane', text: 'Hi Jane' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.input({ key: 'text', text: 'Hi Jane,\n\nquick one', kind: 'change' })
+  await ui.press({ key: 'chat' })
+  expect(filled).toEqual([
+    'About the Slack draft to @jane:\n> Hi Jane,\n>\n> quick one\n\n',
+  ])
+  expect(runs).toHaveLength(0)
+
+  // The quote already holds the edit, so the prompt does not add it again.
+  const asked = await $.prompt.submit(typed('is it too short?'))
+  expect(asked.context ?? []).toHaveLength(0)
+  expect((await ui.find({ key: 'text' }))?.props.value).toBe(
+    'Hi Jane,\n\nquick one',
+  )
+  await ui.unmount()
+})
+
+test('Copy puts the draft on the clipboard and drops it', async ($, on) => {
+  const { runs, copied } = engine(on)
+  const session = mock.session(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '#dev', text: 'Hello' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.input({ key: 'text', text: 'Hello all', kind: 'change' })
+  await ui.press({ key: 'copy' })
+  expect(copied).toEqual(['Hello all'])
+  expect(runs).toHaveLength(0)
+  expect(JSON.stringify(session.appended().at(-1)?.message)).toMatch(
+    /copied.*nothing was sent/,
+  )
+  expect((await ui.find({ type: 'Text' }))?.text).toMatch(/No draft/)
+  await ui.unmount()
+})
+
+test('a copy the clipboard refuses keeps the draft', async ($, on) => {
+  const { copied } = engine(on, undefined, undefined, {
+    isCopied: false,
+    reason: 'no-clipboard',
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, target: '#dev', text: 'Hello' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'copy' })
+  expect(copied).toEqual(['Hello'])
+  expect(await ui.find({ key: 'send' })).toBeDefined()
+  await ui.unmount()
+})
