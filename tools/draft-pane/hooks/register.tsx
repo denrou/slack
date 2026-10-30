@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { Draft } from '../types'
 
@@ -214,6 +214,58 @@ function undoFix($: EngineInterface): Promise<unknown> {
   )
 }
 
+// Deliberate: the pane closes and the draft stays, since closing the pane is
+// how the keys go back to the prompt box; Claude's revision opens it again.
+async function chat($: EngineInterface): Promise<void> {
+  await edits
+  const now = await read($, draft)
+  if (!isOpen(now)) {
+    return
+  }
+  const quoted = now.text
+    .split('\n')
+    .map(line => (line === '' ? '>' : `> ${line}`))
+    .join('\n')
+  const filled = await $.prompt.fill({
+    text: `About the Slack draft to ${now.target}:\n${quoted}\n\n`,
+    mode: 'append',
+  })
+  if (!filled.isFilled) {
+    $.ui.toast('The prompt box did not take the draft; close the dialog first.')
+    return
+  }
+  // The quote carries the text, so the next prompt does not repeat it.
+  await update($, draft, d => d && { ...d, seen: now.text })
+  await $.ui.close({ id: PANE })
+}
+
+async function copy($: EngineInterface, surface: RenderSurface): Promise<void> {
+  await edits
+  const now = await read($, draft)
+  if (!isOpen(now)) {
+    return
+  }
+  const copied = await $.ui.copy({ text: now.text, surface })
+  if (!copied.isCopied) {
+    $.ui.toast(`Not copied: ${copied.reason}`)
+    return
+  }
+  let isDropped = false
+  await update($, draft, (d): Draft | null => {
+    isDropped = isOpen(d)
+    return isDropped ? null : d
+  })
+  if (!isDropped) {
+    return
+  }
+  await $.ui.close({ id: PANE })
+  $.ui.toast('Copied, ready to paste in Slack')
+  await tell(
+    $,
+    `The user copied the Slack draft to ${now.target} to finish it in Slack; nothing was sent from the pane. The text copied:\n\n${now.text}`,
+  )
+}
+
 export const register: Register = (on, options) => {
   const fixCommand =
     typeof options.fixCommand === 'string' ? options.fixCommand.trim() : ''
@@ -394,6 +446,16 @@ export const register: Register = (on, options) => {
           )}
           {isEditable && now.typed !== undefined && (
             <Button key="undo" label="Undo fix" onPress={() => undoFix($)} />
+          )}
+          {isEditable && (
+            <Button key="chat" label="Chat" onPress={() => chat($)} />
+          )}
+          {isEditable && (
+            <Button
+              key="copy"
+              label="Copy"
+              onPress={press => copy($, press.surface)}
+            />
           )}
           {now.status !== 'sending' && now.status !== 'fixing' && (
             <Button
