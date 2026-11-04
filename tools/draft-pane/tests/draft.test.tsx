@@ -146,6 +146,46 @@ test('a thread reply goes out with --thread', async ($, on) => {
   await ui.unmount()
 })
 
+test('a scheduled draft goes out with --at, a date and a time only', async ($, on) => {
+  const { runs } = engine(on, undefined, () => ({
+    stdout: 'Scheduled for Thu 5 Nov 09:00 in #dev\n',
+  }))
+  const session = mock.session(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  for (const at of ['45m', '09:00', 'mon 09:00', '--help']) {
+    const called = await $.tool.call({
+      tool: TOOL,
+      target: '#dev',
+      at,
+      text: 'hi',
+    })
+    expect(called.deny).toMatch(/at must be/)
+  }
+  await $.tool.call({
+    tool: TOOL,
+    target: '#dev',
+    at: '2026-11-05 09:00',
+    text: 'Morning',
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(JSON.stringify(await ui.find({ key: 'send' }))).toMatch(/"Schedule"/)
+  await ui.press({ key: 'send' })
+  expect(runs[0]?.argv).toEqual([
+    'slack',
+    'send',
+    '#dev',
+    '--at',
+    '2026-11-05 09:00',
+  ])
+  expect(await ui.find({ type: 'Text', text: /^Scheduled\./ })).toBeDefined()
+  expect(JSON.stringify(session.appended().at(-1)?.message)).toMatch(
+    /scheduled the Slack draft for 2026-11-05 09:00/,
+  )
+  await ui.unmount()
+})
+
 test("the person's edit reaches Claude with their next prompt, once", async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })

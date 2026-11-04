@@ -243,7 +243,7 @@ impl Person {
 
 /// A time to come, on your clock, with the day when it is not today, and
 /// the date when a weekday alone would read as this week's.
-fn clock(at: i64, now: &Zoned) -> String {
+pub fn clock(at: i64, now: &Zoned) -> String {
     let Ok(stamp) = Timestamp::from_second(at) else {
         return at.to_string();
     };

@@ -30,6 +30,7 @@ mod threads;
 mod view;
 mod warn;
 mod watch;
+mod when;
 
 use std::process::ExitCode;
 
@@ -70,6 +71,9 @@ enum Command {
         /// Reply in this thread (its ts or permalink)
         #[arg(long)]
         thread: Option<String>,
+        /// Have Slack post it later, on your clock: `45m`, `2h`, `09:00` (the next one), `mon 09:00`, `2026-11-05 09:00`; 120 days ahead at most
+        #[arg(long)]
+        at: Option<String>,
     },
     /// Put an emoji on a message, or take yours back
     React {
@@ -218,7 +222,8 @@ fn main() -> ExitCode {
             target,
             text,
             thread,
-        }) => commands::send(&target, text.as_deref(), thread.as_deref()),
+            at,
+        }) => commands::send(&target, text.as_deref(), thread.as_deref(), at.as_deref()),
         Some(Command::React {
             message,
             emoji,

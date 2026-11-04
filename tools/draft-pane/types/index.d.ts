@@ -1,6 +1,8 @@
 export interface Draft {
   target: string
   thread?: string
+  // `slack send --at`: a date and a time, so Slack posts it then.
+  at?: string
   text: string
   // What Claude last read of the text, so an edit of the person's reaches it once.
   seen: string

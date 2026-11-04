@@ -1,16 +1,20 @@
 //! `slack send`: post a message, in a thread when asked, and print where
-//! it landed. The one command besides `read` that writes to Slack. The
-//! `@handle` and `#channel` words the name cache knows become mentions.
+//! it landed. The `@handle` and `#channel` words the name cache knows
+//! become mentions. With `--at`, Slack posts it at that time itself
+//! (`chat.scheduleMessage`), so nothing has to run then and a Mac asleep
+//! at that hour changes nothing.
 
 use std::io::{self, IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow, bail};
+use jiff::Zoned;
 use serde_json::Value;
 
 use crate::api::Client;
 use crate::history::is_ts;
 use crate::mention;
 use crate::names::Names;
+use crate::presence;
 use crate::target::{self, parse_permalink};
 
 pub fn run(
@@ -20,6 +24,7 @@ pub fn run(
     target_spec: &str,
     text: Option<&str>,
     thread: Option<&str>,
+    at: Option<&Zoned>,
 ) -> Result<()> {
     let target = target::resolve(client, names, team_id, target_spec)?;
     let thread_ts = match thread {
@@ -52,6 +57,20 @@ pub fn run(
     if let Some(ts) = &thread_ts {
         params.push(("thread_ts", ts));
     }
+    if let Some(at) = at {
+        let post_at = at.timestamp().as_second();
+        let post_at_text = post_at.to_string();
+        params.push(("post_at", &post_at_text));
+        let scheduled = client.call("chat.scheduleMessage", &params)?;
+        let channel = scheduled
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or(&target.channel);
+        let where_to = landing(client, names, channel, thread_ts.is_some())?;
+        let when = presence::clock(post_at, &Zoned::now());
+        println!("Scheduled for {when} in {where_to}");
+        return Ok(());
+    }
     let posted = client.call("chat.postMessage", &params)?;
     let ts = posted
         .get("ts")
@@ -62,14 +81,7 @@ pub fn run(
         .and_then(Value::as_str)
         .unwrap_or(&target.channel);
 
-    names.resolve_channels(client, [channel.to_string()])?;
-    if let Some(user) = names.channel(channel).and_then(|c| c.user.clone()) {
-        names.resolve_users(client, [user])?;
-    }
-    let where_to = match &thread_ts {
-        Some(_) => format!("a thread in {}", names.channel_label(channel)),
-        None => names.channel_label(channel),
-    };
+    let where_to = landing(client, names, channel, thread_ts.is_some())?;
     println!("Sent to {where_to}");
     // Best effort: the message is posted either way.
     if let Some(permalink) = client
@@ -83,6 +95,21 @@ pub fn run(
         println!("{permalink}");
     }
     Ok(())
+}
+
+/// Where a message goes, as printed: the conversation's name, or a
+/// thread in it.
+fn landing(client: &Client, names: &mut Names, channel: &str, in_thread: bool) -> Result<String> {
+    names.resolve_channels(client, [channel.to_string()])?;
+    if let Some(user) = names.channel(channel).and_then(|c| c.user.clone()) {
+        names.resolve_users(client, [user])?;
+    }
+    let label = names.channel_label(channel);
+    Ok(if in_thread {
+        format!("a thread in {label}")
+    } else {
+        label
+    })
 }
 
 /// The thread of `--thread`: a message ts, or the permalink of a message
