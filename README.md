@@ -53,6 +53,8 @@ slack send '#sre-alerts' "on it"                    # post to a channel
 slack send @jane "merci !"                          # ...or a DM
 slack send <permalink> "answering here"             # ...or a thread
 slack send @jane < note.md                          # text from stdin
+slack send @jane --at 'thu 09:00' "morning!"        # posted by Slack then, Mac asleep or not
+slack send @jane --draft "to finish later"          # left in the Slack app's drafts
 slack react <permalink> +1                          # react to a message
 slack react <permalink> +1 --remove                 # ...or take your reaction back
 slack read                                          # mark as read what the last view showed
