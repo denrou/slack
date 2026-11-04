@@ -186,6 +186,60 @@ test('a scheduled draft goes out with --at, a date and a time only', async ($, o
   await ui.unmount()
 })
 
+test('Slack draft leaves the text in the Slack app, never posted', async ($, on) => {
+  const { runs } = engine(on, undefined, () => ({
+    stdout: 'Draft saved in #dev, to send from the Slack app\n',
+  }))
+  const session = mock.session(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: TOOL,
+    target: '#dev',
+    thread: '1730000000.123456',
+    text: 'Hello',
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.input({ key: 'text', text: 'Hello all', kind: 'change' })
+  await ui.press({ key: 'slack-draft' })
+  expect(runs).toEqual([
+    {
+      argv: [
+        'slack',
+        'send',
+        '#dev',
+        '--thread',
+        '1730000000.123456',
+        '--draft',
+      ],
+      stdin: 'Hello all',
+    },
+  ])
+  expect(
+    await ui.find({ type: 'Text', text: /^Saved in Slack's drafts\./ }),
+  ).toBeDefined()
+  expect(await ui.find({ key: 'send' })).toBeUndefined()
+  expect(JSON.stringify(session.appended().at(-1)?.message)).toMatch(
+    /nothing was posted/,
+  )
+  await ui.unmount()
+})
+
+test('a scheduled draft has no Slack draft button', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: TOOL,
+    target: '#dev',
+    at: '2026-11-05 09:00',
+    text: 'Morning',
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'slack-draft' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test("the person's edit reaches Claude with their next prompt, once", async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })

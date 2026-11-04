@@ -82,11 +82,14 @@ pub fn send(
     text: Option<&str>,
     thread: Option<&str>,
     at: Option<&str>,
+    draft: bool,
 ) -> Result<()> {
     // Before anything is read: a wrong time fails without a lookup.
-    let at = at
-        .map(|spec| when::parse(spec, &jiff::Zoned::now()))
-        .transpose()?;
+    let delivery = match at {
+        Some(spec) => send::Delivery::At(when::parse(spec, &jiff::Zoned::now())?),
+        None if draft => send::Delivery::Draft,
+        None => send::Delivery::Now,
+    };
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let mut names = Names::load();
@@ -97,7 +100,7 @@ pub fn send(
         target,
         text,
         thread,
-        at.as_ref(),
+        &delivery,
     );
     names.save();
     result

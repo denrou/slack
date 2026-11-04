@@ -1,7 +1,10 @@
-//! Slack's message markup to terminal text. Pure: names come in through
-//! closures, and the text comes out as pieces, each with its look, which
-//! the text view paints with `Style`. With styling off the markers are
-//! left as written so nothing is lost.
+//! Slack's message markup to terminal text, and to the rich text blocks a
+//! scheduled message is written in. Pure: names come in through closures,
+//! and the text comes out as pieces, each with its look, which the text
+//! view paints with `Style`. With styling off the markers are left as
+//! written so nothing is lost.
+
+use serde_json::{Value, json};
 
 use crate::style::Style;
 
@@ -64,7 +67,130 @@ const QUOTED_BREAK: &str = "\n▎ ";
 
 /// A message's text: tokens expanded, entities decoded, markup read.
 pub fn pieces(text: &str, user: Lookup, channel: Lookup) -> Vec<Piece> {
-    Markup::new(tokens(text, user, channel)).read()
+    Markup::new(tokens(text, user, channel))
+        .read(true)
+        .into_pieces()
+}
+
+/// Text as typed for `slack send` (its mentions already `<@U…>`) as the
+/// `blocks` of a draft: bold, italic, strike and code, the mentions, the
+/// channels and the links, read by the same rules as a message received.
+/// Deliberate, as slackcli found with `drafts.create`: one section with
+/// its line breaks inside the text, since Slack runs several sections
+/// together on one line; and a `>` quote stays as typed.
+pub fn rich_text(text: &str) -> Value {
+    let mut elements: Vec<Value> = Vec::new();
+    let markup = Markup::new(elements_of(text)).read(false);
+    let atoms = markup
+        .atoms
+        .into_iter()
+        .zip(markup.looks)
+        .zip(markup.markers);
+    for ((atom, look), marker) in atoms {
+        let style = style_of(look);
+        match (atom, marker) {
+            (Atom::Char(_), Some("")) => {}
+            (Atom::Char(_), Some(shown)) => push_text(&mut elements, shown, &style),
+            (Atom::Char(c), None) => push_text(&mut elements, c.encode_utf8(&mut [0; 4]), &style),
+            (Atom::Token(mut element), _) => {
+                if let Some(style) = style {
+                    element["style"] = style;
+                }
+                elements.push(element);
+            }
+        }
+    }
+    if elements.is_empty() {
+        elements.push(json!({ "type": "text", "text": "" }));
+    }
+    json!([{
+        "type": "rich_text",
+        "elements": [{ "type": "rich_text_section", "elements": elements }],
+    }])
+}
+
+fn style_of(look: Look) -> Option<Value> {
+    let mut style = serde_json::Map::new();
+    for (on, name) in [
+        (look.bold, "bold"),
+        (look.italic, "italic"),
+        (look.strike, "strike"),
+        (look.code, "code"),
+    ] {
+        if on {
+            style.insert(name.to_string(), Value::Bool(true));
+        }
+    }
+    (!style.is_empty()).then_some(Value::Object(style))
+}
+
+fn push_text(elements: &mut Vec<Value>, text: &str, style: &Option<Value>) {
+    if let Some(last) = elements.last_mut()
+        && last["type"] == "text"
+        && last.get("style") == style.as_ref()
+        && let Some(Value::String(so_far)) = last.get_mut("text")
+    {
+        so_far.push_str(text);
+        return;
+    }
+    let mut element = json!({ "type": "text", "text": text });
+    if let Some(style) = style {
+        element["style"] = style.clone();
+    }
+    elements.push(element);
+}
+
+/// The text with Slack's `<…>` tokens as rich text elements; any other
+/// `<` stays a character. Nothing is decoded: this text was typed, not
+/// received.
+fn elements_of(text: &str) -> Vec<Atom<Value>> {
+    let mut atoms = Vec::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        atoms.extend(rest[..start].chars().map(Atom::Char));
+        match element_of(&after[..end]) {
+            Some(element) => atoms.push(Atom::Token(element)),
+            None => atoms.extend(rest[start..start + 1 + end + 1].chars().map(Atom::Char)),
+        }
+        rest = &after[end + 1..];
+    }
+    atoms.extend(rest.chars().map(Atom::Char));
+    atoms
+}
+
+fn element_of(token: &str) -> Option<Value> {
+    let (target, label) = match token.split_once('|') {
+        Some((target, label)) => (target, Some(label).filter(|label| !label.is_empty())),
+        None => (token, None),
+    };
+    let is_id = |id: &str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric());
+    if let Some(id) = target.strip_prefix('@').filter(|id| is_id(id)) {
+        return Some(json!({ "type": "user", "user_id": id }));
+    }
+    if let Some(id) = target.strip_prefix('#').filter(|id| is_id(id)) {
+        return Some(json!({ "type": "channel", "channel_id": id }));
+    }
+    if let Some(id) = target.strip_prefix("!subteam^").filter(|id| is_id(id)) {
+        return Some(json!({ "type": "usergroup", "usergroup_id": id }));
+    }
+    if let Some(range) = target
+        .strip_prefix('!')
+        .filter(|range| matches!(*range, "here" | "channel" | "everyone"))
+    {
+        return Some(json!({ "type": "broadcast", "range": range }));
+    }
+    if is_url(target) && !target.contains(char::is_whitespace) {
+        let mut link = json!({ "type": "link", "url": target });
+        if let Some(label) = label {
+            link["text"] = json!(label);
+        }
+        return Some(link);
+    }
+    None
 }
 
 fn paint(text: &str, look: Look, style: &Style) -> String {
@@ -87,18 +213,22 @@ fn paint(text: &str, look: Look, style: &Style) -> String {
     out
 }
 
-/// A character of the text, or a token expanded whole: markup goes around
-/// a mention or a link, never into it.
-enum Atom {
+/// A character of the text, or a token kept whole: markup goes around a
+/// mention or a link, never into it. The token is its expansion for the
+/// text view, its element for rich text.
+enum Atom<T> {
     Char(char),
-    Token(Vec<(String, Kind)>),
+    Token(T),
 }
+
+/// A token as the text view shows it.
+type Shown = Vec<(String, Kind)>;
 
 /// Replace Slack's `<…>` tokens: mentions, channel links, special
 /// mentions, dates and URLs. Entities are decoded after the split, since a
 /// literal `<` arrives as `&lt;`.
-fn tokens(text: &str, user: Lookup, channel: Lookup) -> Vec<Atom> {
-    fn push(atoms: &mut Vec<Atom>, text: &str) {
+fn tokens(text: &str, user: Lookup, channel: Lookup) -> Vec<Atom<Shown>> {
+    fn push(atoms: &mut Vec<Atom<Shown>>, text: &str) {
         atoms.extend(decode_entities(text).chars().map(Atom::Char));
     }
     let mut atoms = Vec::with_capacity(text.len());
@@ -174,16 +304,16 @@ fn expand_token(token: &str, user: Lookup, channel: Lookup) -> Option<Vec<(Strin
 }
 
 /// The atoms of a text and what the markup makes of each.
-struct Markup {
-    atoms: Vec<Atom>,
+struct Markup<T> {
+    atoms: Vec<Atom<T>>,
     looks: Vec<Look>,
     /// Some for an atom that is markup, with what a styled view shows for
     /// it.
     markers: Vec<Option<&'static str>>,
 }
 
-impl Markup {
-    fn new(atoms: Vec<Atom>) -> Markup {
+impl<T> Markup<T> {
+    fn new(atoms: Vec<Atom<T>>) -> Self {
         let len = atoms.len();
         Markup {
             atoms,
@@ -193,15 +323,18 @@ impl Markup {
     }
 
     /// Code first, since it shields what it holds from the other markers,
-    /// then quotes, then bold, italic and strike, which may nest.
-    fn read(mut self) -> Vec<Piece> {
+    /// then quotes when asked, then bold, italic and strike, which may
+    /// nest.
+    fn read(mut self, with_quotes: bool) -> Self {
         self.code_blocks();
         self.code_spans();
-        self.quotes();
+        if with_quotes {
+            self.quotes();
+        }
         self.pairs('*', |look| look.bold = true);
         self.pairs('_', |look| look.italic = true);
         self.pairs('~', |look| look.strike = true);
-        self.into_pieces()
+        self
     }
 
     fn char(&self, at: usize) -> Option<char> {
@@ -365,7 +498,9 @@ impl Markup {
         let after = at + 1 >= self.atoms.len() || !self.is_word(at + 1);
         before && after
     }
+}
 
+impl Markup<Shown> {
     fn into_pieces(self) -> Vec<Piece> {
         fn text(pieces: &mut Vec<Piece>, text: &str, look: Look) {
             match pieces.last_mut() {
@@ -444,6 +579,80 @@ mod tests {
 
     fn plain(text: &str) -> String {
         render(text, &user, &channel, &Style::plain())
+    }
+
+    /// The elements of the one section `rich_text` writes.
+    fn rich(text: &str) -> Value {
+        rich_text(text)[0]["elements"][0]["elements"].clone()
+    }
+
+    #[test]
+    fn plain_text_is_the_blocks_the_slack_app_sends() {
+        // As the Slack app wrote it in a scheduled draft, 2026-11-04.
+        assert_eq!(
+            rich_text("test"),
+            serde_json::json!([{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"test"}]}]}])
+        );
+        assert_eq!(rich(""), json!([{ "type": "text", "text": "" }]));
+    }
+
+    #[test]
+    fn markup_becomes_styles_by_the_reading_rules() {
+        assert_eq!(
+            rich("a *b _c_* ~d~ `e *f*` snake_case_name 2*3*4"),
+            json!([
+                { "type": "text", "text": "a " },
+                { "type": "text", "text": "b ", "style": { "bold": true } },
+                { "type": "text", "text": "c", "style": { "bold": true, "italic": true } },
+                { "type": "text", "text": " " },
+                { "type": "text", "text": "d", "style": { "strike": true } },
+                { "type": "text", "text": " " },
+                { "type": "text", "text": "e *f*", "style": { "code": true } },
+                { "type": "text", "text": " snake_case_name 2*3*4" },
+            ])
+        );
+    }
+
+    #[test]
+    fn line_breaks_stay_in_the_text_and_a_quote_as_typed() {
+        assert_eq!(
+            rich("one\n> two\n```\nx = 1\n```"),
+            json!([
+                { "type": "text", "text": "one\n> two\n" },
+                { "type": "text", "text": "x = 1", "style": { "code": true } },
+            ])
+        );
+    }
+
+    #[test]
+    fn tokens_become_elements_and_keep_the_style_around_them() {
+        assert_eq!(
+            rich(
+                "*hi <@U1>*, see <#C1> <!here> <!subteam^S1|@sre> <https://x.y/z|the doc> <https://x.y/>"
+            ),
+            json!([
+                { "type": "text", "text": "hi ", "style": { "bold": true } },
+                { "type": "user", "user_id": "U1", "style": { "bold": true } },
+                { "type": "text", "text": ", see " },
+                { "type": "channel", "channel_id": "C1" },
+                { "type": "text", "text": " " },
+                { "type": "broadcast", "range": "here" },
+                { "type": "text", "text": " " },
+                { "type": "usergroup", "usergroup_id": "S1" },
+                { "type": "text", "text": " " },
+                { "type": "link", "url": "https://x.y/z", "text": "the doc" },
+                { "type": "text", "text": " " },
+                { "type": "link", "url": "https://x.y/" },
+            ])
+        );
+    }
+
+    #[test]
+    fn anything_else_in_brackets_stays_text_as_typed() {
+        assert_eq!(
+            rich("a <b> & c &lt; <@> <unclosed"),
+            json!([{ "type": "text", "text": "a <b> & c &lt; <@> <unclosed" }])
+        );
     }
 
     #[test]
