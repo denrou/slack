@@ -1,17 +1,38 @@
 //! `slack send`: post a message, in a thread when asked, and print where
-//! it landed. The one command besides `read` that writes to Slack. The
-//! `@handle` and `#channel` words the name cache knows become mentions.
+//! it landed. The `@handle` and `#channel` words the name cache knows
+//! become mentions. With `--at`, Slack posts it at that time itself, so
+//! nothing has to run then and a Mac asleep at that hour changes nothing.
+//! A session token is refused by `chat.scheduleMessage`
+//! (`not_allowed_token_type`, 2026-11-04), so it goes the way the Slack
+//! app schedules one: a draft with `date_scheduled` (`drafts.create`,
+//! undocumented), which the app lists with its scheduled messages. With
+//! `--draft`, the same call without the time leaves it in the app's
+//! drafts, to finish and send from there.
 
+use std::fs::File;
 use std::io::{self, IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow, bail};
+use jiff::Zoned;
 use serde_json::Value;
 
 use crate::api::Client;
 use crate::history::is_ts;
 use crate::mention;
+use crate::mrkdwn;
 use crate::names::Names;
+use crate::presence;
 use crate::target::{self, parse_permalink};
+
+/// What `send` does with the message.
+pub enum Delivery {
+    /// Post it now.
+    Now,
+    /// Have Slack post it then.
+    At(Zoned),
+    /// Leave it in the Slack app's drafts.
+    Draft,
+}
 
 pub fn run(
     client: &Client,
@@ -20,6 +41,7 @@ pub fn run(
     target_spec: &str,
     text: Option<&str>,
     thread: Option<&str>,
+    delivery: &Delivery,
 ) -> Result<()> {
     let target = target::resolve(client, names, team_id, target_spec)?;
     let thread_ts = match thread {
@@ -45,6 +67,28 @@ pub fn run(
     }
     let text = mention::link(text, names);
 
+    if !matches!(delivery, Delivery::Now) {
+        let post_at = match delivery {
+            Delivery::At(at) => Some(at.timestamp().as_second()),
+            _ => None,
+        };
+        let kept = save_draft(
+            client,
+            &target.channel,
+            thread_ts.as_deref(),
+            &text,
+            post_at,
+        )?;
+        let where_to = landing(client, names, &target.channel, thread_ts.is_some());
+        match kept {
+            Some(at) => println!(
+                "Scheduled for {} in {where_to}",
+                presence::clock(at, &Zoned::now())
+            ),
+            None => println!("Draft saved in {where_to}, to send from the Slack app"),
+        }
+        return Ok(());
+    }
     let mut params = vec![
         ("channel", target.channel.as_str()),
         ("text", text.as_str()),
@@ -62,14 +106,7 @@ pub fn run(
         .and_then(Value::as_str)
         .unwrap_or(&target.channel);
 
-    names.resolve_channels(client, [channel.to_string()])?;
-    if let Some(user) = names.channel(channel).and_then(|c| c.user.clone()) {
-        names.resolve_users(client, [user])?;
-    }
-    let where_to = match &thread_ts {
-        Some(_) => format!("a thread in {}", names.channel_label(channel)),
-        None => names.channel_label(channel),
-    };
+    let where_to = landing(client, names, channel, thread_ts.is_some());
     println!("Sent to {where_to}");
     // Best effort: the message is posted either way.
     if let Some(permalink) = client
@@ -83,6 +120,111 @@ pub fn run(
         println!("{permalink}");
     }
     Ok(())
+}
+
+/// Leaves the message in the Slack app's drafts, for Slack to post at
+/// `post_at` when there is one, and returns the time Slack kept. The time
+/// is checked again here, since `--at 1m` may have passed while the
+/// message was typed on stdin. A draft kept without the time asked is an
+/// error: it would sit in the drafts and never go out.
+fn save_draft(
+    client: &Client,
+    channel: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+    post_at: Option<i64>,
+) -> Result<Option<i64>> {
+    let Some(post_at) = post_at else {
+        create_draft(client, channel, thread_ts, text, None)?;
+        return Ok(None);
+    };
+    if post_at <= Zoned::now().timestamp().as_second() {
+        bail!("the time of --at passed while the message was read; nothing was scheduled");
+    }
+    let body = create_draft(client, channel, thread_ts, text, Some(post_at))?;
+    body.pointer("/draft/date_scheduled")
+        .and_then(Value::as_i64)
+        .filter(|&kept| kept > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow!(
+                "Slack kept the message as a draft without its time: it will not go out; delete it from the Slack app's drafts"
+            )
+        })
+}
+
+/// `drafts.create` with the fields the Slack app sends from its composer,
+/// `date_scheduled` only for a message Slack is to post later.
+fn create_draft(
+    client: &Client,
+    channel: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+    date_scheduled: Option<i64>,
+) -> Result<Value> {
+    let mut destination = serde_json::json!({ "channel_id": channel });
+    if let Some(ts) = thread_ts {
+        destination["thread_ts"] = ts.into();
+        destination["broadcast"] = false.into();
+    }
+    let blocks = mrkdwn::rich_text(text).to_string();
+    let destinations = Value::from(vec![destination]).to_string();
+    let client_msg_id = client_msg_id()?;
+    let date_scheduled = date_scheduled.map(|at| at.to_string());
+    let mut params = vec![
+        ("blocks", blocks.as_str()),
+        ("client_msg_id", client_msg_id.as_str()),
+        ("destinations", destinations.as_str()),
+        ("file_ids", "[]"),
+        ("is_from_composer", "true"),
+    ];
+    if let Some(at) = &date_scheduled {
+        params.push(("date_scheduled", at));
+    }
+    Ok(client.call("drafts.create", &params)?)
+}
+
+/// A random UUID, the id the Slack app gives each draft.
+fn client_msg_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut bytes))
+        .context("could not read /dev/urandom for the draft's id")?;
+    Ok(uuid_v4(bytes))
+}
+
+fn uuid_v4(mut bytes: [u8; 16]) -> String {
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
+/// Where a message went, as printed: the conversation's name, or a
+/// thread in it. Best effort, the id when a lookup fails: the message is
+/// already in Slack, and an error here would read as "not sent", which a
+/// retry would turn into a second copy.
+fn landing(client: &Client, names: &mut Names, channel: &str, in_thread: bool) -> String {
+    if names
+        .resolve_channels(client, [channel.to_string()])
+        .is_ok()
+        && let Some(user) = names.channel(channel).and_then(|c| c.user.clone())
+    {
+        let _ = names.resolve_users(client, [user]);
+    }
+    let label = names.channel_label(channel);
+    if in_thread {
+        format!("a thread in {label}")
+    } else {
+        label
+    }
 }
 
 /// The thread of `--thread`: a message ts, or the permalink of a message
@@ -112,5 +254,11 @@ mod tests {
             "1760880000.000100"
         );
         assert!(thread_ts_from("yesterday").is_err());
+    }
+
+    #[test]
+    fn a_draft_id_is_a_version_4_uuid() {
+        assert_eq!(uuid_v4([0xff; 16]), "ffffffff-ffff-4fff-bfff-ffffffffffff");
+        assert_eq!(uuid_v4([0; 16]), "00000000-0000-4000-8000-000000000000");
     }
 }

@@ -15,8 +15,12 @@ const draft = atom({ plugin: 'slack', key: 'draft' } as const, null, {
 const TARGET =
   /^([#@]\S+|[CDG][A-Z0-9]{6,}|https:\/\/[\w-]+\.slack\.com\/archives\/\S+)$/
 const THREAD = /^(\d+\.\d+|https:\/\/[\w-]+\.slack\.com\/archives\/\S+)$/
+// Deliberate: a date and a time only. `slack send --at` also takes `45m` or
+// `09:00`, but those count from the press on Send, which may come an hour
+// or a day after the draft.
+const AT = /^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}$/
 
-const DESCRIPTION = `Show a Slack message drafted for the user in an editable pane beside the chat, instead of in the reply. The user edits it there and presses Send, which runs \`slack send\` with their text: that press is their explicit yes, so never run \`slack send\` for a draft shown here. A note in the conversation says when it was sent (with the permalink) or discarded. Calling it again replaces the draft, for a revision. The text is Slack markup, written as the user would.`
+const DESCRIPTION = `Show a Slack message drafted for the user in an editable pane beside the chat, instead of in the reply. The user edits it there and presses Send, which runs \`slack send\` with their text: that press is their explicit yes, so never run \`slack send\` for a draft shown here. A note in the conversation says when it was sent (with the permalink), scheduled, saved in the Slack app's drafts, or discarded. Calling it again replaces the draft, for a revision. The text is Slack markup, written as the user would.`
 
 const PLACED =
   'The draft is in the pane. Tell the user in one line it is there to edit and send; do not repeat it, and do not run `slack send` for it.'
@@ -52,20 +56,41 @@ let edits: Promise<unknown> = Promise.resolve()
 async function claim(
   $: EngineInterface,
   status: 'sending' | 'fixing',
+  isSlackDraft = false,
 ): Promise<Draft | null> {
   await edits
   let claimed = null as Draft | null
   await update($, draft, (d): Draft | null => {
     claimed = isOpen(d) && d.text.trim() !== '' ? d : null
     return claimed
-      ? { ...claimed, status, outcome: undefined, fixNote: undefined }
+      ? {
+          ...claimed,
+          status,
+          isSlackDraft,
+          outcome: undefined,
+          fixNote: undefined,
+        }
       : d
   })
   return claimed
 }
 
-async function send($: EngineInterface): Promise<void> {
-  const now = await claim($, 'sending')
+// What the pane says of a send, a schedule or a draft left in Slack.
+function wordsOf(d: Draft): { done: string; doing: string; not: string } {
+  if (d.isSlackDraft) {
+    return {
+      done: "Saved in Slack's drafts",
+      doing: 'Saving…',
+      not: 'Not saved',
+    }
+  }
+  return d.at === undefined
+    ? { done: 'Sent', doing: 'Sending…', not: 'Not sent' }
+    : { done: 'Scheduled', doing: 'Scheduling…', not: 'Not scheduled' }
+}
+
+async function send($: EngineInterface, asSlackDraft = false): Promise<void> {
+  const now = await claim($, 'sending', asSlackDraft)
   if (now === null) {
     if ((await read($, draft))?.text.trim() === '') {
       $.ui.toast('Nothing to send.')
@@ -77,6 +102,12 @@ async function send($: EngineInterface): Promise<void> {
   if (now.thread !== undefined) {
     argv.push('--thread', now.thread)
   }
+  if (asSlackDraft) {
+    argv.push('--draft')
+  } else if (now.at !== undefined) {
+    argv.push('--at', now.at)
+  }
+  const words = wordsOf({ ...now, isSlackDraft: asSlackDraft })
   let isSent = false
   let outcome: string
   try {
@@ -99,13 +130,18 @@ async function send($: EngineInterface): Promise<void> {
   )
 
   if (!isSent) {
-    $.ui.toast(`Not sent to ${now.target}`)
+    $.ui.toast(`${words.not}, for ${now.target}`)
     return
   }
-  $.ui.toast(`Sent to ${now.target}`)
+  $.ui.toast(`${words.done}, for ${now.target}`)
+  const how = asSlackDraft
+    ? "saved the draft in the Slack app's drafts, to finish and send there (nothing was posted),"
+    : now.at === undefined
+      ? 'sent the Slack draft'
+      : `scheduled the Slack draft for ${now.at}`
   await tell(
     $,
-    `The user sent the Slack draft to ${now.target} from the draft pane, with this text:\n\n${now.text}\n\n\`slack send\` printed:\n${outcome}`,
+    `The user ${how} to ${now.target} from the draft pane, with this text:\n\n${now.text}\n\n\`slack send\` printed:\n${outcome}`,
   )
 }
 
@@ -300,6 +336,11 @@ export const register: Register = (on, options) => {
             type: 'string',
             description: 'Reply in this thread: its ts or permalink',
           },
+          at: {
+            type: 'string',
+            description:
+              "Have Slack post it later: a date and a time on the user's clock, `2026-11-05 09:00`",
+          },
           text: { type: 'string', description: 'The message, in Slack markup' },
         },
         required: ['target', 'text'],
@@ -314,7 +355,7 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
-    const { target, thread, text } = e as unknown as Record<string, unknown>
+    const { target, thread, at, text } = e as unknown as Record<string, unknown>
     if (typeof target !== 'string' || !TARGET.test(target)) {
       return {
         deny: 'target must be `#channel`, `@handle`, a conversation id or a permalink; a number from a listing is not taken.',
@@ -326,6 +367,11 @@ export const register: Register = (on, options) => {
     ) {
       return {
         deny: 'thread must be a ts (`1730000000.123456`) or a permalink.',
+      }
+    }
+    if (at !== undefined && (typeof at !== 'string' || !AT.test(at))) {
+      return {
+        deny: "at must be a date and a time on the user's clock (`2026-11-05 09:00`): a duration or a bare time would count from the press on Send.",
       }
     }
     if (typeof text !== 'string' || text.trim() === '') {
@@ -343,7 +389,14 @@ export const register: Register = (on, options) => {
       }
     }
 
-    const next: Draft = { target, thread, text, seen: text, status: 'editing' }
+    const next: Draft = {
+      target,
+      thread,
+      at,
+      text,
+      seen: text,
+      status: 'editing',
+    }
     await update($, draft, () => next)
     const opened = await $.ui.open({
       id: PANE,
@@ -419,24 +472,29 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           To {now.target}
           {now.thread !== undefined ? ', in the thread' : ''}
+          {now.at !== undefined ? `, at ${now.at}` : ''}
         </Text>
         {field}
         {now.status === 'fixing' && <Text dimColor>Correcting…</Text>}
         {now.fixNote !== undefined && (
           <Text color="warning">Not corrected: {now.fixNote}</Text>
         )}
-        {now.status === 'sending' && <Text dimColor>Sending…</Text>}
+        {now.status === 'sending' && <Text dimColor>{wordsOf(now).doing}</Text>}
         {now.status === 'failed' && (
-          <Text color="error">Not sent: {now.outcome}</Text>
+          <Text color="error">
+            {wordsOf(now).not}: {now.outcome}
+          </Text>
         )}
         {now.status === 'sent' && (
-          <Text color="success">Sent. {now.outcome}</Text>
+          <Text color="success">
+            {wordsOf(now).done}. {now.outcome}
+          </Text>
         )}
         <Box gap={1}>
           {isEditable && (
             <Button
               key="send"
-              label="Send"
+              label={now.at === undefined ? 'Send' : 'Schedule'}
               variant="primary"
               onPress={() => send($)}
             />
@@ -446,6 +504,13 @@ export const register: Register = (on, options) => {
           )}
           {isEditable && now.typed !== undefined && (
             <Button key="undo" label="Undo fix" onPress={() => undoFix($)} />
+          )}
+          {isEditable && now.at === undefined && (
+            <Button
+              key="slack-draft"
+              label="Slack draft"
+              onPress={() => send($, true)}
+            />
           )}
           {isEditable && (
             <Button key="chat" label="Chat" onPress={() => chat($)} />

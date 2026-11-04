@@ -1,6 +1,10 @@
 export interface Draft {
   target: string
   thread?: string
+  // `slack send --at`: a date and a time, so Slack posts it then.
+  at?: string
+  // `slack send --draft`: left in the Slack app's drafts, nothing posted.
+  isSlackDraft?: boolean
   text: string
   // What Claude last read of the text, so an edit of the person's reaches it once.
   seen: string

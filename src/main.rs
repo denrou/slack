@@ -30,6 +30,7 @@ mod threads;
 mod view;
 mod warn;
 mod watch;
+mod when;
 
 use std::process::ExitCode;
 
@@ -70,6 +71,12 @@ enum Command {
         /// Reply in this thread (its ts or permalink)
         #[arg(long)]
         thread: Option<String>,
+        /// Have Slack post it later, on your clock: `45m`, `2h`, `09:00` (the next one), `mon 09:00`, `2026-11-05 09:00`
+        #[arg(long)]
+        at: Option<String>,
+        /// Leave it in the Slack app's drafts, to finish and send from there
+        #[arg(long, conflicts_with = "at")]
+        draft: bool,
     },
     /// Put an emoji on a message, or take yours back
     React {
@@ -218,7 +225,15 @@ fn main() -> ExitCode {
             target,
             text,
             thread,
-        }) => commands::send(&target, text.as_deref(), thread.as_deref()),
+            at,
+            draft,
+        }) => commands::send(
+            &target,
+            text.as_deref(),
+            thread.as_deref(),
+            at.as_deref(),
+            draft,
+        ),
         Some(Command::React {
             message,
             emoji,
@@ -316,6 +331,23 @@ mod tests {
         ));
         let cli = Cli::parse_from(["slack", "watch"]);
         assert!(matches!(cli.command, Some(Command::Watch { command, .. }) if command.is_empty()));
+    }
+
+    #[test]
+    fn a_draft_is_never_scheduled() {
+        let cli = Cli::parse_from(["slack", "send", "#dev", "hi", "--draft"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Send {
+                draft: true,
+                at: None,
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["slack", "send", "#dev", "hi", "--draft", "--at", "09:00"])
+                .is_err()
+        );
     }
 
     #[test]

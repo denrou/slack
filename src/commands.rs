@@ -21,7 +21,7 @@ use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
     counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, status,
-    target, view,
+    target, view, when,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -77,7 +77,19 @@ pub fn count(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()> {
+pub fn send(
+    target: &str,
+    text: Option<&str>,
+    thread: Option<&str>,
+    at: Option<&str>,
+    draft: bool,
+) -> Result<()> {
+    // Before anything is read: a wrong time fails without a lookup.
+    let delivery = match at {
+        Some(spec) => send::Delivery::At(when::parse(spec, &jiff::Zoned::now())?),
+        None if draft => send::Delivery::Draft,
+        None => send::Delivery::Now,
+    };
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let mut names = Names::load();
@@ -88,6 +100,7 @@ pub fn send(target: &str, text: Option<&str>, thread: Option<&str>) -> Result<()
         target,
         text,
         thread,
+        &delivery,
     );
     names.save();
     result
@@ -152,7 +165,7 @@ pub fn status(
         return Ok(());
     }
     let expires = until
-        .map(|spec| status::until(spec, &now))
+        .map(|spec| when::parse(spec, &now))
         .transpose()?
         .map(|at| at.timestamp().as_second());
     if if_unset && let Some(current) = status::get(&client, seconds)? {
