@@ -67,27 +67,27 @@ pub fn run(
     }
     let text = mention::link(text, names);
 
-    match delivery {
-        Delivery::Now => {}
-        Delivery::At(at) => {
-            let post_at = schedule(
-                client,
-                &target.channel,
-                thread_ts.as_deref(),
-                &text,
-                at.timestamp().as_second(),
-            )?;
-            let where_to = landing(client, names, &target.channel, thread_ts.is_some())?;
-            let when = presence::clock(post_at, &Zoned::now());
-            println!("Scheduled for {when} in {where_to}");
-            return Ok(());
+    if !matches!(delivery, Delivery::Now) {
+        let post_at = match delivery {
+            Delivery::At(at) => Some(at.timestamp().as_second()),
+            _ => None,
+        };
+        let kept = save_draft(
+            client,
+            &target.channel,
+            thread_ts.as_deref(),
+            &text,
+            post_at,
+        )?;
+        let where_to = landing(client, names, &target.channel, thread_ts.is_some());
+        match kept {
+            Some(at) => println!(
+                "Scheduled for {} in {where_to}",
+                presence::clock(at, &Zoned::now())
+            ),
+            None => println!("Draft saved in {where_to}, to send from the Slack app"),
         }
-        Delivery::Draft => {
-            create_draft(client, &target.channel, thread_ts.as_deref(), &text, None)?;
-            let where_to = landing(client, names, &target.channel, thread_ts.is_some())?;
-            println!("Draft saved in {where_to}, to send from the Slack app");
-            return Ok(());
-        }
+        return Ok(());
     }
     let mut params = vec![
         ("channel", target.channel.as_str()),
@@ -106,7 +106,7 @@ pub fn run(
         .and_then(Value::as_str)
         .unwrap_or(&target.channel);
 
-    let where_to = landing(client, names, channel, thread_ts.is_some())?;
+    let where_to = landing(client, names, channel, thread_ts.is_some());
     println!("Sent to {where_to}");
     // Best effort: the message is posted either way.
     if let Some(permalink) = client
@@ -122,20 +122,30 @@ pub fn run(
     Ok(())
 }
 
-/// Hands the message to Slack as a draft it posts at `post_at`, and
-/// returns the time Slack kept. A draft kept without that time is an
+/// Leaves the message in the Slack app's drafts, for Slack to post at
+/// `post_at` when there is one, and returns the time Slack kept. The time
+/// is checked again here, since `--at 1m` may have passed while the
+/// message was typed on stdin. A draft kept without the time asked is an
 /// error: it would sit in the drafts and never go out.
-fn schedule(
+fn save_draft(
     client: &Client,
     channel: &str,
     thread_ts: Option<&str>,
     text: &str,
-    post_at: i64,
-) -> Result<i64> {
+    post_at: Option<i64>,
+) -> Result<Option<i64>> {
+    let Some(post_at) = post_at else {
+        create_draft(client, channel, thread_ts, text, None)?;
+        return Ok(None);
+    };
+    if post_at <= Zoned::now().timestamp().as_second() {
+        bail!("the time of --at passed while the message was read; nothing was scheduled");
+    }
     let body = create_draft(client, channel, thread_ts, text, Some(post_at))?;
     body.pointer("/draft/date_scheduled")
         .and_then(Value::as_i64)
         .filter(|&kept| kept > 0)
+        .map(Some)
         .ok_or_else(|| {
             anyhow!(
                 "Slack kept the message as a draft without its time: it will not go out; delete it from the Slack app's drafts"
@@ -197,19 +207,24 @@ fn uuid_v4(mut bytes: [u8; 16]) -> String {
     )
 }
 
-/// Where a message goes, as printed: the conversation's name, or a
-/// thread in it.
-fn landing(client: &Client, names: &mut Names, channel: &str, in_thread: bool) -> Result<String> {
-    names.resolve_channels(client, [channel.to_string()])?;
-    if let Some(user) = names.channel(channel).and_then(|c| c.user.clone()) {
-        names.resolve_users(client, [user])?;
+/// Where a message went, as printed: the conversation's name, or a
+/// thread in it. Best effort, the id when a lookup fails: the message is
+/// already in Slack, and an error here would read as "not sent", which a
+/// retry would turn into a second copy.
+fn landing(client: &Client, names: &mut Names, channel: &str, in_thread: bool) -> String {
+    if names
+        .resolve_channels(client, [channel.to_string()])
+        .is_ok()
+        && let Some(user) = names.channel(channel).and_then(|c| c.user.clone())
+    {
+        let _ = names.resolve_users(client, [user]);
     }
     let label = names.channel_label(channel);
-    Ok(if in_thread {
+    if in_thread {
         format!("a thread in {label}")
     } else {
         label
-    })
+    }
 }
 
 /// The thread of `--thread`: a message ts, or the permalink of a message

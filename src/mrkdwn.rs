@@ -73,11 +73,14 @@ pub fn pieces(text: &str, user: Lookup, channel: Lookup) -> Vec<Piece> {
 }
 
 /// Text as typed for `slack send` (its mentions already `<@U…>`) as the
-/// `blocks` of a draft: bold, italic, strike and code, the mentions, the
-/// channels and the links, read by the same rules as a message received.
-/// Deliberate, as slackcli found with `drafts.create`: one section with
-/// its line breaks inside the text, since Slack runs several sections
-/// together on one line; and a `>` quote stays as typed.
+/// `blocks` of a draft, read by the same rules as a message received:
+/// bold, italic, strike and code; the mentions, channels and links, with
+/// bare URLs and `:emoji:` codes too, which `chat.postMessage` would
+/// render; `&lt;`, `&gt;` and `&amp;` decoded as it would. Inside code,
+/// all of these stay as typed. Deliberate, as slackcli found with
+/// `drafts.create`: one section with its line breaks inside the text,
+/// since Slack runs several sections together on one line; and a `>`
+/// quote stays as typed.
 pub fn rich_text(text: &str) -> Value {
     let mut elements: Vec<Value> = Vec::new();
     let markup = Markup::new(elements_of(text)).read(false);
@@ -92,11 +95,12 @@ pub fn rich_text(text: &str) -> Value {
             (Atom::Char(_), Some("")) => {}
             (Atom::Char(_), Some(shown)) => push_text(&mut elements, shown, &style),
             (Atom::Char(c), None) => push_text(&mut elements, c.encode_utf8(&mut [0; 4]), &style),
-            (Atom::Token(mut element), _) => {
+            (Atom::Token(token), _) if look.code => push_text(&mut elements, &token.typed, &style),
+            (Atom::Token(Element { mut value, .. }), _) => {
                 if let Some(style) = style {
-                    element["style"] = style;
+                    value["style"] = style;
                 }
-                elements.push(element);
+                elements.push(value);
             }
         }
     }
@@ -107,6 +111,13 @@ pub fn rich_text(text: &str) -> Value {
         "type": "rich_text",
         "elements": [{ "type": "rich_text_section", "elements": elements }],
     }])
+}
+
+/// A rich text element, and the text it was read from, which stands in
+/// for it inside code.
+struct Element {
+    value: Value,
+    typed: String,
 }
 
 fn style_of(look: Look) -> Option<Value> {
@@ -140,26 +151,110 @@ fn push_text(elements: &mut Vec<Value>, text: &str, style: &Option<Value>) {
     elements.push(element);
 }
 
-/// The text with Slack's `<…>` tokens as rich text elements; any other
-/// `<` stays a character. Nothing is decoded: this text was typed, not
-/// received.
-fn elements_of(text: &str) -> Vec<Atom<Value>> {
+/// The text with Slack's `<…>` tokens as elements. A `<` that opens no
+/// token stays a character, and the scan goes on right after it, so a
+/// `<` typed before a mention never swallows it.
+fn elements_of(text: &str) -> Vec<Atom<Element>> {
     let mut atoms = Vec::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('<') {
         let after = &rest[start + 1..];
-        let Some(end) = after.find('>') else {
-            break;
-        };
-        atoms.extend(rest[..start].chars().map(Atom::Char));
-        match element_of(&after[..end]) {
-            Some(element) => atoms.push(Atom::Token(element)),
-            None => atoms.extend(rest[start..start + 1 + end + 1].chars().map(Atom::Char)),
+        let token = after
+            .find('>')
+            .and_then(|end| Some((end, element_of(&after[..end])?)));
+        match token {
+            Some((end, value)) => {
+                plain(&mut atoms, &rest[..start]);
+                atoms.push(Atom::Token(Element {
+                    value,
+                    typed: rest[start..start + 1 + end + 1].to_string(),
+                }));
+                rest = &after[end + 1..];
+            }
+            None => {
+                plain(&mut atoms, &rest[..start + 1]);
+                rest = after;
+            }
         }
-        rest = &after[end + 1..];
     }
-    atoms.extend(rest.chars().map(Atom::Char));
+    plain(&mut atoms, rest);
     atoms
+}
+
+/// Text between tokens, decoded, with the bare URLs and the `:emoji:`
+/// codes Slack would render as elements.
+fn plain(atoms: &mut Vec<Atom<Element>>, text: &str) {
+    let text = decode_entities(text);
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        let is_start = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric());
+        let found = if is_start {
+            bare_url(&text[at..]).or_else(|| emoji_code(&text[at..]))
+        } else {
+            None
+        };
+        match found {
+            Some((len, value)) => {
+                atoms.push(Atom::Token(Element {
+                    value,
+                    typed: text[at..at + len].to_string(),
+                }));
+                at += len;
+            }
+            None => {
+                atoms.push(Atom::Char(c));
+                at += c.len_utf8();
+            }
+        }
+    }
+}
+
+/// `https://…` up to a space, a backtick or a bracket, without the
+/// punctuation that ends a sentence around it or the markup that closes
+/// a span (`*see https://x.y*`).
+fn bare_url(text: &str) -> Option<(usize, Value)> {
+    if !(text.starts_with("https://") || text.starts_with("http://")) {
+        return None;
+    }
+    let end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '`' | '<' | '>'))
+        .unwrap_or(text.len());
+    let url = text[..end].trim_end_matches([
+        '.', ',', ';', ':', '!', '?', ')', ']', '\'', '"', '*', '_', '~',
+    ]);
+    url.split_once("://")
+        .is_some_and(|(_, host)| !host.is_empty())
+        .then(|| (url.len(), json!({ "type": "link", "url": url })))
+}
+
+/// `:name:`, with `::skin-tone-N:` after it when there is one. A name
+/// holds a letter, so `12:30:00` is no emoji.
+fn emoji_code(text: &str) -> Option<(usize, Value)> {
+    let name = |text: &str| -> Option<usize> {
+        let inner = text.strip_prefix(':')?;
+        let len = inner.find(|c: char| {
+            !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '+' | '-'))
+        })?;
+        (len > 0
+            && inner[len..].starts_with(':')
+            && inner[..len].contains(|c: char| c.is_ascii_lowercase() || c == '+' || c == '-'))
+        .then_some(len)
+    };
+    let len = name(text)?;
+    let mut value = json!({ "type": "emoji", "name": &text[1..1 + len] });
+    let mut end = len + 2;
+    if let Some(rest) = text[end..].strip_prefix(":skin-tone-")
+        && let Some(tone) = rest.chars().next().and_then(|c| c.to_digit(10))
+        && (2..=6).contains(&tone)
+        && rest[1..].starts_with(':')
+    {
+        value["skin_tone"] = json!(tone);
+        end += ":skin-tone-N:".len();
+    }
+    Some((end, value))
 }
 
 fn element_of(token: &str) -> Option<Value> {
@@ -648,10 +743,60 @@ mod tests {
     }
 
     #[test]
-    fn anything_else_in_brackets_stays_text_as_typed() {
+    fn anything_else_in_brackets_stays_text_and_entities_are_decoded() {
         assert_eq!(
-            rich("a <b> & c &lt; <@> <unclosed"),
-            json!([{ "type": "text", "text": "a <b> & c &lt; <@> <unclosed" }])
+            rich("a <b> &amp; c &lt; <@> <unclosed"),
+            json!([{ "type": "text", "text": "a <b> & c < <@> <unclosed" }])
+        );
+    }
+
+    #[test]
+    fn a_stray_bracket_never_swallows_the_mention_after_it() {
+        assert_eq!(
+            rich("if x < 3 ping <@U1>"),
+            json!([
+                { "type": "text", "text": "if x < 3 ping " },
+                { "type": "user", "user_id": "U1" },
+            ])
+        );
+    }
+
+    #[test]
+    fn bare_urls_and_emoji_codes_are_elements() {
+        assert_eq!(
+            rich("PR (https://x.y/a_b_c). :+1::skin-tone-2: :tada: at 12:30:00, a:b:"),
+            json!([
+                { "type": "text", "text": "PR (" },
+                { "type": "link", "url": "https://x.y/a_b_c" },
+                { "type": "text", "text": "). " },
+                { "type": "emoji", "name": "+1", "skin_tone": 2 },
+                { "type": "text", "text": " " },
+                { "type": "emoji", "name": "tada" },
+                { "type": "text", "text": " at 12:30:00, a:b:" },
+            ])
+        );
+    }
+
+    #[test]
+    fn markup_around_a_bare_url_still_pairs() {
+        assert_eq!(
+            rich("*see https://x.y*"),
+            json!([
+                { "type": "text", "text": "see ", "style": { "bold": true } },
+                { "type": "link", "url": "https://x.y", "style": { "bold": true } },
+            ])
+        );
+    }
+
+    #[test]
+    fn inside_code_everything_stays_as_typed() {
+        assert_eq!(
+            rich("`ping <@U1> :tada: https://x.y`"),
+            json!([{
+                "type": "text",
+                "text": "ping <@U1> :tada: https://x.y",
+                "style": { "code": true },
+            }])
         );
     }
 
