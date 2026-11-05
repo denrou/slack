@@ -99,6 +99,20 @@ pub fn is_conversation_id(spec: &str) -> bool {
 
 /// `https://<team>.slack.com/archives/<channel>/p<16 digits>`, optionally
 /// with `?thread_ts=<ts>&cid=<channel>` for a reply.
+/// A message's permalink, the way Slack writes one: in a thread, with the
+/// thread and the conversation after it.
+pub fn permalink(url: &str, channel: &str, ts: &str, thread_ts: Option<&str>) -> String {
+    let base = format!(
+        "{}/archives/{channel}/p{}",
+        url.trim_end_matches('/'),
+        ts.replace('.', "")
+    );
+    match thread_ts {
+        Some(thread) => format!("{base}?thread_ts={thread}&cid={channel}"),
+        None => base,
+    }
+}
+
 pub fn parse_permalink(spec: &str) -> Option<Permalink> {
     let (path, query) = spec.split_once('?').unwrap_or((spec, ""));
     let rest = path.strip_prefix("https://")?;
@@ -133,6 +147,27 @@ pub fn parse_permalink(spec: &str) -> Option<Permalink> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_permalink_into_a_thread_names_it() {
+        let url = "https://acme.slack.com/";
+        assert_eq!(
+            permalink(url, "C0A754E2V", "1760880000.000100", None),
+            "https://acme.slack.com/archives/C0A754E2V/p1760880000000100"
+        );
+        let reply = permalink(
+            url,
+            "C0A754E2V",
+            "1760880000.000100",
+            Some("1760870000.000200"),
+        );
+        assert_eq!(
+            reply,
+            "https://acme.slack.com/archives/C0A754E2V/p1760880000000100?thread_ts=1760870000.000200&cid=C0A754E2V"
+        );
+        let parsed = parse_permalink(&reply).map(|link| link.thread());
+        assert_eq!(parsed, Some("1760870000.000200".to_string()));
+    }
 
     #[test]
     fn conversation_ids_are_recognised() {

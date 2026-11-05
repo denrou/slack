@@ -1,6 +1,6 @@
 # slack
 
-Slack from the terminal: `slack` prints what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack status` sets your status, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around, `slack watch` hands the messages aimed at you to a command of yours. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
+Slack from the terminal: `slack` prints what needs you, `slack --count` gives a status bar one number, `slack send` answers, `slack react` puts an emoji on a message, `slack read` marks as read, `slack status` sets your status, `slack show` reads any conversation, `slack search` finds a message, `slack who` says who is around, `slack watch` hands the messages aimed at you to a command of yours, `slack drafts` sets the drafts saved from here beside what you sent. No Slack app and no admin approval: the CLI reuses the session of a browser you sign into once, the way [slackcli](https://github.com/shaharia-lab/slackcli) does.
 
 Early days, but every command below works.
 
@@ -55,6 +55,7 @@ slack send <permalink> "answering here"             # ...or a thread
 slack send @jane < note.md                          # text from stdin
 slack send @jane --at 'thu 09:00' "morning!"        # posted by Slack then, Mac asleep or not
 slack send @jane --draft "to finish later"          # left in the Slack app's drafts
+slack drafts                                        # the drafts of the last 30 days, each beside what you sent
 slack react <permalink> +1                          # react to a message
 slack react <permalink> +1 --remove                 # ...or take your reaction back
 slack read                                          # mark as read what the last view showed
@@ -92,6 +93,8 @@ A target is `#channel`, `@person` (handle or display name), a conversation id, o
 `slack react <message> <emoji>` puts an emoji on a message, and `--remove` takes yours back. The message is a permalink, a thread number (its first message), or a conversation with `--ts <ts>`; the emoji is its Slack name, with or without the colons (`+1`, `:white_check_mark:`, a custom one), or the character itself. Reacting never marks anything as read.
 
 `slack status <text> -e <emoji> --until <when>` sets your status. `--until` is when Slack clears it, on your clock: `45m`, `2h`, `07:30` (the next one), `mon 07:30` (the next Monday), `2026-11-02 07:30`; without it the status stays. Slack clears it itself, so a scheduled job only has to set it, and a Mac asleep at that hour changes nothing. `--if-unset` leaves a status already set alone, so such a job never replaces one you set by hand. `--clear` clears it, and `slack status` alone prints it (`--json`: `emoji`, `text`, `expires`, or `null`).
+
+`send --draft` and `send --at` also add each draft to `~/.local/state/slack/drafts.jsonl` (mode `0600`): the place, the text as saved, its id, and the Claude Code session that wrote it when there is one. `slack drafts` reads them back and, for each, finds your message in the same place within three days (from the time Slack posts it, for `send --at`), the one sent from the draft when Slack kept its id, else your next one there, so the voice an agent writes your drafts in can be checked against yours (the skill's `voice-review.md`). Each comes out as `unchanged`, `edited`, `not_sent`, `pending` (nothing yet, and the three days are not over) or `unknown` (the place could not be read far enough back), with what you sent; `--days` goes up to 90, the history Slack's free plan keeps, and `--json` gives `days` and `drafts` (`saved`, `place`, `channel`, `thread_ts`, `scheduled`, `session`, `draft`, `outcome`, `matched_by`: `id` or `next`, `sent`, `sent_at`, `permalink`). It only reads Slack.
 
 ## Watch
 
@@ -140,7 +143,7 @@ ln -s "$PWD/skills/slack" ~/.claude/skills/slack
 
 ## Files
 
-`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, both safe to delete: names and the last view. `$XDG_STATE_HOME/slack/` (default `~/.local/state/slack/`) holds the watch log, and the answer command's next to it. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
+`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, both safe to delete: names and the last view. `$XDG_STATE_HOME/slack/` (default `~/.local/state/slack/`) holds the watch log, the answer command's next to it, and the draft log. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
 
 ## Releasing
 

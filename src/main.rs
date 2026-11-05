@@ -6,6 +6,7 @@ mod auth;
 mod commands;
 mod counts;
 mod directory;
+mod drafts;
 mod emoji;
 mod history;
 mod lastview;
@@ -201,6 +202,15 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
+    /// The drafts `send --draft` and `send --at` saved, each beside the message of yours that followed it there
+    Drafts {
+        /// How many days back; Slack's free plan keeps 90 days of messages
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=90))]
+        days: u64,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Listen for DMs and mentions of you, hand each to a command, log what it would answer; sends nothing
     Watch {
         /// Seconds without a new message from the sender before the exchange is handed over
@@ -281,6 +291,7 @@ fn main() -> ExitCode {
             json,
             no_color,
         }) => commands::show(&target, usize::from(limit), json, no_color),
+        Some(Command::Drafts { days, json }) => commands::drafts(days, json),
         Some(Command::Watch {
             settle,
             timeout,
