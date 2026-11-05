@@ -43,7 +43,7 @@ slack send <permalink> --draft "text"                # a draft in that message's
 slack send '#channel' --thread <ts> --draft "text"   # the same, from a thread_ts in the JSON
 slack send @handle --draft < draft.md                # long text from stdin, line breaks kept
 slack send @handle --at 'thu 09:00' "text"           # posted by Slack then, on the user's clock
-slack send @handle <<'EOF'                          # posted now: only when the user asks to send it as is (rule 2)
+slack send @handle <<'EOF'                           # posted now: only when the user asks to send it as is (rule 2)
 text, kept as is by the quoted EOF
 EOF
 slack react <permalink> white_check_mark             # an emoji on that message
