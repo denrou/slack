@@ -20,8 +20,8 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, history, lastview, mrkdwn, react, read, replies, search, send, status,
-    target, view, when,
+    counts, directory, drafts, history, lastview, mrkdwn, react, read, replies, search, send,
+    status, target, view, when,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -603,6 +603,71 @@ pub fn search(query: &str, limit: usize, json: bool, no_color: bool) -> Result<(
             ))
         );
     }
+    Ok(())
+}
+
+pub fn drafts(days: u64, json: bool) -> Result<()> {
+    let store = Workspaces::load()?;
+    let (team_id, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let me = match &workspace.user_id {
+        Some(id) => id.clone(),
+        None => client.auth_test()?.user_id,
+    };
+    let mut names = Names::load();
+    let pairs = drafts::pairs(&client, &mut names, team_id, &me, &workspace.url, days);
+    names.save();
+    let pairs = pairs?;
+    if json {
+        return print_json(&json!({ "days": days, "drafts": pairs }));
+    }
+    if pairs.is_empty() {
+        println!("No draft saved from here in the last {days} days.");
+        return Ok(());
+    }
+    let count = |outcome| pairs.iter().filter(|p| p.outcome == outcome).count();
+    let now = jiff::Zoned::now();
+    to_stdout(|out| {
+        for pair in &pairs {
+            let outcome = match (pair.outcome, pair.matched_by) {
+                (drafts::Outcome::Unchanged, _) => "sent as written",
+                (drafts::Outcome::Edited, Some(drafts::Match::Id)) => "edited, then sent",
+                (drafts::Outcome::Edited, _) => "sent differently (your next message there)",
+                (drafts::Outcome::NotSent, _) => "nothing sent there",
+                (drafts::Outcome::Unknown, _) => "could not tell",
+            };
+            let saved = view::format_ts(&format!("{}.000000", pair.saved_at), &now);
+            writeln!(out, "{saved}  {}  {outcome}", pair.place)?;
+            writeln!(out, "  draft:")?;
+            for line in pair.draft.lines() {
+                writeln!(out, "    {line}")?;
+            }
+            if let Some(sent) = pair
+                .sent
+                .as_ref()
+                .filter(|_| pair.outcome == drafts::Outcome::Edited)
+            {
+                writeln!(out, "  sent:")?;
+                for line in sent.lines() {
+                    writeln!(out, "    {line}")?;
+                }
+            }
+            if let Some(link) = &pair.permalink {
+                writeln!(out, "  {link}")?;
+            }
+            writeln!(out)?;
+        }
+        Ok(())
+    })?;
+    // Beside the output, as the search's note: a pipe gets the pairs alone.
+    eprintln!(
+        "{} drafts: {} sent as written, {} edited, {} not sent, {} unknown",
+        pairs.len(),
+        count(drafts::Outcome::Unchanged),
+        count(drafts::Outcome::Edited),
+        count(drafts::Outcome::NotSent),
+        count(drafts::Outcome::Unknown)
+    );
     Ok(())
 }
 
