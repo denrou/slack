@@ -16,11 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::{self, Client};
-use crate::history::compare_ts;
+use crate::history::{compare_ts, message_from};
 use crate::mrkdwn;
 use crate::names::Names;
 use crate::style::Style;
-use crate::{par, paths, view};
+use crate::{emoji, par, paths, target, view};
 
 const LOG: &str = "drafts.jsonl";
 /// Deliberate: a draft saved on a Friday evening may be sent on Monday
@@ -123,6 +123,8 @@ pub enum Outcome {
     Edited,
     /// No message of yours there in the window.
     NotSent,
+    /// Nothing of yours there yet, and the window is still open.
+    Pending,
     /// The place could not be read, or not far enough back to tell.
     Unknown,
 }
@@ -165,6 +167,17 @@ pub struct Pair {
     pub permalink: Option<String>,
 }
 
+/// Where a draft's message is looked for, in Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Window {
+    /// The save, or the time Slack is to post it for `send --at`.
+    from: i64,
+    /// The end, now at most.
+    until: i64,
+    /// The end is still to come: nothing there yet is not "not sent".
+    open: bool,
+}
+
 /// A message of yours in the draft's place, after it was saved.
 #[derive(Debug, Clone, PartialEq)]
 struct Mine {
@@ -187,19 +200,19 @@ pub fn pairs(
     let now = Zoned::now().timestamp().as_second();
     let since = now - i64::try_from(days).unwrap_or(i64::MAX / 2) * 24 * 3600;
     let records = load(team, since)?;
-    let windows: Vec<(&Record, i64)> = records
+    let windows: Vec<(&Record, Window)> = records
         .iter()
         .enumerate()
-        .map(|(at, record)| (record, until(&records, at, now)))
+        .map(|(at, record)| (record, window(&records, at, now)))
         .collect();
-    let found = par::map(windows.clone(), |(record, until)| {
-        fetch_mine(client, me, record, until)
+    let found = par::map(windows.clone(), |(record, window)| {
+        fetch_mine(client, me, record, window)
     });
 
     let mut found_pairs = Vec::with_capacity(records.len());
-    for ((record, _), found) in windows.into_iter().zip(found) {
+    for ((record, window), found) in windows.into_iter().zip(found) {
         let (outcome, matched) = match found {
-            Ok((mine, truncated)) => decide(record, &mine, truncated),
+            Ok((mine, cut)) => decide(record, &mine, cut, window.open),
             Err(err @ api::Error::Auth { .. }) => return Err(err.into()),
             Err(err) => {
                 crate::warn::warn(format!("could not read {}: {err}", record.channel));
@@ -252,36 +265,47 @@ pub fn pairs(
                     .as_ref()
                     .and_then(|m| m.ts.split('.').next()?.parse().ok())
                     .map(local),
-                permalink: mine
-                    .as_ref()
-                    .map(|m| permalink(url, &record.channel, &m.ts, record.thread_ts.as_deref())),
+                permalink: mine.as_ref().map(|m| {
+                    target::permalink(url, &record.channel, &m.ts, record.thread_ts.as_deref())
+                }),
             }
         })
         .collect())
 }
 
-/// The end of a draft's window: the next draft saved in the same place,
-/// else three days past the save or the scheduled time, and never past now.
-fn until(records: &[Record], at: usize, now: i64) -> i64 {
+/// A draft's window. It opens at the save, or at the time Slack posts a
+/// scheduled one, so a message written meanwhile is not taken for it. It
+/// closes at the next draft saved in the same place after that, else three
+/// days on, and never past now.
+fn window(records: &[Record], at: usize, now: i64) -> Window {
     let record = &records[at];
+    let from = record.saved.max(record.scheduled.unwrap_or(0));
     let next = records[at + 1..]
         .iter()
-        .find(|other| other.channel == record.channel && other.thread_ts == record.thread_ts)
+        .find(|other| {
+            other.channel == record.channel
+                && other.thread_ts == record.thread_ts
+                && other.saved > from
+        })
         .map(|other| other.saved);
-    let end = record.saved.max(record.scheduled.unwrap_or(0)) + WINDOW;
-    next.unwrap_or(end).min(end).min(now)
+    let end = next.unwrap_or(i64::MAX).min(from + WINDOW);
+    Window {
+        from,
+        until: end.min(now),
+        open: end > now,
+    }
 }
 
 /// Your messages in the draft's place in its window, oldest first, and
-/// whether Slack had more than a page there.
+/// whether the page may miss the first of them.
 fn fetch_mine(
     client: &Client,
     me: &str,
     record: &Record,
-    until: i64,
+    window: Window,
 ) -> Result<(Vec<Mine>, bool), api::Error> {
-    let oldest = format!("{}.000000", record.saved);
-    let latest = format!("{until}.999999");
+    let oldest = format!("{}.000000", window.from);
+    let latest = format!("{}.999999", window.until);
     let mut params = vec![
         ("channel", record.channel.as_str()),
         ("oldest", oldest.as_str()),
@@ -316,55 +340,62 @@ fn parse_mine(
             method: method.to_string(),
             reason: "no `messages` array".to_string(),
         })?;
-    let string = |message: &Value, name: &str| {
-        message
-            .get(name)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    };
     let mut mine: Vec<Mine> = raw
         .iter()
-        .filter(|message| string(message, "user").as_deref() == Some(me))
-        .filter(|message| {
-            string(message, "subtype")
-                .is_none_or(|subtype| subtype == "thread_broadcast" && thread_ts.is_some())
-        })
-        .filter_map(|message| {
-            let ts = string(message, "ts")?;
-            let in_place = match (thread_ts, string(message, "thread_ts")) {
+        .filter_map(|raw| {
+            let message = message_from(raw)?;
+            let yours = message.user.as_deref() == Some(me)
+                && match message.subtype.as_deref() {
+                    None => true,
+                    // A thread reply sent to the channel too is still a reply.
+                    Some("thread_broadcast") => thread_ts.is_some(),
+                    Some(_) => false,
+                };
+            let in_place = match thread_ts {
                 // The thread's replies, not its root.
-                (Some(thread), _) => ts != thread,
+                Some(thread) => message.ts != thread,
                 // The conversation itself, not a reply sent to it as well.
-                (None, Some(thread)) => thread == ts,
-                (None, None) => true,
+                None => !message.is_reply(),
             };
-            in_place.then(|| Mine {
-                text: string(message, "text").unwrap_or_default(),
-                client_msg_id: string(message, "client_msg_id"),
-                ts,
+            (yours && in_place).then(|| Mine {
+                client_msg_id: raw
+                    .get("client_msg_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                ts: message.ts,
+                text: message.text,
             })
         })
         .collect();
     mine.sort_by(|a, b| compare_ts(&a.ts, &b.ts));
-    let has_more = body
-        .get("has_more")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    Ok((mine, has_more))
+    // A history page holds the newest messages, so a cut one misses those
+    // right after the draft; a thread's replies come oldest first, and a
+    // cut there only loses the later ones.
+    let cut = thread_ts.is_none()
+        && body
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    Ok((mine, cut))
 }
 
 /// The message sent from the draft, and how it compares. The draft's own
-/// id wins; otherwise your first message after it, unless Slack had more
-/// than a page there, since the page then misses the messages right after
-/// the draft and the first one in it is not the next one.
-fn decide(record: &Record, mine: &[Mine], truncated: bool) -> (Outcome, Option<(Match, Mine)>) {
+/// id wins; otherwise your first message after it, unless the page was
+/// `cut` before it. Nothing yet in a window still `open` is pending.
+fn decide(
+    record: &Record,
+    mine: &[Mine],
+    cut: bool,
+    open: bool,
+) -> (Outcome, Option<(Match, Mine)>) {
     let by_id = mine
         .iter()
         .find(|m| m.client_msg_id.as_deref() == Some(record.client_msg_id.as_str()));
     let (how, message) = match (by_id, mine.first()) {
         (Some(message), _) => (Match::Id, message),
-        (None, _) if truncated => return (Outcome::Unknown, None),
+        (None, _) if cut => return (Outcome::Unknown, None),
         (None, Some(message)) => (Match::Next, message),
+        (None, None) if open => return (Outcome::Pending, None),
         (None, None) => return (Outcome::NotSent, None),
     };
     let outcome = if same(&record.text, &message.text) {
@@ -376,14 +407,54 @@ fn decide(record: &Record, mine: &[Mine], truncated: bool) -> (Outcome, Option<(
 }
 
 /// Whether two texts read the same once Slack's encoding is undone: its
-/// entities, `<https://…>` around a bare link, the spacing at the ends.
+/// entities, `<https://…>` around a bare link, an emoji as `:name:` or as
+/// its character, the spacing at the ends.
 fn same(draft: &str, sent: &str) -> bool {
     let read = |text: &str| {
-        mrkdwn::render(text, &|_| None, &|_| None, &Style::plain())
+        glyphs(&mrkdwn::render(text, &|_| None, &|_| None, &Style::plain()))
             .trim()
             .to_string()
     };
     read(draft) == read(sent)
+}
+
+/// The `:name:` codes of standard emoji, skin tone included, as their
+/// characters; anything else, a custom emoji or `12:30:00`, as it is.
+fn glyphs(text: &str) -> String {
+    const TONE: &str = "::skin-tone-";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(':') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let mut end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || "_+-'".contains(c)))
+            .unwrap_or(after.len());
+        if end > 0 && after[end..].starts_with(TONE) {
+            let tone = &after[end + TONE.len()..];
+            let digits = tone
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(tone.len());
+            if digits > 0 {
+                end += TONE.len() + digits;
+            }
+        }
+        let glyph = (end > 0 && after[end..].starts_with(':'))
+            .then(|| emoji::glyph(&after[..end]))
+            .flatten();
+        match glyph {
+            Some(glyph) => {
+                out.push_str(glyph);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push(':');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn plain(text: &str, names: &Names) -> String {
@@ -405,18 +476,6 @@ fn local(seconds: i64) -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| seconds.to_string())
-}
-
-fn permalink(url: &str, channel: &str, ts: &str, thread_ts: Option<&str>) -> String {
-    let base = format!(
-        "{}/archives/{channel}/p{}",
-        url.trim_end_matches('/'),
-        ts.replace('.', "")
-    );
-    match thread_ts {
-        Some(thread) => format!("{base}?thread_ts={thread}&cid={channel}"),
-        None => base,
-    }
 }
 
 #[cfg(test)]
@@ -464,12 +523,38 @@ mod tests {
         ];
         let now = 1_000_000;
         // The thread is another place; the next draft in C1 itself closes it.
-        assert_eq!(until(&records, 0, now), 3_000);
-        assert_eq!(until(&records, 1, now), 2_000 + WINDOW);
-        assert_eq!(until(&records, 3, 10_000), 10_000);
+        let closed = Window {
+            from: 1_000,
+            until: 3_000,
+            open: false,
+        };
+        assert_eq!(window(&records, 0, now), closed);
+        assert_eq!(window(&records, 1, now).until, 2_000 + WINDOW);
+        // Now comes before the end: what is not there yet may still come.
+        let open = Window {
+            from: 4_000,
+            until: 10_000,
+            open: true,
+        };
+        assert_eq!(window(&records, 3, 10_000), open);
+    }
+
+    #[test]
+    fn a_scheduled_draft_is_looked_for_from_its_time() {
         let mut scheduled = draft(1_000, "C1", None);
         scheduled.scheduled = Some(500_000);
-        assert_eq!(until(&[scheduled], 0, i64::MAX), 500_000 + WINDOW);
+        // A draft saved there before Slack posts it does not close its window.
+        let records = vec![
+            scheduled,
+            draft(2_000, "C1", None),
+            draft(600_000, "C1", None),
+        ];
+        let expected = Window {
+            from: 500_000,
+            until: 600_000,
+            open: false,
+        };
+        assert_eq!(window(&records, 0, i64::MAX), expected);
     }
 
     #[test]
@@ -481,23 +566,21 @@ mod tests {
             {"ts": "12.0", "user": "U2", "text": "someone else"},
             {"ts": "11.0", "user": "UME", "text": "first", "client_msg_id": "id-1", "thread_ts": "11.0"},
         ]});
-        let (found, more) = parse_mine(&body, "UME", None, "conversations.history").unwrap();
-        assert!(more);
-        assert_eq!(
-            found,
-            vec![
-                mine("11.0", "first", Some("id-1")),
-                mine("30.0", "third", None)
-            ]
-        );
+        let (found, cut) = parse_mine(&body, "UME", None, "conversations.history").unwrap();
+        assert!(cut);
+        let expected = vec![
+            mine("11.0", "first", Some("id-1")),
+            mine("30.0", "third", None),
+        ];
+        assert_eq!(found, expected);
 
-        let body = json!({"messages": [
+        let body = json!({"has_more": true, "messages": [
             {"ts": "10.0", "user": "UME", "text": "the root", "thread_ts": "10.0"},
             {"ts": "20.0", "user": "UME", "text": "and here", "thread_ts": "10.0", "subtype": "thread_broadcast"},
         ]});
-        let (found, more) =
-            parse_mine(&body, "UME", Some("10.0"), "conversations.replies").unwrap();
-        assert!(!more);
+        // Replies come oldest first: a cut page still starts after the draft.
+        let (found, cut) = parse_mine(&body, "UME", Some("10.0"), "conversations.replies").unwrap();
+        assert!(!cut);
         assert_eq!(found, vec![mine("20.0", "and here", None)]);
         assert!(parse_mine(&json!({}), "UME", None, "conversations.history").is_err());
     }
@@ -509,12 +592,10 @@ mod tests {
             mine("2.0", "something else first", None),
             mine("3.0", "Hello <@U2>, the fix is in", Some("id-1")),
         ];
-        let (outcome, matched) = decide(&record, &found, false);
+        let (outcome, matched) = decide(&record, &found, false, false);
         assert_eq!(outcome, Outcome::Edited);
-        assert_eq!(
-            matched.map(|(how, m)| (how, m.ts)),
-            Some((Match::Id, "3.0".to_string()))
-        );
+        let matched = matched.map(|(how, m)| (how, m.ts));
+        assert_eq!(matched, Some((Match::Id, "3.0".to_string())));
     }
 
     #[test]
@@ -526,24 +607,23 @@ mod tests {
             "Hello <@U2>, the fix is in &amp; <https://x.io>",
             None,
         )];
-        assert_eq!(decide(&record, &found, false).0, Outcome::Unchanged);
+        let (outcome, matched) = decide(&record, &found, false, false);
+        assert_eq!(outcome, Outcome::Unchanged);
+        assert_eq!(matched.map(|(how, _)| how), Some(Match::Next));
         assert_eq!(
-            decide(&record, &found, false).1.map(|(how, _)| how),
-            Some(Match::Next)
+            decide(&record, &found, true, false),
+            (Outcome::Unknown, None)
         );
-        assert_eq!(decide(&record, &found, true), (Outcome::Unknown, None));
-        assert_eq!(decide(&record, &[], false), (Outcome::NotSent, None));
+        assert_eq!(decide(&record, &[], false, false), (Outcome::NotSent, None));
+        assert_eq!(decide(&record, &[], false, true), (Outcome::Pending, None));
     }
 
     #[test]
-    fn a_permalink_into_a_thread_names_it() {
-        assert_eq!(
-            permalink("https://acme.slack.com/", "C1", "20.000100", None),
-            "https://acme.slack.com/archives/C1/p20000100"
-        );
-        assert_eq!(
-            permalink("https://acme.slack.com", "C1", "20.000100", Some("10.0")),
-            "https://acme.slack.com/archives/C1/p20000100?thread_ts=10.0&cid=C1"
-        );
+    fn an_emoji_reads_the_same_as_a_code_or_a_character() {
+        assert!(same("Merci 🙂", "Merci :slightly_smiling_face:"));
+        assert!(same("ok 👍🏻", "ok :+1::skin-tone-2:"));
+        assert!(!same("Merci 🙂", "Merci"));
+        let untouched = "at 12:30:00, :custom-party: https://x.io";
+        assert_eq!(glyphs(untouched), untouched);
     }
 }

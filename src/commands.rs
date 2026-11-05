@@ -243,12 +243,7 @@ pub fn thread(spec: &str, json: bool, no_color: bool) -> Result<()> {
     let reference = if spec.chars().all(|c| c.is_ascii_digit()) {
         spec.to_string()
     } else {
-        format!(
-            "{}/archives/{}/p{}",
-            workspace.url.trim_end_matches('/'),
-            channel,
-            thread_ts.replace('.', "")
-        )
+        target::permalink(&workspace.url, &channel, &thread_ts, None)
     };
     writeln!(
         out,
@@ -634,6 +629,7 @@ pub fn drafts(days: u64, json: bool) -> Result<()> {
                 (drafts::Outcome::Edited, Some(drafts::Match::Id)) => "edited, then sent",
                 (drafts::Outcome::Edited, _) => "sent differently (your next message there)",
                 (drafts::Outcome::NotSent, _) => "nothing sent there",
+                (drafts::Outcome::Pending, _) => "nothing sent there yet",
                 (drafts::Outcome::Unknown, _) => "could not tell",
             };
             let saved = view::format_ts(&format!("{}.000000", pair.saved_at), &now);
@@ -661,11 +657,12 @@ pub fn drafts(days: u64, json: bool) -> Result<()> {
     })?;
     // Beside the output, as the search's note: a pipe gets the pairs alone.
     eprintln!(
-        "{} drafts: {} sent as written, {} edited, {} not sent, {} unknown",
+        "{} drafts: {} sent as written, {} edited, {} not sent, {} pending, {} unknown",
         pairs.len(),
         count(drafts::Outcome::Unchanged),
         count(drafts::Outcome::Edited),
         count(drafts::Outcome::NotSent),
+        count(drafts::Outcome::Pending),
         count(drafts::Outcome::Unknown)
     );
     Ok(())

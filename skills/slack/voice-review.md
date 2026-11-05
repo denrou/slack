@@ -12,6 +12,7 @@ The drafts written from here are written in the user's voice, by the writing-voi
   - `unchanged`: sent as written, the rule held.
   - `edited`: the message carries the draft's id, or `matched_by: next` when it is only the user's next message there, which may answer something else; read it as such.
   - `not_sent`: nothing from the user there within three days. Either the draft was not wanted, or the message went elsewhere; the transcript tells which.
+  - `pending`: nothing yet, and its three days are not over; leave it for the next review.
   - `unknown`: the place could not be read far enough; leave it out.
 - **The corrections.** A pair with a `session` came from that Claude Code session: its transcript, `~/.claude/projects/*/<session>.jsonl`, holds what the user asked to change before the draft was saved ("shorter", "in French", "drop the emoji"). These are the strongest evidence, the user's own words about their voice. Transcripts are kept for `cleanupPeriodDays` (30 days unless set), so a missing one is no error.
 - **The user's own writing.** `slack search 'from:me after:<date>' -n 100`, narrowed with `in:@person` or `in:#channel` for more, to check the rule against messages no draft touched, the language and register used with each person above all.
