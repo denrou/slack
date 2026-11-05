@@ -135,7 +135,7 @@ Security notes, the short version:
 
 ## For an agent
 
-`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`read`, `react`, `status`), that a message is left in Slack's drafts for the user to send rather than sent (a scheduled one excepted), how the numbers and the JSON work. For Claude Code, link it from a clone of the repository and `/slack` becomes a skill:
+`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`read`, `react`, `status`), that a message is left in Slack's drafts for the user to send rather than sent, unless they reread it and ask for it to be sent as is (a scheduled one aside), how the numbers and the JSON work. For Claude Code, link it from a clone of the repository and `/slack` becomes a skill:
 
 ```bash
 ln -s "$PWD/skills/slack" ~/.claude/skills/slack
