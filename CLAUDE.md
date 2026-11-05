@@ -71,7 +71,7 @@ Written down because none of them can be read from the code.
 - **Binary name `slack`**, kept because it is fast to type. Slack's platform CLI (`brew install slack-cli`) also installs a `slack` binary; it is not on this machine.
 - **Public repo, MIT**, like gh-prs.
 
-Kept from slackcli: the browser-session credentials and their capture (`auth/`). Deliberately not ported: app tokens, `parse-curl`, drafts, scheduling, canvases, the custom emoji list, file uploads and listings, saved items, user groups, the update checker, log files, Windows. If one becomes needed, it is a feature, not a port.
+Kept from slackcli: the browser-session credentials and their capture (`auth/`). Deliberately not ported: app tokens, `parse-curl`, drafts and scheduling (built natively later, as `send --draft` and `send --at`), canvases, the custom emoji list, file uploads and listings, saved items, user groups, the update checker, log files, Windows. If one becomes needed, it is a feature, not a port.
 
 ## Backlog
 
