@@ -7,7 +7,8 @@
 //! app schedules one: a draft with `date_scheduled` (`drafts.create`,
 //! undocumented), which the app lists with its scheduled messages. With
 //! `--draft`, the same call without the time leaves it in the app's
-//! drafts, to finish and send from there.
+//! drafts, to finish and send from there. Either way the draft goes to
+//! the draft log (`drafts.rs`), to be set beside what was sent.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
@@ -17,6 +18,7 @@ use jiff::Zoned;
 use serde_json::Value;
 
 use crate::api::Client;
+use crate::drafts;
 use crate::history::is_ts;
 use crate::mention;
 use crate::mrkdwn;
@@ -72,13 +74,26 @@ pub fn run(
             Delivery::At(at) => Some(at.timestamp().as_second()),
             _ => None,
         };
+        let id = client_msg_id()?;
+        let saved = Zoned::now().timestamp().as_second();
         let kept = save_draft(
             client,
             &target.channel,
             thread_ts.as_deref(),
             &text,
             post_at,
+            &id,
         )?;
+        drafts::record(&drafts::Record {
+            saved,
+            team: team_id.to_string(),
+            channel: target.channel.clone(),
+            thread_ts: thread_ts.clone(),
+            text: text.clone(),
+            client_msg_id: id,
+            scheduled: kept,
+            session: drafts::session(),
+        });
         let where_to = landing(client, names, &target.channel, thread_ts.is_some());
         match kept {
             Some(at) => println!(
@@ -133,15 +148,16 @@ fn save_draft(
     thread_ts: Option<&str>,
     text: &str,
     post_at: Option<i64>,
+    id: &str,
 ) -> Result<Option<i64>> {
     let Some(post_at) = post_at else {
-        create_draft(client, channel, thread_ts, text, None)?;
+        create_draft(client, channel, thread_ts, text, None, id)?;
         return Ok(None);
     };
     if post_at <= Zoned::now().timestamp().as_second() {
         bail!("the time of --at passed while the message was read; nothing was scheduled");
     }
-    let body = create_draft(client, channel, thread_ts, text, Some(post_at))?;
+    let body = create_draft(client, channel, thread_ts, text, Some(post_at), id)?;
     body.pointer("/draft/date_scheduled")
         .and_then(Value::as_i64)
         .filter(|&kept| kept > 0)
@@ -161,6 +177,7 @@ fn create_draft(
     thread_ts: Option<&str>,
     text: &str,
     date_scheduled: Option<i64>,
+    client_msg_id: &str,
 ) -> Result<Value> {
     let mut destination = serde_json::json!({ "channel_id": channel });
     if let Some(ts) = thread_ts {
@@ -169,11 +186,10 @@ fn create_draft(
     }
     let blocks = mrkdwn::rich_text(text).to_string();
     let destinations = Value::from(vec![destination]).to_string();
-    let client_msg_id = client_msg_id()?;
     let date_scheduled = date_scheduled.map(|at| at.to_string());
     let mut params = vec![
         ("blocks", blocks.as_str()),
-        ("client_msg_id", client_msg_id.as_str()),
+        ("client_msg_id", client_msg_id),
         ("destinations", destinations.as_str()),
         ("file_ids", "[]"),
         ("is_from_composer", "true"),
