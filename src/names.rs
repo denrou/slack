@@ -26,6 +26,53 @@ pub struct Names {
     dirty: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
+    /// How this run's lookups went, for the one warning `save` gives.
+    #[serde(skip)]
+    lookups: Lookups,
+}
+
+/// The lookups of one run, by id, since a run asks again for an id that
+/// got no answer. One that fails leaves an id in the output, which says
+/// nothing when it is one account and hides an outage when it is most.
+#[derive(Default)]
+struct Lookups {
+    named: usize,
+    failed: BTreeSet<String>,
+    /// The first failure, as the example in the warning.
+    sample: Option<String>,
+}
+
+impl Lookups {
+    fn record(&mut self, id: &str, result: Result<(), &api::Error>) {
+        match result {
+            Ok(()) => {
+                self.named += 1;
+                self.failed.remove(id);
+            }
+            // Deliberate: this is Slack's answer for an account or a
+            // channel out of reach, neither a name nor a failure.
+            Err(api::Error::Slack { code, .. })
+                if code.ends_with("_not_found") || code.ends_with("_not_visible") => {}
+            Err(err) => {
+                self.failed.insert(id.to_string());
+                self.sample.get_or_insert_with(|| err.to_string());
+            }
+        }
+    }
+
+    /// The warning when two ids or more failed and they are most of those
+    /// Slack did not call out of reach. One failure is one account.
+    fn warning(&self) -> Option<String> {
+        let failed = self.failed.len();
+        if failed < 2 || failed <= self.named {
+            return None;
+        }
+        let sample = self.sample.as_deref().unwrap_or_default();
+        Some(format!(
+            "{failed} of {} name lookups failed, so ids are shown in place of names (first: {sample})",
+            failed + self.named
+        ))
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -73,8 +120,12 @@ impl Names {
         names
     }
 
-    /// Write the cache back if anything was learnt. Best effort.
+    /// Write the cache back if anything was learnt. Best effort. The end
+    /// of the run, so also where failed lookups are reported, once.
     pub fn save(&self) {
+        if let Some(warning) = self.lookups.warning() {
+            crate::warn::warn(warning);
+        }
         let Some(path) = self.path.as_ref().filter(|_| self.dirty) else {
             return;
         };
@@ -120,9 +171,7 @@ impl Names {
                 .into_iter()
                 .map(|(id, channel)| (id.to_string(), channel))
                 .collect(),
-            refused: BTreeSet::new(),
-            dirty: false,
-            path: None,
+            ..Names::default()
         }
     }
 
@@ -178,18 +227,20 @@ impl Names {
             (id, result)
         });
         for (id, result) in fetched {
-            match result {
-                Ok(body) => {
-                    if let Some(user) = user_from(&body) {
-                        self.users.insert(id, user);
-                        self.dirty = true;
-                    }
+            match result.and_then(|body| user_from(&body).ok_or_else(|| no_entry("users.info"))) {
+                Ok(user) => {
+                    self.lookups.record(&id, Ok(()));
+                    self.users.insert(id, user);
+                    self.dirty = true;
                 }
                 Err(err @ api::Error::Auth { .. }) => return Err(err),
-                Err(api::Error::Slack { .. }) => {
-                    self.refused.insert(id);
+                Err(err) => {
+                    self.lookups.record(&id, Err(&err));
+                    // A network error is asked again next time.
+                    if matches!(err, api::Error::Slack { .. }) {
+                        self.refused.insert(id);
+                    }
                 }
-                Err(_) => {} // a network error: asked again next time
             }
         }
         Ok(())
@@ -206,18 +257,22 @@ impl Names {
             (id, result)
         });
         for (id, result) in fetched {
-            match result {
-                Ok(body) => {
-                    if let Some(channel) = channel_from(&body) {
-                        self.channels.insert(id, channel);
-                        self.dirty = true;
-                    }
+            match result
+                .and_then(|body| channel_from(&body).ok_or_else(|| no_entry("conversations.info")))
+            {
+                Ok(channel) => {
+                    self.lookups.record(&id, Ok(()));
+                    self.channels.insert(id, channel);
+                    self.dirty = true;
                 }
                 Err(err @ api::Error::Auth { .. }) => return Err(err),
-                Err(api::Error::Slack { .. }) => {
-                    self.refused.insert(id);
+                Err(err) => {
+                    self.lookups.record(&id, Err(&err));
+                    // A network error is asked again next time.
+                    if matches!(err, api::Error::Slack { .. }) {
+                        self.refused.insert(id);
+                    }
                 }
-                Err(_) => {}
             }
         }
         Ok(())
@@ -373,6 +428,14 @@ impl Names {
     }
 }
 
+/// An `ok` answer without the entry asked for.
+fn no_entry(method: &str) -> api::Error {
+    api::Error::Shape {
+        method: method.to_string(),
+        reason: "no usable entry in the answer".to_string(),
+    }
+}
+
 fn user_from(body: &Value) -> Option<User> {
     user_from_raw(body.get("user")?)
 }
@@ -465,6 +528,80 @@ mod tests {
         let user = user_from(&json!({"user": {"name": "bot", "is_bot": true}})).unwrap();
         assert!(user.is_bot && user.display == "bot");
         assert!(user_from(&json!({"user": {}})).is_none());
+    }
+
+    fn slack(code: &str) -> api::Error {
+        api::Error::Slack {
+            method: "users.info".to_string(),
+            code: code.to_string(),
+        }
+    }
+
+    fn lookups(results: &[(&str, Result<(), api::Error>)]) -> Lookups {
+        let mut lookups = Lookups::default();
+        for (id, result) in results {
+            lookups.record(id, result.as_ref().copied());
+        }
+        lookups
+    }
+
+    #[test]
+    fn one_account_slack_does_not_name_is_silent() {
+        assert_eq!(lookups(&[]).warning(), None);
+        for lone in [
+            slack("user_not_found"),
+            slack("some_new_code"),
+            no_entry("users.info"),
+        ] {
+            assert_eq!(lookups(&[("U1", Err(lone))]).warning(), None);
+        }
+        // Out of reach is an answer, however many there are.
+        let unreachable = [
+            ("U1", Err(slack("user_not_found"))),
+            ("U2", Err(slack("user_not_visible"))),
+            ("C1", Err(slack("channel_not_found"))),
+        ];
+        assert_eq!(lookups(&unreachable).warning(), None);
+        // Half is not most.
+        let half = [
+            ("U1", Ok(())),
+            ("U2", Err(slack("fatal_error"))),
+            ("U3", Ok(())),
+            ("U4", Err(slack("fatal_error"))),
+        ];
+        assert_eq!(lookups(&half).warning(), None);
+        // The same id asked by each pass of a run is one failure.
+        let again = [
+            ("U1", Err(no_entry("users.info"))),
+            ("U1", Err(no_entry("users.info"))),
+        ];
+        assert_eq!(lookups(&again).warning(), None);
+        // And one that got its name on a later pass is none.
+        let recovered = [
+            ("U1", Err(slack("fatal_error"))),
+            ("U2", Err(slack("fatal_error"))),
+            ("U1", Ok(())),
+            ("U2", Ok(())),
+        ];
+        assert_eq!(lookups(&recovered).warning(), None);
+    }
+
+    #[test]
+    fn lookups_failing_wholesale_warn_once_with_the_count_and_an_example() {
+        let wholesale = [
+            ("U1", Err(slack("unknown_method"))),
+            ("U2", Ok(())),
+            ("U3", Err(no_entry("users.info"))),
+            ("U1", Err(slack("unknown_method"))),
+            ("C1", Err(slack("channel_not_found"))),
+        ];
+        assert_eq!(
+            lookups(&wholesale).warning().as_deref(),
+            Some(
+                "2 of 3 name lookups failed, so ids are shown in place of names \
+                 (first: Slack answered users.info with unknown_method)"
+            )
+        );
     }
 
     #[test]

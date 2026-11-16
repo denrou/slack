@@ -56,6 +56,31 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     create_private(path)?.write_all(contents)
 }
 
+/// Replace `path` with `contents`, owner-readable from the first byte:
+/// written beside it, flushed to disk, then renamed over it, so a crash or
+/// a power cut leaves the old file or the new one, never half of one.
+pub fn replace_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // A link is followed, as a plain write would: the rename must not turn
+    // it into a file of its own.
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "the path has no file name"))?
+        .to_os_string();
+    // The process id keeps two runs from writing the same temporary file.
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(name);
+    create_private(&tmp)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&tmp, &path))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
+}
+
 /// Create or truncate `path` for writing, owner-readable from the first
 /// byte, as `write_private` does for contents written in one go.
 pub fn create_private(path: &Path) -> io::Result<fs::File> {

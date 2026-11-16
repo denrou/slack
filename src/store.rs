@@ -71,10 +71,7 @@ impl Workspaces {
         fs::create_dir_all(dir)
             .and_then(|()| paths::restrict(dir, 0o700))
             .with_context(|| format!("could not prepare {}", dir.display()))?;
-        // Write then rename, so a crash never leaves a half-written store.
-        let tmp = path.with_extension("json.tmp");
-        paths::write_private(&tmp, &serde_json::to_vec_pretty(self)?)
-            .and_then(|()| fs::rename(&tmp, &path))
+        paths::replace_private(&path, &serde_json::to_vec_pretty(self)?)
             .with_context(|| format!("could not write {}", path.display()))?;
         Ok(())
     }
