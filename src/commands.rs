@@ -381,8 +381,6 @@ pub fn people(filter: &str, json: bool) -> Result<()> {
     })
 }
 
-/// The most people `slack who` describes: each costs two calls.
-const WHO_MAX: usize = 50;
 /// The most members of a channel read for it, bots and you among them.
 const WHO_MEMBERS: usize = 100;
 /// The people of the DMs visited last that a bare `slack who` describes.
@@ -519,24 +517,14 @@ fn who_people(
                 anyhow!("#{name} has more than {WHO_MEMBERS} members; name the people instead: slack who @jane @bob")
             })?;
             names.resolve_users(client, members.clone())?;
-            users.extend(members.into_iter().filter(|user| {
-                Some(user.as_str()) != me
-                    && user != directory::SLACKBOT
-                    && !names.user(user).is_some_and(|u| u.is_bot)
+            users.extend(presence::members(members, me, |user| {
+                names.user(user).is_some_and(|u| u.is_bot)
             }));
         } else {
             bail!("`{target}` is not an @person or a #channel");
         }
     }
-    let mut seen = HashSet::new();
-    users.retain(|user| seen.insert(user.clone()));
-    if users.len() > WHO_MAX {
-        bail!(
-            "that is {} people, bots and you left out; `slack who` describes {WHO_MAX} at most",
-            users.len()
-        );
-    }
-    Ok(users)
+    presence::asked(users)
 }
 
 pub fn search(query: &str, limit: usize, json: bool, no_color: bool) -> Result<()> {
