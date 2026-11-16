@@ -101,22 +101,17 @@ pub fn record(record: &Record) {
 /// Rewrites the log without the drafts too old at `now`, and says how many
 /// went. With none to drop the file is only read, so a save stays an append.
 fn prune(path: &Path, now: i64) -> Result<usize> {
-    let log = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let log = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let (lines, dropped) = kept(&log, now);
     if dropped == 0 {
         return Ok(0);
     }
-    let mut contents = lines.join("\n");
-    if !contents.is_empty() {
-        contents.push('\n');
+    let mut contents = Vec::with_capacity(log.len());
+    for line in lines {
+        contents.extend_from_slice(line);
+        contents.push(b'\n');
     }
-    // Write then rename, so a crash never leaves a half-written log.
-    let tmp = path.with_extension("jsonl.tmp");
-    paths::write_private(&tmp, contents.as_bytes())
-        .and_then(|()| fs::rename(&tmp, path))
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&tmp);
-        })
+    paths::replace_private(path, &contents)
         .with_context(|| format!("rewriting {}", path.display()))?;
     Ok(dropped)
 }
@@ -126,15 +121,16 @@ fn prune(path: &Path, now: i64) -> Result<usize> {
 /// `load`. Deliberate: a line that does not read is kept. Its age is
 /// unknown, it may be a record written by a later version, and `slack
 /// drafts` names it with its line number at each run, so it is neither lost
-/// nor kept without a word.
-fn kept(log: &str, now: i64) -> (Vec<&str>, usize) {
+/// nor kept without a word. Bytes rather than text, so that a line cut in
+/// the middle of a character is such a line, not a log that cannot be read.
+fn kept(log: &[u8], now: i64) -> (Vec<&[u8]>, usize) {
     let since = now - KEPT;
     let mut dropped = 0;
     let lines = log
-        .lines()
-        .filter(|line| !line.trim().is_empty())
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.trim_ascii().is_empty())
         .filter(|line| {
-            let old = serde_json::from_str::<Record>(line).is_ok_and(|draft| draft.saved < since);
+            let old = serde_json::from_slice::<Record>(line).is_ok_and(|draft| draft.saved < since);
             dropped += usize::from(old);
             !old
         })
@@ -578,24 +574,33 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000;
 
+    fn keep(log: &str) -> (Vec<&str>, usize) {
+        let (lines, dropped) = kept(log.as_bytes(), NOW);
+        let lines = lines
+            .into_iter()
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect();
+        (lines, dropped)
+    }
+
     #[test]
     fn a_log_with_nothing_old_keeps_every_line() {
         let log = format!("{}\n{}\n", line(NOW - 3600), line(NOW));
-        let (lines, dropped) = kept(&log, NOW);
+        let (lines, dropped) = keep(&log);
         assert_eq!(dropped, 0);
         assert_eq!(lines.join("\n") + "\n", log);
-        assert_eq!(kept("", NOW), (Vec::new(), 0));
+        assert_eq!(keep(""), (Vec::new(), 0));
         // Blank lines alone are no reason to rewrite.
-        assert_eq!(kept("\n  \n", NOW), (Vec::new(), 0));
+        assert_eq!(keep("\n  \n"), (Vec::new(), 0));
     }
 
     #[test]
     fn the_drafts_past_the_days_kept_are_dropped() {
         let (old, recent) = (line(NOW - KEPT - 3600), line(NOW - 3600));
         let log = format!("{old}\n{recent}\n");
-        assert_eq!(kept(&log, NOW), (vec![recent.as_str()], 1));
+        assert_eq!(keep(&log), (vec![recent.as_str()], 1));
         let log = format!("{old}\n{old}\n");
-        assert_eq!(kept(&log, NOW), (Vec::new(), 2));
+        assert_eq!(keep(&log), (Vec::new(), 2));
     }
 
     #[test]
@@ -603,15 +608,18 @@ mod tests {
         // `load` reads `saved >= now - days`: the last second read is kept.
         let (edge, past) = (line(NOW - KEPT), line(NOW - KEPT - 1));
         let log = format!("{past}\n{edge}\n");
-        assert_eq!(kept(&log, NOW), (vec![edge.as_str()], 1));
+        assert_eq!(keep(&log), (vec![edge.as_str()], 1));
     }
 
     #[test]
     fn a_line_that_does_not_read_is_kept() {
         let old = line(NOW - KEPT - 3600);
         let log = format!("not json\n{old}\n{{\"saved\": 1}}\n");
-        assert_eq!(kept(&log, NOW), (vec!["not json", "{\"saved\": 1}"], 1));
-        assert_eq!(kept("not json\n", NOW), (vec!["not json"], 0));
+        assert_eq!(keep(&log), (vec!["not json", "{\"saved\": 1}"], 1));
+        assert_eq!(keep("not json\n"), (vec!["not json"], 0));
+        // A line cut inside a character, the next one appended to it.
+        let torn = [b"{\"text\": \"caf\xc3".as_slice(), old.as_bytes()].concat();
+        assert_eq!(kept(&torn, NOW), (vec![torn.as_slice()], 0));
     }
 
     #[test]
@@ -639,7 +647,8 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        assert!(!path.with_extension("jsonl.tmp").exists());
+        // The temporary file went with the rename.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
 
         fs::write(&path, format!("{}\n", line(1))).unwrap();
         assert_eq!(prune(&path, NOW).unwrap(), 1);
