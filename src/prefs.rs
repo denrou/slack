@@ -88,9 +88,9 @@ pub fn parse(body: &Value) -> Prefs {
 
 enum Nested {
     Parsed(Value),
-    /// Not there, null or empty: nothing set, nothing to say.
+    /// Not there, null or blank: nothing set, nothing to say.
     Absent,
-    /// There, and not a string holding JSON.
+    /// There, and not a string holding a JSON object.
     Unreadable,
 }
 
@@ -98,10 +98,12 @@ enum Nested {
 fn nested(body: &Value, name: &str) -> Nested {
     match body.get("prefs").and_then(|prefs| prefs.get(name)) {
         None | Some(Value::Null) => Nested::Absent,
-        Some(Value::String(raw)) if raw.is_empty() => Nested::Absent,
-        Some(Value::String(raw)) => {
-            serde_json::from_str(raw).map_or(Nested::Unreadable, Nested::Parsed)
-        }
+        Some(Value::String(raw)) if raw.trim().is_empty() => Nested::Absent,
+        Some(Value::String(raw)) => match serde_json::from_str(raw) {
+            Ok(Value::Null) => Nested::Absent,
+            Ok(parsed @ Value::Object(_)) => Nested::Parsed(parsed),
+            _ => Nested::Unreadable,
+        },
         Some(_) => Nested::Unreadable,
     }
 }
@@ -190,11 +192,14 @@ mod tests {
             json!({"ok": true}),
             json!({"prefs": {}}),
             json!({"prefs": {"all_notifications_prefs": null, "recents": ""}}),
+            json!({"prefs": {"all_notifications_prefs": "null", "recents": " \n"}}),
             json!({"prefs": {"all_notifications_prefs": "{}", "recents": "{}"}}),
         ] {
             assert!(parse(&absent).unreadable.is_empty(), "{absent}");
         }
         let body = json!({"prefs": {"all_notifications_prefs": "not json", "recents": "{}"}});
+        assert_eq!(parse(&body).unreadable, ["all_notifications_prefs"]);
+        let body = json!({"prefs": {"all_notifications_prefs": "[]"}});
         assert_eq!(parse(&body).unreadable, ["all_notifications_prefs"]);
         // No longer a string: a change of Slack's, not an absence.
         let body = json!({"prefs": {
