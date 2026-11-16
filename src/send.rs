@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use jiff::Zoned;
 use serde_json::Value;
 
-use crate::api::Client;
+use crate::api::{self, Client};
 use crate::drafts;
 use crate::history::is_ts;
 use crate::mention;
@@ -25,6 +25,7 @@ use crate::mrkdwn;
 use crate::names::Names;
 use crate::presence;
 use crate::target::{self, parse_permalink};
+use crate::upload::{self, Uploaded};
 
 /// What `send` does with the message.
 pub enum Delivery {
@@ -36,16 +37,25 @@ pub enum Delivery {
     Draft,
 }
 
-pub fn run(
-    client: &Client,
-    names: &mut Names,
-    team_id: &str,
-    target_spec: &str,
-    text: Option<&str>,
-    thread: Option<&str>,
-    delivery: &Delivery,
-) -> Result<()> {
-    let target = target::resolve(client, names, team_id, target_spec)?;
+/// What was asked on the command line.
+pub struct Request<'a> {
+    pub target: &'a str,
+    /// Read from stdin when None.
+    pub text: Option<&'a str>,
+    pub thread: Option<&'a str>,
+    pub delivery: Delivery,
+    pub files: &'a [upload::Local],
+}
+
+pub fn run(client: &Client, names: &mut Names, team_id: &str, request: &Request) -> Result<()> {
+    let Request {
+        text,
+        thread,
+        ref delivery,
+        files,
+        ..
+    } = *request;
+    let target = target::resolve(client, names, team_id, request.target)?;
     let thread_ts = match thread {
         Some(thread) => Some(thread_ts_from(thread)?),
         None => target.thread_ts,
@@ -68,6 +78,7 @@ pub fn run(
         bail!("nothing to send: the message is empty");
     }
     let text = mention::link(text, names);
+    let with_files = upload::with_files(files.len());
 
     if !matches!(delivery, Delivery::Now) {
         let post_at = match delivery {
@@ -75,6 +86,16 @@ pub fn run(
             _ => None,
         };
         let id = client_msg_id()?;
+        still_ahead(post_at)?;
+        let uploaded = upload::send(client, files)?;
+        if !uploaded.is_empty() {
+            // Deliberate: once more before the files are kept, since an
+            // upload can outlast a short `--at`, and a file kept for a
+            // draft that is then refused would stay in Slack.
+            still_ahead(post_at)?;
+            upload::complete(client, &uploaded, None)
+                .context("the files went up but Slack did not keep them; nothing was saved")?;
+        }
         let saved = Zoned::now().timestamp().as_second();
         let kept = save_draft(
             client,
@@ -83,6 +104,7 @@ pub fn run(
             &text,
             post_at,
             &id,
+            &uploaded,
         )?;
         drafts::record(&drafts::Record {
             saved,
@@ -97,10 +119,39 @@ pub fn run(
         let where_to = landing(client, names, &target.channel, thread_ts.is_some());
         match kept {
             Some(at) => println!(
-                "Scheduled for {} in {where_to}",
+                "Scheduled for {} in {where_to}{with_files}",
                 presence::clock(at, &Zoned::now())
             ),
-            None => println!("Draft saved in {where_to}, to send from the Slack app"),
+            None => println!("Draft saved in {where_to}{with_files}, to send from the Slack app"),
+        }
+        return Ok(());
+    }
+    if !files.is_empty() {
+        // One call shares the files with the text as their message, so
+        // `chat.postMessage` has no part in it.
+        let uploaded = upload::send(client, files)?;
+        let share = upload::Share {
+            channel: &target.channel,
+            thread_ts: thread_ts.as_deref(),
+            text: &text,
+        };
+        // A refusal from Slack means nothing was posted. Any other failure
+        // may have lost the answer only, and a second run a second post.
+        let shared = upload::complete(client, &uploaded, Some(&share)).map_err(|err| {
+            let refused = matches!(
+                err.downcast_ref::<api::Error>(),
+                Some(api::Error::Slack { .. } | api::Error::Auth { .. })
+            );
+            err.context(if refused {
+                "the files went up but Slack refused the message; nothing was posted"
+            } else {
+                "the files went up but Slack's answer to the message did not come: it may be posted all the same, so look in Slack before sending again"
+            })
+        })?;
+        let where_to = landing(client, names, &target.channel, thread_ts.is_some());
+        println!("Sent to {where_to}{with_files}");
+        if let Some(ts) = upload::shared_ts(&shared, &target.channel) {
+            print_permalink(client, &target.channel, &ts);
         }
         return Ok(());
     }
@@ -123,7 +174,12 @@ pub fn run(
 
     let where_to = landing(client, names, channel, thread_ts.is_some());
     println!("Sent to {where_to}");
-    // Best effort: the message is posted either way.
+    print_permalink(client, channel, ts);
+    Ok(())
+}
+
+/// Best effort: the message is posted either way.
+fn print_permalink(client: &Client, channel: &str, ts: &str) {
     if let Some(permalink) = client
         .call(
             "chat.getPermalink",
@@ -134,14 +190,22 @@ pub fn run(
     {
         println!("{permalink}");
     }
+}
+
+/// The time of `--at` is checked again once the message is read, since
+/// `--at 1m` may have passed while it was typed on stdin or while its
+/// files went up.
+fn still_ahead(post_at: Option<i64>) -> Result<()> {
+    if post_at.is_some_and(|at| at <= Zoned::now().timestamp().as_second()) {
+        bail!("the time of --at passed while the message was prepared; nothing was scheduled");
+    }
     Ok(())
 }
 
 /// Leaves the message in the Slack app's drafts, for Slack to post at
-/// `post_at` when there is one, and returns the time Slack kept. The time
-/// is checked again here, since `--at 1m` may have passed while the
-/// message was typed on stdin. A draft kept without the time asked is an
-/// error: it would sit in the drafts and never go out.
+/// `post_at` when there is one, and returns the time Slack kept. A draft
+/// kept without the time asked is an error: it would sit in the drafts
+/// and never go out.
 fn save_draft(
     client: &Client,
     channel: &str,
@@ -149,22 +213,26 @@ fn save_draft(
     text: &str,
     post_at: Option<i64>,
     id: &str,
+    files: &[Uploaded],
 ) -> Result<Option<i64>> {
-    let Some(post_at) = post_at else {
-        create_draft(client, channel, thread_ts, text, None, id)?;
+    let body = create_draft(client, channel, thread_ts, text, post_at, id, files);
+    let body = if files.is_empty() {
+        body?
+    } else {
+        body.context(
+            "the draft was not saved; what was uploaded for it stays in your Slack files, shared with nobody",
+        )?
+    };
+    let Some(_) = post_at else {
         return Ok(None);
     };
-    if post_at <= Zoned::now().timestamp().as_second() {
-        bail!("the time of --at passed while the message was read; nothing was scheduled");
-    }
-    let body = create_draft(client, channel, thread_ts, text, Some(post_at), id)?;
     body.pointer("/draft/date_scheduled")
         .and_then(Value::as_i64)
         .filter(|&kept| kept > 0)
         .map(Some)
         .ok_or_else(|| {
             anyhow!(
-                "Slack kept the message as a draft without its time: it will not go out; delete it from the Slack app's drafts"
+                "Slack kept the message as a draft without its time: it will not go out; send it or delete it from the Slack app's drafts, where its files are too if it had any"
             )
         })
 }
@@ -178,26 +246,47 @@ fn create_draft(
     text: &str,
     date_scheduled: Option<i64>,
     client_msg_id: &str,
+    files: &[Uploaded],
 ) -> Result<Value> {
+    let params = draft_params(
+        channel,
+        thread_ts,
+        text,
+        date_scheduled,
+        client_msg_id,
+        files,
+    );
+    let params: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    Ok(client.call("drafts.create", &params)?)
+}
+
+fn draft_params(
+    channel: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+    date_scheduled: Option<i64>,
+    client_msg_id: &str,
+    files: &[Uploaded],
+) -> Vec<(&'static str, String)> {
     let mut destination = serde_json::json!({ "channel_id": channel });
     if let Some(ts) = thread_ts {
         destination["thread_ts"] = ts.into();
         destination["broadcast"] = false.into();
     }
-    let blocks = mrkdwn::rich_text(text).to_string();
-    let destinations = Value::from(vec![destination]).to_string();
-    let date_scheduled = date_scheduled.map(|at| at.to_string());
     let mut params = vec![
-        ("blocks", blocks.as_str()),
-        ("client_msg_id", client_msg_id),
-        ("destinations", destinations.as_str()),
-        ("file_ids", "[]"),
-        ("is_from_composer", "true"),
+        ("blocks", mrkdwn::rich_text(text).to_string()),
+        ("client_msg_id", client_msg_id.to_string()),
+        ("destinations", Value::from(vec![destination]).to_string()),
+        ("file_ids", upload::ids_param(files)),
+        ("is_from_composer", "true".to_string()),
     ];
-    if let Some(at) = &date_scheduled {
-        params.push(("date_scheduled", at));
+    if let Some(at) = date_scheduled {
+        params.push(("date_scheduled", at.to_string()));
     }
-    Ok(client.call("drafts.create", &params)?)
+    params
 }
 
 /// A random UUID, the id the Slack app gives each draft.
@@ -270,6 +359,42 @@ mod tests {
             "1760880000.000100"
         );
         assert!(thread_ts_from("yesterday").is_err());
+    }
+
+    #[test]
+    fn a_draft_carries_its_files_and_its_time() {
+        let param = |params: &[(&'static str, String)], name: &str| {
+            params
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let bare = draft_params("D0A1", None, "hi", None, "id-1", &[]);
+        assert_eq!(param(&bare, "file_ids").as_deref(), Some("[]"));
+        assert_eq!(
+            param(&bare, "destinations").as_deref(),
+            Some(r#"[{"channel_id":"D0A1"}]"#)
+        );
+        assert_eq!(param(&bare, "date_scheduled"), None);
+
+        let files = [upload::uploaded("F1", "bundle.json")];
+        let full = draft_params(
+            "C0A1",
+            Some("1760880000.000100"),
+            "hi",
+            Some(1_762_000_000),
+            "id-2",
+            &files,
+        );
+        assert_eq!(param(&full, "file_ids").as_deref(), Some(r#"["F1"]"#));
+        assert_eq!(
+            param(&full, "destinations").as_deref(),
+            Some(r#"[{"broadcast":false,"channel_id":"C0A1","thread_ts":"1760880000.000100"}]"#)
+        );
+        assert_eq!(
+            param(&full, "date_scheduled").as_deref(),
+            Some("1762000000")
+        );
     }
 
     #[test]

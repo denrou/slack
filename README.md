@@ -55,6 +55,7 @@ slack send <permalink> "answering here"             # ...or a thread
 slack send @jane < note.md                          # text from stdin
 slack send @jane --at 'thu 09:00' "morning!"        # posted by Slack then, Mac asleep or not
 slack send @jane --draft "to finish later"          # left in the Slack app's drafts
+slack send @jane --draft --file report.json "here"  # ...with a file attached, as for a send or --at
 slack drafts                                        # the drafts of the last 30 days, each beside what you sent
 slack react <permalink> +1                          # react to a message
 slack react <permalink> +1 --remove                 # ...or take your reaction back
@@ -89,6 +90,8 @@ To find the name, `slack channels` lists the channels and group messages you are
 ## Sending
 
 A target is `#channel`, `@person` (handle or display name), a conversation id, or a Slack permalink; a permalink means "answer in that message's thread", and `--thread <ts|permalink>` does the same for a channel target. The text is the argument, or stdin when there is none, and is sent as Slack markup (`*bold*`, `<@U123>`). The command prints where the message landed and its permalink. Quote `#channel` in zsh, or the shell reads it as a comment.
+
+`--file <path>` attaches a file to the message, and is repeated for several: each is uploaded first, then goes with the message, sent now, left as a draft (`--draft`) or scheduled (`--at`). A path that is missing, a folder, an empty file or one over 1 GB fails the run before anything is sent. The line printed says how many files went (`Sent to @jane with 1 file`); for a message sent now with files, the permalink is printed only when Slack's answer already has it. The message itself is still needed: `--file` adds to it.
 
 `slack react <message> <emoji>` puts an emoji on a message, and `--remove` takes yours back. The message is a permalink, a thread number (its first message), or a conversation with `--ts <ts>`; the emoji is its Slack name, with or without the colons (`+1`, `:white_check_mark:`, a custom one), or the character itself. Reacting never marks anything as read.
 

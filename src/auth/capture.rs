@@ -277,6 +277,13 @@ pub fn is_slack_socket_url(candidate: &str) -> bool {
         && is_slack_workspace_url(&format!("https://{}", &candidate[6..]))
 }
 
+/// The gate for the URL `files.getUploadURLExternal` names for a file's
+/// bytes: `https` on a Slack host. Not the workspace gate, since nothing
+/// of the session goes with the bytes; this one keeps the file at Slack.
+pub fn is_slack_upload_url(candidate: &str) -> bool {
+    split_https(candidate).is_some_and(|(host, _)| is_slack_host(&host))
+}
+
 /// The workspace origin of a Slack API URL, or None when it is not one.
 pub fn origin_from_api_url(url: &str) -> Option<String> {
     let (host, path) = split_https(url)?;
@@ -570,6 +577,18 @@ mod tests {
         assert!(!is_slack_socket_url("wss://app.slack.com/websocket"));
         assert!(!is_slack_socket_url("wss://slack.com.evil.net/websocket"));
         assert!(!is_slack_socket_url("wss://"));
+    }
+
+    #[test]
+    fn only_https_slack_hosts_take_a_file() {
+        assert!(is_slack_upload_url(
+            "https://files.slack.com/upload/v1/CwABAAAAXAoAAVnX"
+        ));
+        assert!(!is_slack_upload_url("http://files.slack.com/upload/v1/x"));
+        assert!(!is_slack_upload_url("https://files.slack.com.evil.net/x"));
+        assert!(!is_slack_upload_url("https://files.slack.com:8443/x"));
+        assert!(!is_slack_upload_url("https://user@files.slack.com/x"));
+        assert!(!is_slack_upload_url(""));
     }
 
     #[test]

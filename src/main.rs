@@ -28,11 +28,13 @@ mod store;
 mod style;
 mod target;
 mod threads;
+mod upload;
 mod view;
 mod warn;
 mod watch;
 mod when;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -78,6 +80,9 @@ enum Command {
         /// Leave it in the Slack app's drafts, to finish and send from there
         #[arg(long, conflicts_with = "at")]
         draft: bool,
+        /// Attach this file to the message; repeat for several
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<PathBuf>,
     },
     /// Put an emoji on a message, or take yours back
     React {
@@ -237,12 +242,14 @@ fn main() -> ExitCode {
             thread,
             at,
             draft,
+            files,
         }) => commands::send(
             &target,
             text.as_deref(),
             thread.as_deref(),
             at.as_deref(),
             draft,
+            &files,
         ),
         Some(Command::React {
             message,
@@ -342,6 +349,20 @@ mod tests {
         ));
         let cli = Cli::parse_from(["slack", "watch"]);
         assert!(matches!(cli.command, Some(Command::Watch { command, .. }) if command.is_empty()));
+    }
+
+    #[test]
+    fn send_takes_several_files() {
+        let cli = Cli::parse_from([
+            "slack", "send", "@jane", "hi", "--draft", "--file", "a.json", "--file", "b.png",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Send { files, draft: true, .. })
+                if files == [PathBuf::from("a.json"), PathBuf::from("b.png")]
+        ));
+        let cli = Cli::parse_from(["slack", "send", "@jane", "hi"]);
+        assert!(matches!(cli.command, Some(Command::Send { files, .. }) if files.is_empty()));
     }
 
     #[test]
