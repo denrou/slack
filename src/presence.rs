@@ -5,15 +5,19 @@
 //! paused (`dnd.teamInfo`, one call for everyone). Probed live on
 //! 2026-10-23.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
+use anyhow::bail;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::api::{self, Client};
-use crate::{emoji, par};
+use crate::{directory, emoji, par};
+
+/// The most people `slack who` describes: each costs two calls.
+pub const MAX: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -263,6 +267,32 @@ fn city(tz: &str) -> String {
     tz.rsplit('/').next().unwrap_or(tz).replace('_', " ")
 }
 
+/// The members of a channel `slack who` describes: you, Slackbot and the
+/// bots are left out, since none of them is someone to write to.
+pub fn members(
+    members: Vec<String>,
+    me: Option<&str>,
+    is_bot: impl Fn(&str) -> bool,
+) -> impl Iterator<Item = String> {
+    members.into_iter().filter(move |user| {
+        Some(user.as_str()) != me && user != directory::SLACKBOT && !is_bot(user)
+    })
+}
+
+/// The people asked about, each once, in the order first named; refused
+/// past `MAX`.
+pub fn asked(mut users: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let mut seen = HashSet::new();
+    users.retain(|user| seen.insert(user.clone()));
+    if users.len() > MAX {
+        bail!(
+            "that is {} people, bots and you left out; `slack who` describes {MAX} at most",
+            users.len()
+        );
+    }
+    Ok(users)
+}
+
 /// Everything known of these people now: profile, paused notifications
 /// and presence, read side by side. Any failed read fails it all.
 pub fn people(client: &Client, users: &[String]) -> Result<BTreeMap<String, Person>, api::Error> {
@@ -410,6 +440,50 @@ mod tests {
             text: text.to_string(),
             expires,
         }
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    fn numbered(count: usize) -> Vec<String> {
+        (0..count).map(|n| format!("U{n}")).collect()
+    }
+
+    #[test]
+    fn members_leave_out_you_slackbot_and_bots() {
+        let listed = ids(&["U1", "UME", directory::SLACKBOT, "UBOT", "U2"]);
+        let kept: Vec<String> = members(listed, Some("UME"), |user| user == "UBOT").collect();
+        assert_eq!(kept, ["U1", "U2"]);
+    }
+
+    #[test]
+    fn members_keep_everyone_when_you_are_unknown() {
+        let kept: Vec<String> = members(ids(&["U1", "UME"]), None, |_| false).collect();
+        assert_eq!(kept, ["U1", "UME"]);
+    }
+
+    #[test]
+    fn asked_keeps_each_person_once_in_the_order_first_named() {
+        let users = asked(ids(&["U2", "U1", "U2", "U3", "U1"])).unwrap();
+        assert_eq!(users, ["U2", "U1", "U3"]);
+    }
+
+    #[test]
+    fn asked_takes_fifty_and_refuses_fifty_one() {
+        assert_eq!(asked(numbered(MAX)).unwrap().len(), 50);
+        let refused = asked(numbered(MAX + 1)).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "that is 51 people, bots and you left out; `slack who` describes 50 at most"
+        );
+    }
+
+    #[test]
+    fn asked_counts_people_not_mentions() {
+        let mut users = numbered(MAX);
+        users.extend(numbered(MAX));
+        assert_eq!(asked(users).unwrap().len(), 50);
     }
 
     #[test]
