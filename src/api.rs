@@ -2,6 +2,7 @@
 //! authenticated the way the web client does it, with the `xoxc` token in
 //! the body and the `xoxd` session cookie. Commands never see the headers.
 
+use std::fs::File;
 use std::io::ErrorKind;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -44,6 +45,8 @@ const USER_AGENT: &str = concat!(
     ")"
 );
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// A file's bytes take longer than an API call.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const RATE_LIMIT_RETRIES: u32 = 2;
 /// Cap on an honoured Retry-After: a status-bar poll must not hang for minutes.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -67,6 +70,9 @@ pub enum Error {
     /// Never the URL: it carries the session's ticket.
     #[error("could not open Slack's socket: {reason}")]
     Socket { reason: String },
+    /// Never the URL: it is the leave to write the file.
+    #[error("the upload failed: {reason}")]
+    Upload { reason: String },
 }
 
 /// Slack's real-time socket, as `Client::socket` opens it.
@@ -229,6 +235,35 @@ impl Client {
         Ok(socket)
     }
 
+    /// Sends a file's bytes to the URL `files.getUploadURLExternal` named
+    /// for it. Deliberate: neither the token nor the cookie goes with
+    /// them. The URL is the leave to write that one file, it is on
+    /// another host than the workspace's, and Slack's own example sends
+    /// the bytes and a content type, nothing else. No redirect is
+    /// followed either: the bytes go to the host checked here or nowhere.
+    pub fn upload(&self, url: &str, file: &File) -> Result<(), Error> {
+        let upload_error = |reason: String| Error::Upload { reason };
+        if !capture::is_slack_upload_url(url) {
+            return Err(upload_error("an upload URL outside slack.com".to_string()));
+        }
+        let response = self
+            .agent
+            .post(url)
+            .config()
+            .timeout_global(Some(UPLOAD_TIMEOUT))
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .build()
+            .header("User-Agent", USER_AGENT)
+            .content_type("application/octet-stream")
+            .send(file)
+            .map_err(|err| upload_error(upload_reason(&err)))?;
+        match response.status().as_u16() {
+            200 => Ok(()),
+            status => Err(upload_error(format!("HTTP {status}"))),
+        }
+    }
+
     pub fn auth_test(&self) -> Result<Identity, Error> {
         let body = self.call("auth.test", &[])?;
         let field = |name: &str| {
@@ -247,6 +282,17 @@ impl Client {
             user: field("user")?,
             url: field("url")?,
         })
+    }
+}
+
+/// Why the bytes did not go, without the URL ureq may quote.
+fn upload_reason(err: &ureq::Error) -> String {
+    match err {
+        ureq::Error::Io(err) => err.to_string(),
+        ureq::Error::Timeout(_) => "it timed out".to_string(),
+        ureq::Error::HostNotFound => "the host was not found".to_string(),
+        ureq::Error::ConnectionFailed => "could not connect".to_string(),
+        _ => "the request could not be sent".to_string(),
     }
 }
 
@@ -309,6 +355,29 @@ mod tests {
             "wss://wss-primary.slack.com/websocket/x?ticket=secret".to_string(),
         ));
         assert_eq!(socket_reason(&err), "could not connect");
+    }
+
+    #[test]
+    fn an_upload_error_never_quotes_the_url() {
+        let err = ureq::Error::BadUri("https://files.slack.com/upload/v1/secret".to_string());
+        assert_eq!(upload_reason(&err), "the request could not be sent");
+    }
+
+    #[test]
+    fn an_upload_goes_to_slack_or_nowhere() {
+        let client = Client::new(
+            "https://t.slack.com",
+            &Credentials {
+                xoxc: "xoxc-test",
+                xoxd: "xoxd-test",
+            },
+        );
+        // Refused at the gate, before any connection.
+        let file = File::open(file!()).unwrap();
+        let err = client
+            .upload("https://files.slack.com.evil.net/upload/v1/x", &file)
+            .unwrap_err();
+        assert!(matches!(err, Error::Upload { reason } if reason.contains("outside slack.com")));
     }
 
     #[test]

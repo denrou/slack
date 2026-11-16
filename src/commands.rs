@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -21,7 +22,7 @@ use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
     counts, directory, drafts, history, lastview, mrkdwn, react, read, replies, search, send,
-    status, target, view, when,
+    status, target, upload, view, when,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -83,25 +84,27 @@ pub fn send(
     thread: Option<&str>,
     at: Option<&str>,
     draft: bool,
+    files: &[PathBuf],
 ) -> Result<()> {
-    // Before anything is read: a wrong time fails without a lookup.
+    // Before anything is read: a wrong time or a wrong path fails without
+    // a lookup.
     let delivery = match at {
         Some(spec) => send::Delivery::At(when::parse(spec, &jiff::Zoned::now())?),
         None if draft => send::Delivery::Draft,
         None => send::Delivery::Now,
     };
+    let files = upload::check(files)?;
     let store = Workspaces::load()?;
     let (team_id, workspace) = store.default_workspace()?;
     let mut names = Names::load();
-    let result = send::run(
-        &workspace.client(),
-        &mut names,
-        team_id,
+    let request = send::Request {
         target,
         text,
         thread,
-        &delivery,
-    );
+        delivery,
+        files: &files,
+    };
+    let result = send::run(&workspace.client(), &mut names, team_id, &request);
     names.save();
     result
 }
