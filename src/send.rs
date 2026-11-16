@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use jiff::Zoned;
 use serde_json::Value;
 
-use crate::api::Client;
+use crate::api::{self, Client};
 use crate::drafts;
 use crate::history::is_ts;
 use crate::mention;
@@ -86,12 +86,15 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, request: &Request)
             _ => None,
         };
         let id = client_msg_id()?;
-        // Before the upload too: a file kept for a draft that is then
-        // refused would stay in Slack, attached to nothing.
         still_ahead(post_at)?;
         let uploaded = upload::send(client, files)?;
         if !uploaded.is_empty() {
-            upload::complete(client, &uploaded, None)?;
+            // Deliberate: once more before the files are kept, since an
+            // upload can outlast a short `--at`, and a file kept for a
+            // draft that is then refused would stay in Slack.
+            still_ahead(post_at)?;
+            upload::complete(client, &uploaded, None)
+                .context("the files went up but Slack did not keep them; nothing was saved")?;
         }
         let saved = Zoned::now().timestamp().as_second();
         let kept = save_draft(
@@ -132,7 +135,19 @@ pub fn run(client: &Client, names: &mut Names, team_id: &str, request: &Request)
             thread_ts: thread_ts.as_deref(),
             text: &text,
         };
-        let shared = upload::complete(client, &uploaded, Some(&share))?;
+        // A refusal from Slack means nothing was posted. Any other failure
+        // may have lost the answer only, and a second run a second post.
+        let shared = upload::complete(client, &uploaded, Some(&share)).map_err(|err| {
+            let refused = matches!(
+                err.downcast_ref::<api::Error>(),
+                Some(api::Error::Slack { .. } | api::Error::Auth { .. })
+            );
+            err.context(if refused {
+                "the files went up but Slack refused the message; nothing was posted"
+            } else {
+                "the files went up but Slack's answer to the message did not come: it may be posted all the same, so look in Slack before sending again"
+            })
+        })?;
         let where_to = landing(client, names, &target.channel, thread_ts.is_some());
         println!("Sent to {where_to}{with_files}");
         if let Some(ts) = upload::shared_ts(&shared, &target.channel) {
@@ -178,19 +193,19 @@ fn print_permalink(client: &Client, channel: &str, ts: &str) {
 }
 
 /// The time of `--at` is checked again once the message is read, since
-/// `--at 1m` may have passed while it was typed on stdin.
+/// `--at 1m` may have passed while it was typed on stdin or while its
+/// files went up.
 fn still_ahead(post_at: Option<i64>) -> Result<()> {
     if post_at.is_some_and(|at| at <= Zoned::now().timestamp().as_second()) {
-        bail!("the time of --at passed while the message was read; nothing was scheduled");
+        bail!("the time of --at passed while the message was prepared; nothing was scheduled");
     }
     Ok(())
 }
 
 /// Leaves the message in the Slack app's drafts, for Slack to post at
-/// `post_at` when there is one, and returns the time Slack kept. The time
-/// is checked once more, after the files went up. A draft kept without
-/// the time asked is an error: it would sit in the drafts and never go
-/// out.
+/// `post_at` when there is one, and returns the time Slack kept. A draft
+/// kept without the time asked is an error: it would sit in the drafts
+/// and never go out.
 fn save_draft(
     client: &Client,
     channel: &str,
@@ -200,7 +215,6 @@ fn save_draft(
     id: &str,
     files: &[Uploaded],
 ) -> Result<Option<i64>> {
-    still_ahead(post_at)?;
     let body = create_draft(client, channel, thread_ts, text, post_at, id, files);
     let body = if files.is_empty() {
         body?
@@ -218,7 +232,7 @@ fn save_draft(
         .map(Some)
         .ok_or_else(|| {
             anyhow!(
-                "Slack kept the message as a draft without its time: it will not go out; delete it from the Slack app's drafts"
+                "Slack kept the message as a draft without its time: it will not go out; send it or delete it from the Slack app's drafts, where its files are too if it had any"
             )
         })
 }

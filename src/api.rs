@@ -45,8 +45,12 @@ const USER_AGENT: &str = concat!(
     ")"
 );
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// A file's bytes take longer than an API call.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// A file's bytes take longer than an API call: ten minutes, and the time
+/// its length takes at 100 kB a second, so a large file on a slow line
+/// still ends and a stalled one does not hang for good.
+fn upload_timeout(length: u64) -> Duration {
+    Duration::from_secs(600 + length / 100_000)
+}
 const RATE_LIMIT_RETRIES: u32 = 2;
 /// Cap on an honoured Retry-After: a status-bar poll must not hang for minutes.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -246,11 +250,15 @@ impl Client {
         if !capture::is_slack_upload_url(url) {
             return Err(upload_error("an upload URL outside slack.com".to_string()));
         }
+        let length = file
+            .metadata()
+            .map_err(|err| upload_error(format!("could not read the file: {err}")))?
+            .len();
         let response = self
             .agent
             .post(url)
             .config()
-            .timeout_global(Some(UPLOAD_TIMEOUT))
+            .timeout_global(Some(upload_timeout(length)))
             .max_redirects(0)
             .max_redirects_will_error(false)
             .build()
@@ -361,6 +369,12 @@ mod tests {
     fn an_upload_error_never_quotes_the_url() {
         let err = ureq::Error::BadUri("https://files.slack.com/upload/v1/secret".to_string());
         assert_eq!(upload_reason(&err), "the request could not be sent");
+    }
+
+    #[test]
+    fn a_larger_file_gets_more_time() {
+        assert_eq!(upload_timeout(500_000), Duration::from_secs(605));
+        assert_eq!(upload_timeout(1 << 30), Duration::from_secs(11_337));
     }
 
     #[test]
