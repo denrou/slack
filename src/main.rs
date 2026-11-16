@@ -205,7 +205,7 @@ enum Command {
     /// The drafts `send --draft` and `send --at` saved, each beside the message of yours that followed it there
     Drafts {
         /// How many days back; Slack's free plan keeps 90 days of messages
-        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=90))]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=drafts::DAYS_KEPT))]
         days: u64,
         /// Print the data as JSON
         #[arg(long)]
