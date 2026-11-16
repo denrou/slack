@@ -106,7 +106,11 @@ jobs:
           name="slack-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/slack" README.md LICENSE "dist/$name/"
-          cp -R skills "dist/$name/"
+          mkdir "dist/$name/skills"
+          cp -R skills/slack "dist/$name/skills/"
+          # The formula installs and tests this path: fail here, before the
+          # release is out, if the skill ever moves.
+          test -f "dist/$name/skills/slack/SKILL.md"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -r "dist/$name"
 

@@ -135,17 +135,17 @@ Security notes, the short version:
 
 ## For an agent
 
-`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`read`, `react`, `status`), that a message is sent when the user reread it and asks to send it, and left in Slack's drafts for them otherwise (a scheduled one aside), how the numbers and the JSON work. It ships with the binary, so it describes the version installed. For Claude Code, link it once and `/slack` becomes a skill. With Homebrew, which says so at the end of the install, the link follows `brew upgrade`:
+`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`read`, `react`, `status`), that a message is sent when the user reread it and asks to send it, and left in Slack's drafts for them otherwise (a scheduled one aside), how the numbers and the JSON work. For Claude Code, link it once and `/slack` becomes a skill. Homebrew installs it with the binary from the release after 0.21.0 and says so at the end of the install, so the skill is the one of the version installed and the link follows `brew upgrade` (`-fn` replaces a link made earlier):
 
 ```bash
 mkdir -p ~/.claude/skills
-ln -s "$(brew --prefix)/opt/slack/share/slack/skills/slack" ~/.claude/skills/slack
+ln -sfn "$(brew --prefix)/opt/slack/share/slack/skills/slack" ~/.claude/skills/slack
 ```
 
-From the archive, link the `skills/slack` folder it holds; from a clone of the repository:
+Otherwise, from a clone of the repository (the release archive holds the same `skills/slack` folder), where the skill follows the clone, not the binary:
 
 ```bash
-ln -s "$PWD/skills/slack" ~/.claude/skills/slack
+ln -sfn "$PWD/skills/slack" ~/.claude/skills/slack
 ```
 
 ## Files
