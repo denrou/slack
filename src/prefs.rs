@@ -2,9 +2,11 @@
 //! conversations they muted and the conversations they visited last.
 //! `users.prefs.get` is a web-client endpoint and both are JSON strings
 //! inside it, so a missing or unreadable pref reads as "nothing muted",
-//! which shows more rather than less, and as nothing visited.
+//! which shows more rather than less, and as nothing visited. Missing is
+//! silent; unreadable is a warning, since it is Slack's shape that moved.
 
 use std::collections::HashSet;
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
 
@@ -17,13 +19,23 @@ pub struct Prefs {
     /// Conversation ids, the last visited first: the app's own recent
     /// list, whose DMs `slack who` takes by default.
     pub recent: Vec<String>,
+    /// The prefs that are there but could not be read, by name: each read
+    /// as absent, which for the mute list shows and counts what is muted.
+    pub unreadable: Vec<&'static str>,
 }
+
+const MUTES: &str = "all_notifications_prefs";
+const RECENTS: &str = "recents";
 
 /// The preferences that shape the view, None when they could not be read.
 /// Only a dead session is an error; any other failure is reported.
 pub fn fetch(client: &Client) -> Result<Option<Prefs>, api::Error> {
     match client.call("users.prefs.get", &[]) {
-        Ok(body) => Ok(Some(parse(&body))),
+        Ok(body) => {
+            let prefs = parse(&body);
+            warn_unreadable(&prefs.unreadable);
+            Ok(Some(prefs))
+        }
         Err(err @ api::Error::Auth { .. }) => Err(err),
         Err(err) => {
             crate::warn::warn(format!(
@@ -34,25 +46,69 @@ pub fn fetch(client: &Client) -> Result<Option<Prefs>, api::Error> {
     }
 }
 
-pub fn parse(body: &Value) -> Prefs {
-    Prefs {
-        muted: muted(body),
-        recent: recent(body),
+/// Once per pref and per process: the watch reads the prefs at each event.
+fn warn_unreadable(names: &[&'static str]) {
+    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    for name in names {
+        if warned.contains(name) {
+            continue;
+        }
+        warned.push(name);
+        let effect = match *name {
+            MUTES => "muted conversations are shown and counted",
+            _ => "it is read as empty",
+        };
+        crate::warn::warn(format!(
+            "the `{name}` preference is not in the form expected, so {effect}"
+        ));
     }
 }
 
+pub fn parse(body: &Value) -> Prefs {
+    let mut unreadable = Vec::new();
+    let mut read = |name: &'static str| match nested(body, name) {
+        Nested::Parsed(value) => Some(value),
+        Nested::Absent => None,
+        Nested::Unreadable => {
+            unreadable.push(name);
+            None
+        }
+    };
+    let muted = read(MUTES).map(|parsed| muted(&parsed)).unwrap_or_default();
+    let recent = read(RECENTS)
+        .map(|parsed| recent(&parsed))
+        .unwrap_or_default();
+    Prefs {
+        muted,
+        recent,
+        unreadable,
+    }
+}
+
+enum Nested {
+    Parsed(Value),
+    /// Not there, null or empty: nothing set, nothing to say.
+    Absent,
+    /// There, and not a string holding JSON.
+    Unreadable,
+}
+
 /// A pref that holds JSON in a string.
-fn nested(body: &Value, name: &str) -> Option<Value> {
-    let raw = body.get("prefs")?.get(name)?.as_str()?;
-    serde_json::from_str(raw).ok()
+fn nested(body: &Value, name: &str) -> Nested {
+    match body.get("prefs").and_then(|prefs| prefs.get(name)) {
+        None | Some(Value::Null) => Nested::Absent,
+        Some(Value::String(raw)) if raw.is_empty() => Nested::Absent,
+        Some(Value::String(raw)) => {
+            serde_json::from_str(raw).map_or(Nested::Unreadable, Nested::Parsed)
+        }
+        Some(_) => Nested::Unreadable,
+    }
 }
 
 /// `prefs.all_notifications_prefs` is a JSON string whose `channels` map
 /// carries `muted: true` per conversation, among its notification levels.
-fn muted(body: &Value) -> HashSet<String> {
-    let Some(parsed) = nested(body, "all_notifications_prefs") else {
-        return HashSet::new();
-    };
+fn muted(parsed: &Value) -> HashSet<String> {
     let Some(channels) = parsed.get("channels").and_then(Value::as_object) else {
         return HashSet::new();
     };
@@ -68,10 +124,7 @@ fn muted(body: &Value) -> HashSet<String> {
 /// `DM`, `PAGE` for a view such as Threads) and a `timestamp` in
 /// milliseconds. The pages are left out; what is not a conversation you
 /// are in finds no match in the counts anyway.
-fn recent(body: &Value) -> Vec<String> {
-    let Some(parsed) = nested(body, "recents") else {
-        return Vec::new();
-    };
+fn recent(parsed: &Value) -> Vec<String> {
     let Some(visits) = parsed.get("navigation").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -129,6 +182,28 @@ mod tests {
             assert!(prefs.muted.is_empty());
             assert!(prefs.recent.is_empty());
         }
+    }
+
+    #[test]
+    fn a_pref_that_is_there_but_unreadable_is_named_and_an_absent_one_is_not() {
+        for absent in [
+            json!({"ok": true}),
+            json!({"prefs": {}}),
+            json!({"prefs": {"all_notifications_prefs": null, "recents": ""}}),
+            json!({"prefs": {"all_notifications_prefs": "{}", "recents": "{}"}}),
+        ] {
+            assert!(parse(&absent).unreadable.is_empty(), "{absent}");
+        }
+        let body = json!({"prefs": {"all_notifications_prefs": "not json", "recents": "{}"}});
+        assert_eq!(parse(&body).unreadable, ["all_notifications_prefs"]);
+        // No longer a string: a change of Slack's, not an absence.
+        let body = json!({"prefs": {
+            "all_notifications_prefs": {"channels": {"C1": {"muted": true}}},
+            "recents": "[",
+        }});
+        let prefs = parse(&body);
+        assert_eq!(prefs.unreadable, ["all_notifications_prefs", "recents"]);
+        assert!(prefs.muted.is_empty());
     }
 
     #[test]
