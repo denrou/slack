@@ -3,12 +3,13 @@
 //! back and finds, in the same place, the message of yours that followed,
 //! so the voice the drafts are written in can be checked against yours
 //! (the slack skill's voice review). Reading the pairs back only reads
-//! Slack.
+//! Slack. The log keeps what `slack drafts` can still read: a save drops
+//! the drafts past `DAYS_KEPT`.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use jiff::{Timestamp, Zoned};
@@ -23,6 +24,11 @@ use crate::style::Style;
 use crate::{emoji, par, paths, target, view};
 
 const LOG: &str = "drafts.jsonl";
+/// How far back `slack drafts` reads, the history Slack's free plan keeps,
+/// and so how long the log keeps a draft: past it, no command reads the
+/// text again.
+pub const DAYS_KEPT: u64 = 90;
+const KEPT: i64 = DAYS_KEPT as i64 * 24 * 3600;
 /// Deliberate: a draft saved on a Friday evening may be sent on Monday
 /// morning; past three days, a message there answers something else.
 const WINDOW: i64 = 3 * 24 * 3600;
@@ -61,11 +67,11 @@ fn path() -> Result<PathBuf> {
     Ok(paths::state_dir()?.join(LOG))
 }
 
-/// Appends the draft to the log. Best effort: the draft is in Slack
-/// already, and an error here would read as "not saved", which a retry
-/// would turn into a second draft.
+/// Appends the draft to the log, then drops the drafts too old to be read
+/// again. Best effort: the draft is in Slack already, and an error here
+/// would read as "not saved", which a retry would turn into a second draft.
 pub fn record(record: &Record) {
-    let write = || -> Result<()> {
+    let write = || -> Result<PathBuf> {
         let path = path()?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -74,13 +80,62 @@ pub fn record(record: &Record) {
         line.push('\n');
         paths::append_private(&path)
             .and_then(|mut file| file.write_all(line.as_bytes()))
-            .with_context(|| format!("writing {}", path.display()))
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(path)
     };
-    if let Err(err) = write() {
+    let path = match write() {
+        Ok(path) => path,
+        Err(err) => {
+            return crate::warn::warn(format!(
+                "the draft is saved, but not in the draft log: {err:#}"
+            ));
+        }
+    };
+    if let Err(err) = prune(&path, Zoned::now().timestamp().as_second()) {
         crate::warn::warn(format!(
-            "the draft is saved, but not in the draft log: {err:#}"
+            "the draft is saved and logged, but the old drafts stay in the draft log: {err:#}"
         ));
     }
+}
+
+/// Rewrites the log without the drafts too old at `now`, and says how many
+/// went. With none to drop the file is only read, so a save stays an append.
+fn prune(path: &Path, now: i64) -> Result<usize> {
+    let log = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let (lines, dropped) = kept(&log, now);
+    if dropped == 0 {
+        return Ok(0);
+    }
+    let mut contents = Vec::with_capacity(log.len());
+    for line in lines {
+        contents.extend_from_slice(line);
+        contents.push(b'\n');
+    }
+    paths::replace_private(path, &contents)
+        .with_context(|| format!("rewriting {}", path.display()))?;
+    Ok(dropped)
+}
+
+/// The lines of the log to keep at `now`, and how many drafts are dropped:
+/// those `slack drafts` cannot reach any more, by the same comparison as
+/// `load`. Deliberate: a line that does not read is kept. Its age is
+/// unknown, it may be a record written by a later version, and `slack
+/// drafts` names it with its line number at each run, so it is neither lost
+/// nor kept without a word. Bytes rather than text, so that a line cut in
+/// the middle of a character is such a line, not a log that cannot be read.
+fn kept(log: &[u8], now: i64) -> (Vec<&[u8]>, usize) {
+    let since = now - KEPT;
+    let mut dropped = 0;
+    let lines = log
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.trim_ascii().is_empty())
+        .filter(|line| {
+            let old = serde_json::from_slice::<Record>(line).is_ok_and(|draft| draft.saved < since);
+            dropped += usize::from(old);
+            !old
+        })
+        .collect();
+    (lines, dropped)
 }
 
 /// The drafts of this workspace saved since `since` (Unix seconds),
@@ -511,6 +566,94 @@ mod tests {
         let line = serde_json::to_string(&record).unwrap();
         assert!(!line.contains("thread_ts") && !line.contains("session"));
         assert_eq!(serde_json::from_str::<Record>(&line).unwrap(), record);
+    }
+
+    fn line(saved: i64) -> String {
+        serde_json::to_string(&draft(saved, "C1", None)).unwrap()
+    }
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn keep(log: &str) -> (Vec<&str>, usize) {
+        let (lines, dropped) = kept(log.as_bytes(), NOW);
+        let lines = lines
+            .into_iter()
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect();
+        (lines, dropped)
+    }
+
+    #[test]
+    fn a_log_with_nothing_old_keeps_every_line() {
+        let log = format!("{}\n{}\n", line(NOW - 3600), line(NOW));
+        let (lines, dropped) = keep(&log);
+        assert_eq!(dropped, 0);
+        assert_eq!(lines.join("\n") + "\n", log);
+        assert_eq!(keep(""), (Vec::new(), 0));
+        // Blank lines alone are no reason to rewrite.
+        assert_eq!(keep("\n  \n"), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn the_drafts_past_the_days_kept_are_dropped() {
+        let (old, recent) = (line(NOW - KEPT - 3600), line(NOW - 3600));
+        let log = format!("{old}\n{recent}\n");
+        assert_eq!(keep(&log), (vec![recent.as_str()], 1));
+        let log = format!("{old}\n{old}\n");
+        assert_eq!(keep(&log), (Vec::new(), 2));
+    }
+
+    #[test]
+    fn a_draft_is_kept_as_long_as_slack_drafts_reads_it() {
+        // `load` reads `saved >= now - days`: the last second read is kept.
+        let (edge, past) = (line(NOW - KEPT), line(NOW - KEPT - 1));
+        let log = format!("{past}\n{edge}\n");
+        assert_eq!(keep(&log), (vec![edge.as_str()], 1));
+    }
+
+    #[test]
+    fn a_line_that_does_not_read_is_kept() {
+        let old = line(NOW - KEPT - 3600);
+        let log = format!("not json\n{old}\n{{\"saved\": 1}}\n");
+        assert_eq!(keep(&log), (vec!["not json", "{\"saved\": 1}"], 1));
+        assert_eq!(keep("not json\n"), (vec!["not json"], 0));
+        // A line cut inside a character, the next one appended to it.
+        let torn = [b"{\"text\": \"caf\xc3".as_slice(), old.as_bytes()].concat();
+        assert_eq!(kept(&torn, NOW), (vec![torn.as_slice()], 0));
+    }
+
+    #[test]
+    fn a_prune_rewrites_the_log_only_when_a_draft_goes() {
+        let dir = std::env::temp_dir().join(format!("slack-drafts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(LOG);
+        assert!(prune(&path, NOW).is_err());
+
+        // Untouched, blank line included: nothing is old.
+        let recent = format!("{}\n\n", line(NOW - 3600));
+        fs::write(&path, &recent).unwrap();
+        assert_eq!(prune(&path, NOW).unwrap(), 0);
+        assert_eq!(fs::read_to_string(&path).unwrap(), recent);
+
+        let log = format!("{}\nnot json\n\n{}\n", line(NOW - KEPT - 1), line(NOW));
+        fs::write(&path, log).unwrap();
+        assert_eq!(prune(&path, NOW).unwrap(), 1);
+        let after = format!("not json\n{}\n", line(NOW));
+        assert_eq!(fs::read_to_string(&path).unwrap(), after);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // The temporary file went with the rename.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+
+        fs::write(&path, format!("{}\n", line(1))).unwrap();
+        assert_eq!(prune(&path, NOW).unwrap(), 1);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
