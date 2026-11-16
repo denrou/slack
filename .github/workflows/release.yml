@@ -99,11 +99,14 @@ jobs:
 
       - run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package the binary with the README and the licence
+      # The skill ships with the binary so the manual an agent reads is the
+      # one of the version installed; the Homebrew formula installs it.
+      - name: Package the binary with the skill, the README and the licence
         run: |
           name="slack-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/slack" README.md LICENSE "dist/$name/"
+          cp -R skills "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -r "dist/$name"
 

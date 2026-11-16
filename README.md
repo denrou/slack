@@ -14,7 +14,7 @@ brew trust denrou/tap
 brew install denrou/tap/slack
 ```
 
-Without it: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`.
+Without it: download the archive for your platform from the [latest release](https://github.com/denrou/slack/releases/latest), check it against `checksums.txt`, and put `slack` on your `PATH`. The archive also holds the skill for an agent (see [For an agent](#for-an-agent)).
 
 From source, with Rust 1.88+:
 
@@ -135,7 +135,14 @@ Security notes, the short version:
 
 ## For an agent
 
-`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`read`, `react`, `status`), that a message is sent when the user reread it and asks to send it, and left in Slack's drafts for them otherwise (a scheduled one aside), how the numbers and the JSON work. For Claude Code, link it from a clone of the repository and `/slack` becomes a skill:
+`skills/slack/SKILL.md` is the manual an LLM agent reads before using the CLI: what is free to run, what needs the user's word (`read`, `react`, `status`), that a message is sent when the user reread it and asks to send it, and left in Slack's drafts for them otherwise (a scheduled one aside), how the numbers and the JSON work. It ships with the binary, so it describes the version installed. For Claude Code, link it once and `/slack` becomes a skill. With Homebrew, which says so at the end of the install, the link follows `brew upgrade`:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$(brew --prefix)/opt/slack/share/slack/skills/slack" ~/.claude/skills/slack
+```
+
+From the archive, link the `skills/slack` folder it holds; from a clone of the repository:
 
 ```bash
 ln -s "$PWD/skills/slack" ~/.claude/skills/slack
@@ -153,7 +160,7 @@ A release is a pull request that bumps `version` in `Cargo.toml` (`cargo build` 
 git fetch && git tag -a v0.8.0 --cleanup=whitespace -F notes.txt origin/main && git push origin v0.8.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version and carries notes, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them as a GitHub Release with the tag's notes, the compare link to the previous release and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-tap) to pick the release up.
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the version and carries notes, lints and tests, builds the macOS arm64 and Linux x86_64 binaries, publishes them, each with the skill, as a GitHub Release with the tag's notes, the compare link to the previous release and a `checksums.txt`, then asks the [Homebrew tap](https://github.com/denrou/homebrew-tap) to pick the release up.
 
 ## License
 
