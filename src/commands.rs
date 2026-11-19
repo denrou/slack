@@ -21,8 +21,8 @@ use crate::style::Style;
 use crate::target::parse_permalink;
 use crate::view::{MessageList, Refs, Scope};
 use crate::{
-    counts, directory, drafts, history, lastview, mrkdwn, react, read, replies, search, send,
-    status, target, upload, view, when,
+    about, counts, directory, drafts, history, lastview, mrkdwn, par, react, read, replies, search,
+    send, status, target, upload, view, when,
 };
 
 pub fn unreads(json: bool, no_color: bool) -> Result<()> {
@@ -402,16 +402,7 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
     let mut described: Vec<(directory::Person, Person)> = users
         .iter()
         .map(|id| {
-            let listed = names.user(id).map_or_else(
-                || directory::Person {
-                    id: id.clone(),
-                    handle: id.clone(),
-                    display: id.clone(),
-                    real: String::new(),
-                    title: String::new(),
-                },
-                |user| directory::Person::from_cache(id, user),
-            );
+            let listed = directory::Person::of(id, &names);
             (listed, people.remove(id).unwrap_or_default())
         })
         .collect();
@@ -450,25 +441,175 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
         for (listed, person) in &described {
             let label = format!("@{}", listed.display);
             let padding = " ".repeat(width - label.chars().count());
-            let (dot, word) = match person.presence {
-                Some(Presence::Active) => ("●", "active"),
-                Some(Presence::Away) => ("○", "away"),
-                None => ("?", "presence unknown"),
-            };
-            let mut notes = vec![style.dim(word)];
-            notes.extend(person.notes(&now));
-            if person.profile.is_none() {
-                notes.push(style.dim("status could not be read"));
-            }
-            writeln!(
-                out,
-                "{dot} {}{padding}  {}",
-                style.bold(&label),
-                notes.join(" · ")
-            )?;
+            let (dot, notes) = around(person, &style, &now);
+            writeln!(out, "{dot} {}{padding}  {notes}", style.bold(&label))?;
         }
         Ok(())
     })
+}
+
+/// The presence as a dot, and what follows it: the presence in words,
+/// the status, their clock, the pause.
+fn around(person: &Person, style: &Style, now: &jiff::Zoned) -> (&'static str, String) {
+    let (dot, word) = match person.presence {
+        Some(Presence::Active) => ("●", "active"),
+        Some(Presence::Away) => ("○", "away"),
+        None => ("?", "presence unknown"),
+    };
+    let mut notes = vec![style.dim(word)];
+    notes.extend(person.notes(now));
+    if person.profile.is_none() {
+        notes.push(style.dim("status could not be read"));
+    }
+    (dot, notes.join(" · "))
+}
+
+pub fn about(targets: &[String], json: bool, no_color: bool) -> Result<()> {
+    // Before any call: a file that does not read is the first thing to fix.
+    let notes = about::Notes::load(&about::Notes::path()?)?;
+    let store = Workspaces::load()?;
+    let (_, workspace) = store.default_workspace()?;
+    let client = workspace.client();
+    let now = jiff::Zoned::now();
+    let mut names = Names::load();
+    let found = about_people(&client, &mut names, targets).and_then(|users| {
+        names.resolve_users(&client, users.clone())?;
+        // An id in place of the handle would search for nothing and read
+        // as "no direct message".
+        let handles = users
+            .iter()
+            .map(|id| {
+                names
+                    .user(id)
+                    .map(|user| user.name.clone())
+                    .ok_or_else(|| anyhow!("could not read the handle of {id}"))
+            })
+            .collect::<Result<Vec<String>>>()?;
+        let (people, dms) = std::thread::scope(|scope| {
+            let people = scope.spawn(|| presence::people(&client, &users));
+            let dms = par::map(handles, |handle| about::dm(&client, &handle, &now));
+            // A panic in the presence thread is a bug, not a condition to handle.
+            (people.join().expect("the presence thread panicked"), dms)
+        });
+        let dms = dms.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let mut mentioned = BTreeSet::new();
+        let mut places = BTreeSet::new();
+        for message in dms.iter().flat_map(|dm| &dm.latest) {
+            view::collect_names(&mut mentioned, &mut places, message);
+        }
+        names.resolve_users(&client, mentioned)?;
+        names.resolve_channels(&client, places)?;
+        Ok((users, people?, dms))
+    });
+    names.save();
+    let (users, mut people, dms) = found?;
+    let cards: Vec<(directory::Person, Person, about::Dm)> = users
+        .iter()
+        .zip(dms)
+        .map(|(id, dm)| {
+            let listed = directory::Person::of(id, &names);
+            (listed, people.remove(id).unwrap_or_default(), dm)
+        })
+        .collect();
+    // Read fresh with the profile, since the name cache keeps a title for
+    // good; the cached one only when the profile could not be read.
+    let titles: Vec<Option<String>> = cards
+        .iter()
+        .map(|(listed, person, _)| match &person.profile {
+            Some(profile) => profile.title.clone(),
+            None => (!listed.title.is_empty()).then(|| listed.title.clone()),
+        })
+        .collect();
+    if json {
+        let value: Vec<about::Card> = cards
+            .iter()
+            .zip(&titles)
+            .map(|((listed, person, dm), title)| {
+                let note = notes.of(&listed.id, &listed.handle, &listed.display);
+                about::Card {
+                    described: person.described(&listed.id, &listed.handle, &listed.display, &now),
+                    title: title.as_deref(),
+                    relation: note.and_then(|n| n.relation),
+                    note: note.and_then(|n| n.note.as_deref()),
+                    dm,
+                }
+            })
+            .collect();
+        return print_json(&value);
+    }
+    let style = Style::detect(no_color);
+    let me = workspace.user_id.as_deref();
+    to_stdout(|out| {
+        for (index, ((listed, person, dm), title)) in cards.iter().zip(&titles).enumerate() {
+            if index > 0 {
+                writeln!(out)?;
+            }
+            let mut head = vec![style.bold(&format!("@{}", listed.display))];
+            if listed.handle != listed.display {
+                head.push(style.dim(&format!("@{}", listed.handle)));
+            }
+            if !listed.real.is_empty() && listed.real != listed.display {
+                head.push(listed.real.clone());
+            }
+            if let Some(title) = title {
+                head.push(style.dim(title));
+            }
+            writeln!(out, "{}", head.join("  "))?;
+            let (dot, around) = around(person, &style, &now);
+            writeln!(out, "  {dot} {around}")?;
+            let words: Vec<&str> = notes
+                .of(&listed.id, &listed.handle, &listed.display)
+                .map(|note| {
+                    note.relation
+                        .map(about::Relation::word)
+                        .into_iter()
+                        .chain(note.note.as_deref().filter(|text| !text.trim().is_empty()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !words.is_empty() {
+                writeln!(out, "  noted: {}", words.join(" · "))?;
+            }
+            writeln!(out, "  DM: {}", dm.describe(&now))?;
+            if let Some(channel) = &dm.channel {
+                let list = MessageList {
+                    messages: &dm.latest,
+                    channel,
+                    has_more: false,
+                    show_author: true,
+                    scope: Scope::History,
+                    unread_from: None,
+                };
+                view::render_messages(&list, &Refs::none(), &names, &style, me, &now, out)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// The people `slack about` describes, each once, in the order named.
+fn about_people(client: &Client, names: &mut Names, targets: &[String]) -> Result<Vec<String>> {
+    let asked: BTreeSet<&str> = targets.iter().map(String::as_str).collect();
+    if asked.len() > about::MAX {
+        bail!(
+            "{} people; `slack about` takes {} at most, since each costs a search",
+            asked.len(),
+            about::MAX
+        );
+    }
+    let mut users: Vec<String> = Vec::new();
+    for target in targets {
+        let name = target
+            .strip_prefix('@')
+            .ok_or_else(|| anyhow!("`{target}` is not an @person"))?;
+        let user = names
+            .user_id_by_name(client, name)?
+            .ok_or_else(|| anyhow!("no one called @{name} in the workspace"))?;
+        if !users.contains(&user) {
+            users.push(user);
+        }
+    }
+    Ok(users)
 }
 
 /// Whom `slack who` describes, in the order named: the people named, the

@@ -1,6 +1,7 @@
 //! `slack`: read and answer Slack from the terminal. README.md has what it
 //! does, ARCHITECTURE.md how it is put together.
 
+mod about;
 mod api;
 mod auth;
 mod commands;
@@ -178,6 +179,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Who someone is to you, before writing to them: title, presence, your note, your DM so far
+    About {
+        /// `@person`s, five at most; the note comes from ~/.config/slack/people.toml
+        #[arg(required = true)]
+        people: Vec<String>,
+        /// Print the data as JSON
+        #[arg(long)]
+        json: bool,
+        /// Disable colors
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Search the messages, newest first; Slack's operators work (`in:#dev from:@jane after:2026-10-01`)
     Search {
         /// What to look for, Slack's search syntax
@@ -286,6 +299,11 @@ fn main() -> ExitCode {
         Some(Command::Channels { filter, json }) => commands::channels(&filter.join(" "), json),
         Some(Command::People { filter, json }) => commands::people(&filter.join(" "), json),
         Some(Command::Who { targets, json }) => commands::who(&targets, json),
+        Some(Command::About {
+            people,
+            json,
+            no_color,
+        }) => commands::about(&people, json, no_color),
         Some(Command::Search {
             query,
             limit,

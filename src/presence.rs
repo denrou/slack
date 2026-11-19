@@ -100,6 +100,8 @@ pub struct Profile {
     pub status: Option<Status>,
     /// The IANA name, `Europe/Brussels`.
     pub tz: Option<String>,
+    /// The job title, for `slack about`.
+    pub title: Option<String>,
 }
 
 impl Profile {
@@ -133,7 +135,10 @@ impl Profile {
             .and_then(Value::as_str)
             .filter(|tz| !tz.is_empty())
             .map(str::to_string);
-        Profile { status, tz }
+        let title = Some(field("title").trim())
+            .filter(|title| !title.is_empty())
+            .map(str::to_string);
+        Profile { status, tz, title }
     }
 }
 
@@ -428,6 +433,7 @@ mod tests {
             profile: Some(Profile {
                 status,
                 tz: tz.map(str::to_string),
+                title: None,
             }),
             dnd: None,
         }
@@ -487,16 +493,17 @@ mod tests {
     }
 
     #[test]
-    fn profile_reads_status_and_timezone() {
+    fn profile_reads_status_timezone_and_title() {
         let user = json!({
             "tz": "Europe/Brussels",
-            "profile": {"status_text": "Certified personal trainer", "status_emoji": ":running:", "status_expiration": 0},
+            "profile": {"status_text": "Certified personal trainer", "status_emoji": ":running:", "status_expiration": 0, "title": " Coach "},
         });
         assert_eq!(
             Profile::parse(&user),
             Profile {
                 status: Some(status("running", "Certified personal trainer", None)),
                 tz: Some("Europe/Brussels".to_string()),
+                title: Some("Coach".to_string()),
             }
         );
     }

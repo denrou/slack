@@ -83,6 +83,16 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 `slack who @jane @bob` says, for each person, whether they are at their screen (`●` active, `○` away, Slack's green dot), their status with its emoji and when it ends, their clock when it is not yours (`16:00 in Brussels`), and until when their notifications are paused, so you know before you write whether they will see it now. `slack who '#sre'` does the same for a channel's members, bots left out, up to 50; without arguments, it is the people of the direct messages you visited last. The ones there come first. Slack keeps no history of this, so it is now or nothing. `--json` gives `presence`, `status` (`emoji`, `text`, `expires`), `tz`, `local_time` and `notifications_paused_until` for each.
 
+## Who someone is to you
+
+`slack about @jane` is what to know before writing to someone: their title, the line of `slack who`, a note of yours, and your direct message so far (`205 messages in 90 days; 90 in the last 30, on 13 days; last today 11:37`, then the last five messages, or `no direct message in the last 90 days`). The DM is counted through Slack's search, so a conversation closed in the sidebar counts too. Five people at most, since each costs a search. The note is yours, in `~/.config/slack/people.toml`, a table per person keyed by handle, by the name Slack shows or by user id: `relation`, one of `manager`, `skip-manager`, `exec`, `report`, `peer` and `external`, and a free `note`. `--json` gives the same.
+
+```toml
+[jane]
+relation = "manager"
+note = "One summary rather than several messages."
+```
+
 ## Search
 
 `slack search <query>` asks Slack's own search and prints the newest matches first, 20 of them (`-n 100` at most), each under its conversation with its author, its time and its permalink, which `slack thread` and `slack send` take. The query is Slack's: `in:#channel`, `from:@person`, `before:`, `after:`, `on:`, `has:link` work as in the app. A line on stderr says how many matched beyond those shown, so a pipe gets the matches alone; `--json` gives `query`, `total` and `matches` (each a message with `channel`, `name` and `permalink`).
@@ -153,7 +163,7 @@ ln -sfn "$PWD/skills/slack" ~/.claude/skills/slack
 
 ## Files
 
-`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json` and `browser-profile/`. `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, both safe to delete: names and the last view. `$XDG_STATE_HOME/slack/` (default `~/.local/state/slack/`) holds the watch log, the answer command's next to it, and the draft log. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
+`$XDG_CONFIG_HOME/slack/` (default `~/.config/slack/`): `workspaces.json`, `browser-profile/`, and your `people.toml` when you write one. `$XDG_CACHE_HOME/slack/` (default `~/.cache/slack/`) holds the caches, both safe to delete: names and the last view. `$XDG_STATE_HOME/slack/` (default `~/.local/state/slack/`) holds the watch log, the answer command's next to it, and the draft log. `$SLACK_BROWSER_PROFILE` overrides the profile location; `logout` only ever deletes a profile the CLI created.
 
 ## Releasing
 
