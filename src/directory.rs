@@ -88,6 +88,20 @@ impl Person {
         }
     }
 
+    /// From the cache, or the bare id when the cache does not know them.
+    pub fn of(id: &str, names: &Names) -> Person {
+        names.user(id).map_or_else(
+            || Person {
+                id: id.to_string(),
+                handle: id.to_string(),
+                display: id.to_string(),
+                real: String::new(),
+                title: String::new(),
+            },
+            |user| Person::from_cache(id, user),
+        )
+    }
+
     /// Everything a filter may match.
     pub fn search(&self) -> String {
         format!(

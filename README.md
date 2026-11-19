@@ -85,7 +85,7 @@ To find the name, `slack channels` lists the channels and group messages you are
 
 ## Who someone is to you
 
-`slack about @jane` is what to know before writing to someone: their title, the line of `slack who`, a note of yours, and your direct message so far (`205 messages in 90 days; 90 in the last 30, on 13 days; last today 11:37`, then the last five messages, or `no direct message in the last 90 days`). The DM is counted through Slack's search, so a conversation closed in the sidebar counts too. Five people at most, since each costs a search. The note is yours, in `~/.config/slack/people.toml`, a table per person keyed by handle (or user id): `relation`, one of `manager`, `skip-manager`, `exec`, `report`, `peer` and `external`, and a free `note`. `--json` gives the same.
+`slack about @jane` is what to know before writing to someone: their title, the line of `slack who`, a note of yours, and your direct message so far (`205 messages in 90 days; 90 in the last 30, on 13 days; last today 11:37`, then the last five messages, or `no direct message in the last 90 days`). The DM is counted through Slack's search, so a conversation closed in the sidebar counts too. Five people at most, since each costs a search. The note is yours, in `~/.config/slack/people.toml`, a table per person keyed by handle, by the name Slack shows or by user id: `relation`, one of `manager`, `skip-manager`, `exec`, `report`, `peer` and `external`, and a free `note`. `--json` gives the same.
 
 ```toml
 [jane]

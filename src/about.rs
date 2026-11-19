@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use jiff::{Timestamp, ToSpan, Zoned, civil::Date};
 use serde::{Deserialize, Serialize};
 
@@ -65,9 +65,9 @@ pub struct Note {
     pub note: Option<String>,
 }
 
-/// `people.toml`: a table per person, keyed by handle (`[jdoe]`, or
-/// `["@jdoe"]`) or by user id (`[U0123ABCD]`, which survives a change of
-/// handle).
+/// `people.toml`: a table per person, keyed by handle or display name
+/// (`[jdoe]`, or `["@jdoe"]`) or by user id (`[U0123ABCD]`, which
+/// survives a change of handle), whatever the case.
 #[derive(Debug, Default)]
 pub struct Notes(BTreeMap<String, Note>);
 
@@ -89,20 +89,26 @@ impl Notes {
         }
     }
 
-    pub fn parse(text: &str) -> Result<Notes, toml::de::Error> {
+    pub fn parse(text: &str) -> Result<Notes> {
         let raw: BTreeMap<String, Note> = toml::from_str(text)?;
-        Ok(Notes(
-            raw.into_iter()
-                .map(|(key, note)| (key.trim_start_matches('@').to_lowercase(), note))
-                .collect(),
-        ))
+        let mut notes = BTreeMap::new();
+        for (key, note) in raw {
+            let name = key.trim_start_matches('@').to_lowercase();
+            // `[jdoe]` and `["@JDoe"]` are two tables to TOML and one
+            // person here: keeping either would drop the other's note.
+            if notes.insert(name, note).is_some() {
+                bail!("`{key}` names someone another table already names");
+            }
+        }
+        Ok(Notes(notes))
     }
 
-    /// The entry under their id, else under their handle.
-    pub fn of(&self, user: &str, handle: &str) -> Option<&Note> {
-        self.0
-            .get(&user.to_lowercase())
-            .or_else(|| self.0.get(&handle.to_lowercase()))
+    /// The entry under their id, else under their handle, else under the
+    /// name Slack shows, which `@name` takes too.
+    pub fn of(&self, user: &str, handle: &str, display: &str) -> Option<&Note> {
+        [user, handle, display]
+            .iter()
+            .find_map(|key| self.0.get(&key.to_lowercase()))
     }
 }
 
@@ -125,8 +131,7 @@ pub struct Dm {
     pub last: Option<String>,
     /// The newest few, oldest first.
     pub latest: Vec<Message>,
-    /// The DM's id, to render `latest`.
-    #[serde(skip)]
+    /// The DM's id, for the permalinks of `latest`.
     pub channel: Option<String>,
 }
 
@@ -343,33 +348,37 @@ mod tests {
             "#,
         )
         .unwrap();
-        let jdoe = notes.of("U9", "jdoe").unwrap();
+        let jdoe = notes.of("U9", "jdoe", "Jane").unwrap();
         assert_eq!(jdoe.relation, Some(Relation::Manager));
         assert_eq!(
             jdoe.note.as_deref(),
             Some("One summary rather than several messages.")
         );
         assert_eq!(
-            notes.of("U8", "bob").unwrap().relation,
+            notes.of("U8", "bob.smith", "Bob").unwrap().relation,
             Some(Relation::External)
         );
         assert_eq!(
-            notes.of("U0123", "renamed").unwrap().relation,
+            notes.of("U0123", "jdoe", "Jane").unwrap().relation,
             Some(Relation::SkipManager),
             "the id wins over the handle"
         );
-        assert!(notes.of("U7", "someone").is_none());
+        assert!(notes.of("U7", "someone", "Someone").is_none());
     }
 
     #[test]
     fn a_typo_in_the_notes_is_an_error() {
         assert!(Notes::parse("[jdoe]\nrelaton = \"manager\"\n").is_err());
         assert!(Notes::parse("[jdoe]\nrelation = \"boss\"\n").is_err());
+        assert!(
+            Notes::parse("[jdoe]\nnote = \"a\"\n[\"@JDoe\"]\nnote = \"b\"\n").is_err(),
+            "two tables for one person"
+        );
     }
 
     #[test]
     fn a_missing_file_is_no_notes() {
         let notes = Notes::load(Path::new("/nonexistent/people.toml")).unwrap();
-        assert!(notes.of("U1", "jdoe").is_none());
+        assert!(notes.of("U1", "jdoe", "Jane").is_none());
     }
 }

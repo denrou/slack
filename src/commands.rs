@@ -402,16 +402,7 @@ pub fn who(targets: &[String], json: bool) -> Result<()> {
     let mut described: Vec<(directory::Person, Person)> = users
         .iter()
         .map(|id| {
-            let listed = names.user(id).map_or_else(
-                || directory::Person {
-                    id: id.clone(),
-                    handle: id.clone(),
-                    display: id.clone(),
-                    real: String::new(),
-                    title: String::new(),
-                },
-                |user| directory::Person::from_cache(id, user),
-            );
+            let listed = directory::Person::of(id, &names);
             (listed, people.remove(id).unwrap_or_default())
         })
         .collect();
@@ -483,14 +474,17 @@ pub fn about(targets: &[String], json: bool, no_color: bool) -> Result<()> {
     let mut names = Names::load();
     let found = about_people(&client, &mut names, targets).and_then(|users| {
         names.resolve_users(&client, users.clone())?;
-        let handles: Vec<String> = users
+        // An id in place of the handle would search for nothing and read
+        // as "no direct message".
+        let handles = users
             .iter()
             .map(|id| {
                 names
                     .user(id)
-                    .map_or_else(|| id.clone(), |u| u.name.clone())
+                    .map(|user| user.name.clone())
+                    .ok_or_else(|| anyhow!("could not read the handle of {id}"))
             })
-            .collect();
+            .collect::<Result<Vec<String>>>()?;
         let (people, dms) = std::thread::scope(|scope| {
             let people = scope.spawn(|| presence::people(&client, &users));
             let dms = par::map(handles, |handle| about::dm(&client, &handle, &now));
@@ -513,28 +507,17 @@ pub fn about(targets: &[String], json: bool, no_color: bool) -> Result<()> {
         .iter()
         .zip(dms)
         .map(|(id, dm)| {
-            let listed = names.user(id).map_or_else(
-                || directory::Person {
-                    id: id.clone(),
-                    handle: id.clone(),
-                    display: id.clone(),
-                    real: String::new(),
-                    title: String::new(),
-                },
-                |user| directory::Person::from_cache(id, user),
-            );
+            let listed = directory::Person::of(id, &names);
             (listed, people.remove(id).unwrap_or_default(), dm)
         })
         .collect();
-    // Read fresh with the profile; the name cache keeps a title for good.
+    // Read fresh with the profile, since the name cache keeps a title for
+    // good; the cached one only when the profile could not be read.
     let titles: Vec<Option<String>> = cards
         .iter()
-        .map(|(listed, person, _)| {
-            person
-                .profile
-                .as_ref()
-                .and_then(|profile| profile.title.clone())
-                .or_else(|| (!listed.title.is_empty()).then(|| listed.title.clone()))
+        .map(|(listed, person, _)| match &person.profile {
+            Some(profile) => profile.title.clone(),
+            None => (!listed.title.is_empty()).then(|| listed.title.clone()),
         })
         .collect();
     if json {
@@ -542,7 +525,7 @@ pub fn about(targets: &[String], json: bool, no_color: bool) -> Result<()> {
             .iter()
             .zip(&titles)
             .map(|((listed, person, dm), title)| {
-                let note = notes.of(&listed.id, &listed.handle);
+                let note = notes.of(&listed.id, &listed.handle, &listed.display);
                 about::Card {
                     described: person.described(&listed.id, &listed.handle, &listed.display, &now),
                     title: title.as_deref(),
@@ -574,13 +557,17 @@ pub fn about(targets: &[String], json: bool, no_color: bool) -> Result<()> {
             writeln!(out, "{}", head.join("  "))?;
             let (dot, around) = around(person, &style, &now);
             writeln!(out, "  {dot} {around}")?;
-            if let Some(note) = notes.of(&listed.id, &listed.handle) {
-                let words: Vec<&str> = note
-                    .relation
-                    .map(about::Relation::word)
-                    .into_iter()
-                    .chain(note.note.as_deref())
-                    .collect();
+            let words: Vec<&str> = notes
+                .of(&listed.id, &listed.handle, &listed.display)
+                .map(|note| {
+                    note.relation
+                        .map(about::Relation::word)
+                        .into_iter()
+                        .chain(note.note.as_deref().filter(|text| !text.trim().is_empty()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !words.is_empty() {
                 writeln!(out, "  noted: {}", words.join(" · "))?;
             }
             writeln!(out, "  DM: {}", dm.describe(&now))?;
